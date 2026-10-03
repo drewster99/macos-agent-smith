@@ -182,8 +182,13 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
         // Everything is parsed BEFORE anything is written, and the whole edit — criteria and gate —
         // lands in ONE store call, so a refusal anywhere leaves the task exactly as it was. The gate is
         // independent of the criteria/actions mode and may be passed alone.
-        let gateChange = ToolArguments.optionalBool(arguments, "requires_user_acceptance")
-            .map { UserAcceptanceGateChange(requiresUserAcceptance: $0, author: .smith) }
+        let gateChange: UserAcceptanceGateChange?
+        switch ToolArguments.strictOptionalBool(arguments, "requires_user_acceptance") {
+        case .absent: gateChange = nil
+        case .value(let required): gateChange = UserAcceptanceGateChange(requiresUserAcceptance: required, author: .smith)
+        case .malformed(let raw):
+            return .failure("Nothing was changed — requires_user_acceptance must be a JSON boolean (true or false), not \(raw).")
+        }
         // Empty reads as absent, so a caller that sends BOTH keys as `[]` gets the "pass one of
         // them" guidance rather than the "exactly one" refusal for two arguments it never meant.
         let rawCriteria = ToolArguments.optionalArray(arguments, "criteria")

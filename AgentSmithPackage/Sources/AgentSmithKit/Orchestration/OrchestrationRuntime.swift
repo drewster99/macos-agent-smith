@@ -4768,11 +4768,15 @@ public actor OrchestrationRuntime {
             case .userAcceptanceRequestedValidationSkipped?:
                 judgment = "acceptance validation was switched off, so its criteria were NOT judged"
             case .userAcceptanceRequested?, .validatorError?, nil:
-                judgment = "its acceptance criteria passed validation"
+                // "Passed" only while every CURRENT criterion is settled: the contract stays editable
+                // in the park, and a criterion added since was never judged.
+                judgment = task.isAwaitingOnlyUserSignOff
+                    ? "its acceptance criteria passed validation"
+                    : "its acceptance criteria changed after it parked, so not every criterion has been judged"
             }
-            // A park from a build that didn't record its start can't be relayed (no reply can be shown
-            // to postdate it); say so rather than let Smith offer a relay the tool will refuse.
-            let rowOnly = task.awaitingReviewParkedAt == nil ? "; the user must decide this one from the task row" : ""
+            // The same predicate the relay tool authorizes by: a park it would refuse (unstamped, or
+            // with an unjudged criterion) is the user's to decide from the task row.
+            let rowOnly = task.relayableSignOffPark == nil ? "; the user must decide this one from the task row" : ""
             return "- \(task.title) (id: \(task.id.uuidString)) — \(judgment)\(rowOnly)"
         }.joined(separator: "\n")
         return """

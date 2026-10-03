@@ -97,6 +97,40 @@ enum ToolArguments {
         return value
     }
 
+    /// How an optional bool argument read, when reading a wrong-typed value as absent is unsafe.
+    ///
+    /// Three outcomes for the same reason as `OptionalUUID`: a switch that is irreversible once
+    /// acted on (`create_task`'s `requires_user_acceptance` — the task may start at once, after which
+    /// the gate can't change) must refuse `"yes"` rather than silently run as if it were `false`.
+    enum OptionalBool: Equatable {
+        /// Not supplied — absent, null, or a blank-string placeholder.
+        case absent
+        case value(Bool)
+        /// Supplied as something other than a bool. Carries a rendering for the error.
+        case malformed(String)
+    }
+
+    /// A bool argument whose wrong-typed value must be refused, not dropped. A JSON bool reads as
+    /// itself; the strings `"true"`/`"false"` (any case) read as the bool they spell, since a model
+    /// that quotes a bool means that bool. See `OptionalBool`.
+    static func strictOptionalBool(_ arguments: [String: AnyCodable], _ key: String) -> OptionalBool {
+        switch arguments[key] {
+        case nil, .null?:
+            return .absent
+        case .bool(let value)?:
+            return .value(value)
+        case .string(let raw)?:
+            switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "": return .absent
+            case "true": return .value(true)
+            case "false": return .value(false)
+            default: return .malformed("\"\(raw)\"")
+            }
+        case let other?:
+            return .malformed(String(describing: other))
+        }
+    }
+
     /// An integer, or `nil` when the argument is absent, null, or not numeric.
     ///
     /// Accepts a `.double` that is exactly integral, because a JSON number that arrives as `5.0`

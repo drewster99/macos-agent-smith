@@ -887,7 +887,7 @@ private struct TaskDetailAcceptanceSection: View {
                 TaskDetailEditableSectionHeader(
                     title: "Acceptance", subtitle: settledSubtitle,
                     copyText: task.acceptanceCriteria.isEmpty ? nil : Self.formattedAcceptance(task),
-                    canEdit: task.status.isValidationContractEditable && !isEditing,
+                    canEdit: task.disposition == .active && task.status.isValidationContractEditable && !isEditing,
                     editHelp: "Edit acceptance criteria", onEdit: beginEditing
                 )
                 TaskDetailUserAcceptanceGate(task: task, viewModel: viewModel)

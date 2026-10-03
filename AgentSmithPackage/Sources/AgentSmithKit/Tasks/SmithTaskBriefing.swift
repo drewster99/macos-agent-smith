@@ -56,7 +56,9 @@ public enum SmithTaskBriefing {
         case .userAccepted:
             return completionBriefing(
                 subject: subject,
-                completionNote: "is COMPLETE — the user accepted it from review after acceptance validation could not judge it"
+                // An OVERRIDE: at least one criterion was unsettled — a validator could not judge it, or
+                // the criteria changed after a sign-off park — so the note claims neither cause.
+                completionNote: "is COMPLETE — the user accepted it from review, overriding acceptance validation (at least one criterion had not been settled by a validator)"
             )
         case .validationFailedNoProgress(let rounds, let stillRejected):
             let reason = noProgressReason(roundsWithoutNewApprovals: rounds, stillRejected: stillRejected)

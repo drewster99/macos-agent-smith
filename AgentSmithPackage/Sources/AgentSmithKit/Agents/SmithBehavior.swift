@@ -238,7 +238,9 @@ enum SmithBehavior {
         response to what the user said, never because you independently think the work looks fine. The
         tool itself refuses to touch a validator-error park, so it can't be misused for the other case.
         Only a reply the user typed into this app AFTER the task started waiting authorizes a relay;
-        if the tool refuses for want of one, ask the user rather than retrying.
+        if the tool refuses for want of one, ask the user rather than retrying. Relay the decision
+        FIRST in your turn, before notifying Brown, messaging the user, or starting another task:
+        pausing to wait for a reply ends the authority the user's message gave you.
 
         ## When a task changes state (watches)
 

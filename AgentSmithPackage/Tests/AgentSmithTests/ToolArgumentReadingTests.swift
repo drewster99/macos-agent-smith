@@ -47,6 +47,26 @@ struct ToolArgumentReadingTests {
         #expect(ToolArguments.optionalBool(["k": .string("true")], "k") == nil)
     }
 
+    /// Where reading a wrong-typed value as absent is unsafe, the strict reader says it was malformed.
+    @Test("strictOptionalBool tells absent, value, and malformed apart")
+    func strictOptionalBoolThreeOutcomes() {
+        #expect(ToolArguments.strictOptionalBool([:], "k") == .absent)
+        #expect(ToolArguments.strictOptionalBool(["k": .null], "k") == .absent)
+        #expect(ToolArguments.strictOptionalBool(["k": .string("  ")], "k") == .absent)
+        #expect(ToolArguments.strictOptionalBool(["k": .bool(false)], "k") == .value(false))
+        #expect(ToolArguments.strictOptionalBool(["k": .bool(true)], "k") == .value(true))
+        #expect(ToolArguments.strictOptionalBool(["k": .string("TRUE")], "k") == .value(true))
+        #expect(ToolArguments.strictOptionalBool(["k": .string("false")], "k") == .value(false))
+        guard case .malformed = ToolArguments.strictOptionalBool(["k": .string("yes")], "k") else {
+            Issue.record("\"yes\" must read as malformed")
+            return
+        }
+        guard case .malformed = ToolArguments.strictOptionalBool(["k": .int(1)], "k") else {
+            Issue.record("1 must read as malformed")
+            return
+        }
+    }
+
     // MARK: Optional UUIDs
 
     @Test("A real UUID reads as a value")

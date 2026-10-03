@@ -219,6 +219,29 @@ struct AcceptanceContractEditTests {
         #expect(tasks.first { $0.title == "Plain" }?.requiresUserAcceptance == false)
     }
 
+    /// A gate that can't be changed once the task starts must not be silently read as "off" from a
+    /// value that isn't a bool — the task would start ungated with no way back.
+    @Test("create_task refuses a non-boolean gate or template flag and creates nothing")
+    func createTaskRefusesMalformedSwitches() async throws {
+        let store = TaskStore()
+        let context = TestToolContext.make(agentRole: .smith, taskStore: store)
+        let badGate = try await CreateTaskTool().execute(arguments: [
+            "title": .string("Bad gate"), "description": .string("d"), "requires_user_acceptance": .string("yes")
+        ], context: context)
+        #expect(!badGate.succeeded)
+        let badTemplate = try await CreateTaskTool().execute(arguments: [
+            "title": .string("Bad template"), "description": .string("d"), "is_template": .int(1)
+        ], context: context)
+        #expect(!badTemplate.succeeded)
+        let quoted = try await CreateTaskTool().execute(arguments: [
+            "title": .string("Quoted"), "description": .string("d"), "requires_user_acceptance": .string("true")
+        ], context: context)
+        #expect(quoted.succeeded)
+        let tasks = await store.allTasks()
+        #expect(!tasks.contains { $0.title == "Bad gate" || $0.title == "Bad template" })
+        #expect(tasks.first { $0.title == "Quoted" }?.requiresUserAcceptance == true)
+    }
+
     @Test("get_task_details shows the gate, and the park reason only while parked")
     func taskDetailsShowGate() async throws {
         let store = TaskStore()

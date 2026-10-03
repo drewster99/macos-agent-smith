@@ -324,10 +324,23 @@ public struct CreateTaskTool: AgentTool {
             }
         }
 
-        var isTemplate = false
-        if case .bool(let flag) = arguments["is_template"] { isTemplate = flag }
-        // Absent means the documented default (no sign-off gate).
-        let requiresUserAcceptance = ToolArguments.optionalBool(arguments, "requires_user_acceptance") ?? false
+        // Both switches decide something a later call can't undo (a non-template task may start at
+        // once, after which neither can change), so a value that isn't a bool is refused rather than
+        // read as false. Absent means the documented default.
+        let isTemplate: Bool
+        switch ToolArguments.strictOptionalBool(arguments, "is_template") {
+        case .absent: isTemplate = false
+        case .value(let flag): isTemplate = flag
+        case .malformed(let raw):
+            return .failure("Task NOT created — is_template must be a JSON boolean (true or false), not \(raw). Fix it and call create_task again.")
+        }
+        let requiresUserAcceptance: Bool
+        switch ToolArguments.strictOptionalBool(arguments, "requires_user_acceptance") {
+        case .absent: requiresUserAcceptance = false
+        case .value(let flag): requiresUserAcceptance = flag
+        case .malformed(let raw):
+            return .failure("Task NOT created — requires_user_acceptance must be a JSON boolean (true or false), not \(raw). Fix it and call create_task again.")
+        }
         let templateInputDefinitions: [TemplateInputDefinition]
         // An EMPTY array defines no inputs, which is what omitting the key means — so it must not
         // trip the is_template guard below. Matching on presence made this an inescapable dead

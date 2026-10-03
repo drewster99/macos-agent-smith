@@ -251,6 +251,25 @@ struct UserAcceptanceParkTests {
         #expect(OrchestrationRuntime.userAcceptanceParkInstruction(for: [unstamped]).contains("must decide this one from the task row"))
     }
 
+    /// A criterion added after the park was never judged: the note must not call the criteria passed,
+    /// and must send the user to the task row, because the relay tool would refuse.
+    @Test("The cold-launch note never says 'passed' for a park whose contract changed")
+    func launchInstructionFlagsChangedContract() async throws {
+        let store = TaskStore()
+        let (task, _) = try await validatingTask(store)
+        #expect(await park(store, task.id, .userAcceptanceRequested))
+        let added = CriterionAction.add(name: "also this", validationPrompt: "check it", inputEnumeratorPrompt: nil,
+                                        waivable: false, origin: .smith)
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [added]) == nil)
+        let changed = try #require(await store.task(id: task.id))
+        #expect(changed.isParkedForUserAcceptance)
+        #expect(!changed.isAwaitingOnlyUserSignOff)
+        let note = OrchestrationRuntime.userAcceptanceParkInstruction(for: [changed])
+        #expect(!note.contains("passed validation"))
+        #expect(note.contains("not every criterion has been judged"))
+        #expect(note.contains("must decide this one from the task row"))
+    }
+
     @Test("A sign-off park fires 'needs review', and its notification says what it is waiting for")
     func watchesTellParksApart() {
         let signOff = TaskStatusTransition(taskID: UUID(), statusRevision: 2, from: .validating, to: .awaitingReview,

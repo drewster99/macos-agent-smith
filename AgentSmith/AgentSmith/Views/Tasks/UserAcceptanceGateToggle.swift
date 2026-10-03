@@ -25,6 +25,11 @@ struct UserAcceptanceGateToggle: View {
     /// store enforces (`TaskStore.editAcceptanceContract`), so a locked control never disagrees with
     /// a refusal.
     static func lockedReason(for task: AgentTask) -> String? {
+        // An archived or recently-deleted task lives outside the store's writable sets, so every edit
+        // would be refused with "Task not found".
+        guard task.disposition == .active else {
+            return "Restore this task to change its sign-off gate."
+        }
         if task.isParkedForUserAcceptance {
             return "This task is waiting on your sign-off now — accept it or send it back from its row in the task list."
         }
