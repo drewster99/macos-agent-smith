@@ -28,16 +28,6 @@ struct GetAppScriptingSchemaTool: AgentTool {
           - `?` after a parameter name indicates it is optional
         """
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                BrownBehavior.approvalGateNote(outcome: "the app's scripting schema as text")
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

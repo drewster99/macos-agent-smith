@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftLLMKit
 @testable import AgentSmithKit
 
 /// The agent-facing surface of the validation system: Brown's `manage_steps`, Smith's
@@ -116,6 +117,22 @@ struct ValidationAgentSurfaceTests {
         #expect(!actionEnum(for: .brown).contains("purge"), "the worker must not be offered a traceless delete")
         #expect(tool.description(for: .smith).contains("purge"))
         #expect(!tool.description(for: .brown).contains("purge"))
+
+        // What the agents actually receive is built through `any AgentTool`. The role hooks were once
+        // extension-only, so this path silently ignored the overrides above — Smith never saw purge.
+        let erased: any AgentTool = tool
+        func offeredActions(_ definition: LLMToolDefinition) -> [String] {
+            guard case .dictionary(let properties)? = definition.parameters["properties"],
+                  case .dictionary(let action)? = properties["action"],
+                  case .array(let values)? = action["enum"] else { return [] }
+            return values.compactMap { if case .string(let s) = $0 { return s }; return nil }
+        }
+        let smithContext = ToolAvailabilityContext(agentRole: .smith)
+        let brownContext = ToolAvailabilityContext(agentRole: .brown)
+        #expect(offeredActions(erased.definition(for: .smith, in: smithContext)).contains("purge"))
+        #expect(erased.definition(for: .smith, in: smithContext).description.contains("purge"))
+        #expect(!offeredActions(erased.definition(for: .brown, in: brownContext)).contains("purge"))
+        #expect(!erased.definition(for: .brown, in: brownContext).description.contains("purge"))
 
         // Even if the worker guesses the action name, the runtime refuses it.
         let taskStore = TaskStore()

@@ -69,16 +69,6 @@ final class GlobTool: AgentTool {
         + FilesystemSearch.pruneSummary
     }
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                   BrownBehavior.approvalGateNote(outcome: "the JSON result")
-        default:
-            return toolDescription
-        }
-    }
-
     var parameters: [String: AnyCodable] {
         [
             "type": .string("object"),

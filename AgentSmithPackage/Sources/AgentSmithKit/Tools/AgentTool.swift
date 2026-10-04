@@ -101,6 +101,16 @@ public protocol AgentTool: Sendable {
     /// Default is `true`. Override to conditionally hide tools based on context.
     func isAvailable(in context: ToolAvailabilityContext) -> Bool
 
+    /// The description presented to an agent of `role`. Defaults to `toolDescription`.
+    ///
+    /// A protocol REQUIREMENT, like `parameters(for:)` below, so an override dispatches through
+    /// `any AgentTool`. They were extension-only helpers from 2026-03 to 2026-10: every override was
+    /// statically bypassed, so `manage_steps` never showed Smith its `purge` action.
+    func description(for role: AgentRole) -> String
+
+    /// The parameter schema presented to an agent of `role`. Defaults to `parameters`.
+    func parameters(for role: AgentRole) -> [String: AnyCodable]
+
     /// The definition offered to the LLM THIS turn. Defaults to `definition(for:)`; override when an
     /// option must leave the tool while the situation makes it unusable (e.g. `update_task` drops
     /// `completed` while a task is being validated), so the model is never offered a move the
@@ -217,14 +227,12 @@ extension AgentTool {
         return collapsed
     }
 
-    /// Returns the description to present to the LLM for a given agent role.
-    /// Defaults to `toolDescription`. Override to provide role-specific instructions.
+    /// Default: the same description for every role.
     public func description(for role: AgentRole) -> String {
         toolDescription
     }
 
-    /// Returns the parameters schema to present to the LLM for a given agent role.
-    /// Defaults to `parameters`. Override to provide role-specific parameter descriptions.
+    /// Default: the same parameter schema for every role.
     public func parameters(for role: AgentRole) -> [String: AnyCodable] {
         parameters
     }

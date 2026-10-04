@@ -13,15 +13,6 @@ struct DirectoryTreeTool: AgentTool {
         "Show the directory structure (folders only) under `path`, as a box-drawing tree to `max_depth` (default 3, max 6). " + FilesystemSearch.pruneSummary + " Annotates each non-expanded leaf with a file count, `(pruned ...)`, or `(raise max_depth to expand)`. Use `directory_listing` to see files in a specific directory, or `glob` to find files by pattern."
     }
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " + BrownBehavior.approvalGateNote(outcome: "a directory tree")
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

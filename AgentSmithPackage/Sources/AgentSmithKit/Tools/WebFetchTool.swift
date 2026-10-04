@@ -75,15 +75,6 @@ struct WebFetchTool: AgentTool {
         """
     }
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " + BrownBehavior.approvalGateNote(outcome: "the page content (or your extracted answer)")
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

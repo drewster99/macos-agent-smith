@@ -3,16 +3,7 @@ import Foundation
 /// Allows Smith to terminate the live Brown worker assigned to a task.
 struct TerminateAgentTool: AgentTool {
     let name = "terminate_agent"
-    let toolDescription = "Terminate the running Brown worker assigned to a task."
-
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .smith:
-            return "Terminate the running Brown worker assigned to a task, using the task ID."
-        default:
-            return toolDescription
-        }
-    }
+    let toolDescription = "Terminate the running Brown worker assigned to a task, using the task ID."
 
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),

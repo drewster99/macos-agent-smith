@@ -54,17 +54,6 @@ struct RunAppleScriptTool: AgentTool {
           end timeout` if you need a wall-clock cap — there is no separate timeout argument.
         """
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                BrownBehavior.approvalGateNote(outcome: "the structured AppleScript result JSON") +
-                BrownBehavior.terminationWarning
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

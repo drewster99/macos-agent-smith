@@ -26,16 +26,6 @@ struct ListScriptableAppsTool: AgentTool {
         Bundle IDs are the most reliable identifier — prefer them over names when calling other tools.
         """
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                BrownBehavior.approvalGateNote(outcome: "the app list")
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

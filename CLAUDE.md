@@ -175,6 +175,8 @@ Four guard tests in `ChannelMessageKindTests.swift` enforce all of this: wire st
 3. If it touches files, integrate with the per-agent `FileReadTracker` (FileEditTool requires a prior FileReadTool call on the same path).
 4. If it's a destructive/side-effecting tool, expect `SecurityEvaluator` (Security Agent) to gate the call.
 
+**Varying what a tool shows an agent.** Per role: override `description(for:)` / `parameters(for:)` (today only `manage_steps`, which shows `purge` to Smith alone). Per turn: override `definition(for:in:)` (today only `update_task`, which drops `completed` while a task is validating). All three are PROTOCOL REQUIREMENTS on purpose — an extension-only helper is statically dispatched through `any AgentTool`, so every override is silently ignored. That is exactly what happened from 2026-03 to 2026-10: Smith never saw `purge`, and fifteen Brown-only "security review" description suffixes never reached Brown (deleted 2026-10-04 as redundant with, and less accurate than, Brown's system prompt). Test an override through `any AgentTool`, not the concrete type.
+
 Brown's `BashTool` shells out via `/bin/bash -c` (sources the user profile — full PATH). There is no separate `shell` tool anymore.
 
 ### Acceptance validation (replaces Smith's routine review)

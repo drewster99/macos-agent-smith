@@ -5,17 +5,6 @@ struct FileWriteTool: AgentTool {
     let name = "file_write"
     let toolDescription = "Write content to a file at the given absolute path. Creates new files freely. To overwrite an existing file, you must have read it first with file_read. Requires absolute paths (starting with / or ~/). Blocks writes to sensitive system paths and hard-linked files."
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                   BrownBehavior.approvalGateNote(outcome: "a success confirmation") +
-                   BrownBehavior.terminationWarning
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

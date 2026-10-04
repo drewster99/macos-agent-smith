@@ -12,15 +12,6 @@ struct DirectoryListingTool: AgentTool {
         "List the entries in `path` — every file and folder at that one level, with type, size, and mtime. No recursion. Optional basename glob `filter` (e.g. `*.swift`), `sort` (mtime/name), `limit` (default 50, max 200), `offset` (for paging past the cap), and `show_hidden_files` (default false). Use `directory_tree` for a recursive shape view, or `glob` to find files by pattern."
     }
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " + BrownBehavior.approvalGateNote(outcome: "the directory listing")
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

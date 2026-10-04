@@ -252,17 +252,6 @@ struct GhTool: AgentTool {
         """
     }
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                BrownBehavior.approvalGateNote(outcome: "the gh command output") +
-                BrownBehavior.terminationWarning
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

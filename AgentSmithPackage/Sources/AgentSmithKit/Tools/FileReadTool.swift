@@ -11,16 +11,6 @@ struct FileReadTool: AgentTool {
     let name = "file_read"
     let toolDescription = "Read the contents of a file. Text files are returned with line numbers in `cat -n` format, which means each line of text starts with a line number, padded on the left to 6 characters, followed by two spaces, and then the line's content. Supports PDF files via a pages parameter. Returns metadata ONLY for images and binary files. To read only part of a file — for example a range of lines around a known location in a large file — pass `startingLineNum` and `maxLines` (e.g. startingLineNum: 4900, maxLines: 200 to see the lines around line 5000). Before invoking `file_read`, consider if there are other files you will wish to read as well. If so, read them all in parallel by issuing multiple `file_read` calls in a single response."
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                   BrownBehavior.approvalGateNote(outcome: "the file contents")
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

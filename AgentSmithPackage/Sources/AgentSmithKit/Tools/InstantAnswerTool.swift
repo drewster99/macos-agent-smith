@@ -35,15 +35,6 @@ struct InstantAnswerTool: AgentTool {
         """
     }
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " + BrownBehavior.approvalGateNote(outcome: "the instant-answer summary")
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

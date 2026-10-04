@@ -8,17 +8,6 @@ struct FileEditTool: AgentTool {
     let name = "file_edit"
     let toolDescription = "Perform an EXACT string replacement in a file. The `old_string` must match EXACTLY, including all whitespace, and be unique in the file unless `replace_all` is `true`. Lines from text files returned by `file_read` are each returned with a line number followed by two spaces. Those two spaces MUST NOT be included as part of `old_string`."
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                   BrownBehavior.approvalGateNote(outcome: "a success confirmation") +
-                   BrownBehavior.terminationWarning
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([

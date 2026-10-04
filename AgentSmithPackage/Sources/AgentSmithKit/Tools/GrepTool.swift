@@ -8,16 +8,6 @@ struct GrepTool: AgentTool {
     let name = "grep"
     let toolDescription = "Search file contents for lines matching a regex `pattern`. `path` may be a directory (searched recursively) OR a single file. Returns matching file paths by default, or matching lines in file:line:content format. Supports glob-based file filtering when searching a directory. Use instead of grep or rg bash commands for content search. Result limits are caller-configurable: `max_file_count` (default \(GrepTool.defaultMaxFileMatches)), `max_line_count` (default \(GrepTool.defaultMaxContentLines)), `max_file_size_mb` (default \(GrepTool.defaultMaxFileSizeMB)); files over the size limit are skipped and their count is reported so matches are never silently missed."
 
-    public func description(for role: AgentRole) -> String {
-        switch role {
-        case .brown:
-            return toolDescription + " " +
-                   BrownBehavior.approvalGateNote(outcome: "matching file paths or content lines")
-        default:
-            return toolDescription
-        }
-    }
-
     let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary([
