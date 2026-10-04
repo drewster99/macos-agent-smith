@@ -428,9 +428,10 @@ struct TaskValidationCoordinatorTests {
         #expect(final.updates.contains { $0.message.contains("had passed validation") })
     }
 
-    @Test("A criterion added after a sign-off park: Smith's relay is refused; the user's Accept overrides it")
-    func criteriaChangedAfterParkRefusesRelay() async throws {
-        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+    @Test("A criterion added to a sign-off park is judged, then the task asks for sign-off again")
+    func criteriaChangedAfterParkRevalidates() async throws {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT", "ACCEPT"])
+        await runtime.start()   // installs the task-event consumer that starts the re-validation
         let task = await makeSubmittedTask(
             on: runtime,
             criteria: [AcceptanceCriterion(name: "must work", validationPrompt: "it works", origin: .user)],
@@ -438,16 +439,19 @@ struct TaskValidationCoordinatorTests {
         )
         await runtime.startTaskValidation(taskID: task.id)
         _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        let firstPark = try #require(await runtime.taskStore.task(id: task.id)?.relayableSignOffPark)
         #expect(await runtime.taskStore.applyCriterionActions(taskID: task.id, actions: [
             .add(name: "and this", validationPrompt: "check", inputEnumeratorPrompt: nil, waivable: false, origin: .smith)
         ]) == nil)
-        let relay = await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: true, feedback: nil, authorizedBy: await userReplyAfterPark(on: runtime, taskID: task.id))
-        #expect(!relay.succeeded)
-        #expect(await runtime.taskStore.task(id: task.id)?.status == .awaitingReview)
-        await runtime.acceptEscalatedTask(taskID: task.id)
-        let final = try #require(await runtime.taskStore.task(id: task.id))
-        #expect(final.status == .completed)
-        #expect(final.validation?.verdictRecords.contains { $0.validatorName == "user override" } == true)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+        let reparked = try #require(await runtime.taskStore.task(id: task.id))
+        #expect(reparked.status == .awaitingReview)
+        #expect(reparked.awaitingReviewReason == .userAcceptanceRequested)
+        #expect(reparked.isAwaitingOnlyUserSignOff, "both criteria judged before asking again")
+        // A reply to the FIRST park cannot resolve the new one.
+        #expect(reparked.relayableSignOffPark != firstPark)
+        #expect(!reparked.admitsEscalationResolution(by: .smithRelayingUser(park: firstPark)))
+        await runtime.stopAll()
     }
 
     // MARK: - Round-outcome telemetry

@@ -1442,6 +1442,12 @@ public actor OrchestrationRuntime {
     private func react(to event: TaskStoreEvent, scheduler: WakeScheduler) async {
         switch event {
         case .transition(let transition):
+            // A criteria edit sent a sign-off park back to validation in the same write as the edit
+            // (`TaskStore.editAcceptanceContract`); the run itself is the runtime's to start.
+            if transition.cause == .signOffContractChanged {
+                startTaskValidation(taskID: transition.taskID)
+                return
+            }
             // First entry into completed/failed: cancel the task's wakes, then fill the freed slot —
             // a deferred scheduled run first (a commitment, independent of auto-advance), else the
             // oldest pending task (gated on auto-advance). Task boundaries are also the long-lived

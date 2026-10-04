@@ -37,6 +37,35 @@ struct UpdateTaskTool: AgentTool {
         context.agentRole == .smith
     }
 
+    /// While any task is being validated, `completed` leaves the status choices: completing a
+    /// validating task skips the judgment and is refused (`UpdateTaskStatusPolicy.permits`), so it is
+    /// not offered. The definition is per tool, not per task, so this holds for every task that turn.
+    public func definition(for role: AgentRole, in context: ToolAvailabilityContext) -> LLMToolDefinition {
+        let full = definition(for: role)
+        guard context.hasTasksInValidation else { return full }
+        return LLMToolDefinition(name: full.name, description: full.description,
+                                 parameters: Self.parametersWithoutCompleted)
+    }
+
+    /// `parameters` with `completed` removed from the `status` choices — derived from the one schema,
+    /// so the two can never disagree about anything else.
+    static let parametersWithoutCompleted: [String: AnyCodable] = {
+        var schema = UpdateTaskTool().parameters
+        guard case .dictionary(var properties)? = schema["properties"],
+              case .dictionary(var status)? = properties["status"],
+              case .array(let choices)? = status["enum"] else {
+            preconditionFailure("update_task's schema no longer has a status enum")
+        }
+        status["enum"] = .array(choices.filter { choice in
+            if case .string("completed") = choice { return false }
+            return true
+        })
+        status["description"] = .string("The new status for the task: pending, paused, interrupted, or failed. `completed` is not offered while a task is in acceptance validation — validation finishes it. `running` is NOT settable here — use `run_task`. `awaitingReview` and `validating` are reserved. Optional when `is_template` is provided.")
+        properties["status"] = .dictionary(status)
+        schema["properties"] = .dictionary(properties)
+        return schema
+    }()
+
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         guard case .string(let taskIDString) = arguments["task_id"] else {
             throw ToolCallError.missingRequiredArgument("task_id")
@@ -51,6 +80,9 @@ struct UpdateTaskTool: AgentTool {
         let requestedStatus = ToolArguments.optionalString(arguments, "status").flatMap(AgentTask.Status.init(rawValue:))
         if requestedStatus == .completed, existing.requiresUserAcceptance {
             return .failure("Task \(taskIDString) requires the user's own acceptance, so update_task cannot complete it. It completes only when the user accepts it — from the task row, or by telling you, after which you relay it with `respond_to_user_acceptance` once it is waiting for their sign-off.")
+        }
+        if requestedStatus == .completed, existing.status == .validating {
+            return .failure("Task \(taskIDString) is being judged by acceptance validation, so update_task cannot complete it — validation completes it (or parks it for review) when it finishes. To stop it instead, set it to `paused`, `interrupted`, or `failed`.")
         }
         if requestedStatus != nil, existing.status == .awaitingReview {
             return .failure("Task \(taskIDString) is parked awaiting review. That park is resolved by the user from the task row (or, for a sign-off they gave you in chat, `respond_to_user_acceptance`) — update_task cannot move it.")

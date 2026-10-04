@@ -101,6 +101,12 @@ public protocol AgentTool: Sendable {
     /// Default is `true`. Override to conditionally hide tools based on context.
     func isAvailable(in context: ToolAvailabilityContext) -> Bool
 
+    /// The definition offered to the LLM THIS turn. Defaults to `definition(for:)`; override when an
+    /// option must leave the tool while the situation makes it unusable (e.g. `update_task` drops
+    /// `completed` while a task is being validated), so the model is never offered a move the
+    /// runtime would refuse. A protocol requirement so the override dispatches through `any AgentTool`.
+    func definition(for role: AgentRole, in context: ToolAvailabilityContext) -> LLMToolDefinition
+
     /// Maximum wall-clock time a single invocation of this tool may take. After this
     /// `AgentActor` cancels the tool's task and synthesizes a "Tool execution exceeded N s —
     /// cancelled" result for the LLM. Default is 120 s. Tools that legitimately need longer
@@ -148,24 +154,34 @@ public struct ToolAvailabilityContext: Sendable {
     /// Whether any active task is parked waiting only on the user's sign-off, with a known park start
     /// (`AgentTask.relayableSignOffPark`) — gates `respond_to_user_acceptance`.
     public let hasTasksAwaitingUserSignOff: Bool
+    /// Whether any active task is being judged by acceptance validation right now — removes
+    /// `completed` from `update_task`'s choices, since completing a validating task is refused.
+    public let hasTasksInValidation: Bool
     public init(
         lastDirectUserMessageAt: Date? = nil,
         agentRole: AgentRole,
         hasRunnableTasks: Bool = false,
         hasAwaitingReviewTasks: Bool = false,
-        hasTasksAwaitingUserSignOff: Bool = false
+        hasTasksAwaitingUserSignOff: Bool = false,
+        hasTasksInValidation: Bool = false
     ) {
         self.lastDirectUserMessageAt = lastDirectUserMessageAt
         self.agentRole = agentRole
         self.hasRunnableTasks = hasRunnableTasks
         self.hasAwaitingReviewTasks = hasAwaitingReviewTasks
         self.hasTasksAwaitingUserSignOff = hasTasksAwaitingUserSignOff
+        self.hasTasksInValidation = hasTasksInValidation
     }
 }
 
 extension AgentTool {
     /// Default: tool is always available.
     public func isAvailable(in context: ToolAvailabilityContext) -> Bool { true }
+
+    /// Default: the same definition every turn.
+    public func definition(for role: AgentRole, in context: ToolAvailabilityContext) -> LLMToolDefinition {
+        definition(for: role)
+    }
 
     /// Default: no run-loop-visible effects. Most tools read or compute and the loop carries on.
     public var successEffects: Set<ToolEffect> { [] }

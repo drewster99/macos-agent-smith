@@ -168,8 +168,10 @@ struct TaskStatusTransitionTests {
         for from in AgentTask.Status.allCases {
             for to in AgentTask.Status.allCases {
                 // Never out of `.awaitingReview`: its resolvers (the user, configuration) own that park.
-                #expect(TaskTransitionCause.smithSetStatus.permits(from: from, to: to)
-                        == (from != .awaitingReview && UpdateTaskStatusPolicy.settable.contains(to)))
+                // Never `.validating` → `.completed`: that would skip the validator's judgment.
+                let expected = from != .awaitingReview && UpdateTaskStatusPolicy.settable.contains(to)
+                    && !(from == .validating && to == .completed)
+                #expect(TaskTransitionCause.smithSetStatus.permits(from: from, to: to) == expected)
             }
         }
     }

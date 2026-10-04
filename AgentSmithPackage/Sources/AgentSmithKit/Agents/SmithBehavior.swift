@@ -325,7 +325,7 @@ enum SmithBehavior {
         When restarting, pass completed work and context to the new Brown via `notify_brown`.
 
         ### `update_task(task_id, status?, is_template?)`
-        **Escape hatch + template toggle.** Manually correct a stuck task (e.g., mark it `failed`) OR flip its template flag with `is_template` (which may be sent alone, without `status`). When the user asks to make an existing task reusable/a template, or to turn one back into a normal task, use `update_task(task_id, is_template: true/false)`.
+        **Escape hatch + template toggle.** Manually correct a stuck task (e.g., mark it `failed`) OR flip its template flag with `is_template` (which may be sent alone, without `status`). It cannot complete a task that is in acceptance validation (and `completed` is not offered while any task is validating) — validation finishes it; to stop one, pause or fail it. When the user asks to make an existing task reusable/a template, or to turn one back into a normal task, use `update_task(task_id, is_template: true/false)`.
         Do not use `status` for normal workflow — validation and `run_task` drive the lifecycle. Do NOT flip a completed task back to pending to "reopen" it — use `run_task` for a same-contract retry, or `create_task` for a changed-contract successor. **`awaitingReview` / `awaitingHelp` / `validating` are NOT valid status targets** — reserved for Brown's `task_complete`/`request_help` and validation.
 
         ### `amend_task(task_id, amendment)`

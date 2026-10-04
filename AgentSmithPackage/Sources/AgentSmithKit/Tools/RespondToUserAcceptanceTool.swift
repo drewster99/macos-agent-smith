@@ -53,8 +53,8 @@ public struct RespondToUserAcceptanceTool: AgentTool {
             call this FIRST, before any other tool that messages anyone or starts work: the authority \
             their message gives lapses once you pause to wait for a reply. This tool refuses to act on any task that \
             isn't actually parked for user acceptance, including a validator-error escalation — that one \
-            can only be resolved by the user directly from the task row, never by you — and a sign-off \
-            park whose criteria you changed after it parked.
+            can only be resolved by the user directly from the task row, never by you. (Changing a \
+            waiting task's criteria sends it back to validation; it asks for sign-off again afterwards.)
             """
     }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftLLMKit
 @testable import AgentSmithKit
 
 /// The acceptance contract's single writer (`TaskStore.editAcceptanceContract`): criteria and the
@@ -221,6 +222,43 @@ struct AcceptanceContractEditTests {
 
     /// A gate that can't be changed once the task starts must not be silently read as "off" from a
     /// value that isn't a bool — the task would start ungated with no way back.
+    /// While any task is being validated, `completed` leaves update_task's choices — and the call is
+    /// refused for a validating task regardless (the store refuses it too).
+    @Test("update_task offers no 'completed' while a task is validating, and refuses it for that task")
+    func updateTaskWithholdsCompletedDuringValidation() async throws {
+        let tool = UpdateTaskTool()
+        func statusChoices(_ definition: LLMToolDefinition) -> [String] {
+            guard case .dictionary(let properties)? = definition.parameters["properties"],
+                  case .dictionary(let status)? = properties["status"],
+                  case .array(let choices)? = status["enum"] else { return [] }
+            return choices.compactMap { if case .string(let s) = $0 { return s } else { return nil } }
+        }
+        let calm = tool.definition(for: .smith, in: ToolAvailabilityContext(agentRole: .smith))
+        let validating = tool.definition(for: .smith, in: ToolAvailabilityContext(agentRole: .smith, hasTasksInValidation: true))
+        #expect(statusChoices(calm).contains("completed"))
+        #expect(!statusChoices(validating).contains("completed"))
+        #expect(statusChoices(validating) == ["pending", "paused", "interrupted", "failed"])
+        // Through `any AgentTool`, the override must still win (it is a protocol requirement).
+        let erased: any AgentTool = tool
+        #expect(!statusChoices(erased.definition(for: .smith, in: ToolAvailabilityContext(agentRole: .smith, hasTasksInValidation: true))).contains("completed"))
+
+        let store = TaskStore()
+        let task = await store.addTask(title: "Judged", description: "d")
+        await store.setResult(id: task.id, result: "r", commentary: nil, attachments: [])
+        #expect(await store.driveStatus(id: task.id, to: .validating))
+        let context = TestToolContext.make(agentRole: .smith, taskStore: store)
+        let refused = try await tool.execute(arguments: [
+            "task_id": .string(task.id.uuidString), "status": .string("completed")
+        ], context: context)
+        #expect(!refused.succeeded)
+        #expect(await store.task(id: task.id)?.status == .validating)
+        #expect(await !store.updateStatus(id: task.id, status: .completed, cause: .smithSetStatus))
+        let failed = try await tool.execute(arguments: [
+            "task_id": .string(task.id.uuidString), "status": .string("failed")
+        ], context: context)
+        #expect(failed.succeeded, "stopping a validating task is still allowed")
+    }
+
     @Test("create_task refuses a non-boolean gate or template flag and creates nothing")
     func createTaskRefusesMalformedSwitches() async throws {
         let store = TaskStore()

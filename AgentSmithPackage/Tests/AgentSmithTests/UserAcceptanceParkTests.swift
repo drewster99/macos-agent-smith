@@ -187,8 +187,8 @@ struct UserAcceptanceParkTests {
         #expect(await store.task(id: task.id)?.status == .completed)
     }
 
-    @Test("A criterion added after the park makes Accept an override and refuses Smith's relay")
-    func contractChangeAfterParkEndsSignOffOnly() async throws {
+    @Test("A criterion added to a sign-off park sends it back to validation in the same write")
+    func contractChangeOnSignOffParkRevalidates() async throws {
         let store = TaskStore()
         let (task, _) = try await validatingTask(store)
         #expect(await park(store, task.id, .userAcceptanceRequested))
@@ -196,6 +196,51 @@ struct UserAcceptanceParkTests {
             .add(name: "also this", validationPrompt: "check it", inputEnumeratorPrompt: nil, waivable: false, origin: .smith)
         ]) == nil)
         let changed = try #require(await store.task(id: task.id))
+        #expect(changed.status == .validating)
+        #expect(changed.awaitingReviewReason == nil)
+        #expect(changed.awaitingReviewParkedAt == nil)
+        #expect(changed.acceptanceCriteria.count == 2)
+        #expect(changed.updates.contains { $0.message.contains("re-validating the changed criteria") })
+    }
+
+    @Test("Edits that leave every criterion judged keep the sign-off park")
+    func judgedContractEditsKeepThePark() async throws {
+        let store = TaskStore()
+        let (task, criterion) = try await validatingTask(store)
+        #expect(await park(store, task.id, .userAcceptanceRequested))
+        // A display-only rename keeps the verdict, so nothing is unjudged.
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [
+            .update(criterionID: criterion.id, name: "works well", validationPrompt: criterion.validationPrompt,
+                    inputEnumeratorPrompt: nil, waivable: criterion.waivable)
+        ]) == nil)
+        #expect(await store.task(id: task.id)?.status == .awaitingReview)
+        // A gate-only edit (turning it on again) changes no criterion.
+        #expect(await store.setRequiresUserAcceptance(id: task.id, value: true, by: .user) == nil)
+        #expect(await store.task(id: task.id)?.isAwaitingOnlyUserSignOff == true)
+    }
+
+    @Test("A validation-skipped park is the user's call: adding a criterion keeps it parked")
+    func skippedParkIsNotRevalidated() async throws {
+        let store = TaskStore()
+        let (task, _) = try await validatingTask(store, settled: false)
+        #expect(await park(store, task.id, .userAcceptanceRequestedValidationSkipped))
+        #expect(await store.applyCriterionActions(taskID: task.id, actions: [
+            .add(name: "also this", validationPrompt: "check it", inputEnumeratorPrompt: nil, waivable: false, origin: .smith)
+        ]) == nil)
+        let still = try #require(await store.task(id: task.id))
+        #expect(still.status == .awaitingReview)
+        #expect(still.awaitingReviewReason == .userAcceptanceRequestedValidationSkipped)
+    }
+
+    /// The edit path now re-validates, but a changed contract can still be met in persisted data
+    /// (a crash before the re-validation began). The predicates must stay fail-closed for it.
+    @Test("A sign-off park with an unjudged criterion: Accept is an override and the relay is refused")
+    func unjudgedSignOffParkEndsSignOffOnly() async throws {
+        let store = TaskStore()
+        let (task, _) = try await validatingTask(store)
+        #expect(await park(store, task.id, .userAcceptanceRequested))
+        var changed = try #require(await store.task(id: task.id))
+        changed.acceptanceCriteria.append(AcceptanceCriterion(name: "also this", validationPrompt: "check it", origin: .smith))
         #expect(changed.isParkedForUserAcceptance)
         #expect(!changed.isAwaitingOnlyUserSignOff)
         #expect(changed.acceptanceResolutionCause == .userAccepted)
@@ -258,10 +303,10 @@ struct UserAcceptanceParkTests {
         let store = TaskStore()
         let (task, _) = try await validatingTask(store)
         #expect(await park(store, task.id, .userAcceptanceRequested))
-        let added = CriterionAction.add(name: "also this", validationPrompt: "check it", inputEnumeratorPrompt: nil,
-                                        waivable: false, origin: .smith)
-        #expect(await store.applyCriterionActions(taskID: task.id, actions: [added]) == nil)
-        let changed = try #require(await store.task(id: task.id))
+        // Constructed in memory: the edit path re-validates at once, so this state exists only in
+        // persisted data from before that, or after a crash before the re-validation began.
+        var changed = try #require(await store.task(id: task.id))
+        changed.acceptanceCriteria.append(AcceptanceCriterion(name: "also this", validationPrompt: "check it", origin: .smith))
         #expect(changed.isParkedForUserAcceptance)
         #expect(!changed.isAwaitingOnlyUserSignOff)
         let note = OrchestrationRuntime.userAcceptanceParkInstruction(for: [changed])

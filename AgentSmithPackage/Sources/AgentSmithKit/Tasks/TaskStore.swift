@@ -1137,7 +1137,15 @@ public actor TaskStore {
     /// guard-then-mutate editing methods. This is the single seam that lets the per-session editing
     /// surface (Smith's tools + the task editor) reach library-resident templates without every method
     /// growing its own two-store branch. For a local task this is byte-for-byte the old behavior.
-    private func mutateTaskOrTemplate(id: UUID, _ body: (inout AgentTask) -> String?) async -> String? {
+    ///
+    /// `afterLocalCommit` runs right after a LOCAL task's write, in the same actor turn — the place to
+    /// `publish` a status transition `body` made, so no other write can land between the commit and
+    /// its event. A library template never changes status, so it has no counterpart there.
+    private func mutateTaskOrTemplate(
+        id: UUID,
+        _ body: (inout AgentTask) -> String?,
+        afterLocalCommit: () -> Void = {}
+    ) async -> String? {
         // Held under the per-task lock: the library branch is read → mutate → `await upsert`, and without
         // serialization a second edit of the same task interleaving between the read and the upsert would
         // be clobbered by the first's stale base. The local (session-task) branch has no `await` between
@@ -1147,6 +1155,7 @@ public actor TaskStore {
                 if let problem = body(&task) { return problem }
                 tasks[id] = task
                 didMutate()
+                afterLocalCommit()
                 return nil
             }
             guard let templateLibrary else { return "Task not found: \(id.uuidString)" }
@@ -1900,7 +1909,12 @@ public actor TaskStore {
     /// excludes `.validating`). Returns a human-readable refusal, or nil on success.
     public func editAcceptanceContract(id: UUID, _ edit: AcceptanceContractEdit) async -> String? {
         guard !edit.isEmpty else { return "No acceptance-contract change was given." }
-        return await mutateTaskOrTemplate(id: id) { task in     // see setSteps for the locking rationale
+        var reopenedForValidation: TaskStatusTransition?
+        return await mutateTaskOrTemplate(id: id, { task in     // see setSteps for the locking rationale
+            // Captured before the edit: only a park the validator judged can be re-judged (a
+            // validation-skipped park judged nothing, and stays the user's call).
+            let wasParkedForSignOffWithValidation = task.isParkedForUserAcceptance
+                && task.awaitingReviewReason == .userAcceptanceRequested
             guard task.status.isValidationContractEditable else {
                 let subject = edit.criteria == nil ? "acceptance contract" : "acceptance criteria"
                 return "Task \"\(task.title)\" is \(task.status.rawValue) — its \(subject) can't be edited while a worker or validator is active."
@@ -1942,8 +1956,21 @@ public actor TaskStore {
                 appendUpdate(to: &task, Self.userAcceptanceGateUpdate(gateChange))
             }
             task.updatedAt = Date()
+            // A sign-off park promises the user that every criterion was judged. An edit that leaves a
+            // criterion unjudged (added, or its judging text changed) breaks that promise, so the task
+            // goes back to validation in this same write; the runtime starts the run on this cause.
+            // Settled verdicts are sticky, so only what changed is judged before it parks again.
+            if wasParkedForSignOffWithValidation, !task.isAwaitingOnlyUserSignOff {
+                guard case .applied(let transition) = changeStatus(of: &task, to: .validating, cause: .signOffContractChanged) else {
+                    return "Task \"\(task.title)\" could not be sent back to validation after its criteria changed. Nothing was changed."
+                }
+                appendUpdate(to: &task, "Acceptance criteria changed while waiting for the user's sign-off — re-validating the changed criteria before asking again.")
+                reopenedForValidation = transition
+            }
             return nil
-        }
+        }, afterLocalCommit: {
+            if let reopenedForValidation { publish(reopenedForValidation) }
+        })
     }
 
     /// Replaces the task's acceptance criteria. Any criterion whose validation prompt,

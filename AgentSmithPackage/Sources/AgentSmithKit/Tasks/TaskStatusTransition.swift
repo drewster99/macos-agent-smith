@@ -64,6 +64,11 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     /// instead of completing it parked for the user's sign-off: every criterion settled
     /// (`validationWasRun`), or acceptance validation is switched off and nothing was judged.
     case userAcceptanceRequested(validationWasRun: Bool)
+    /// The acceptance criteria of a task waiting for the user's sign-off changed (a criterion added,
+    /// or its judging text edited), so a criterion the sign-off would cover was never judged: the task
+    /// goes back to validation, which judges what changed (settled verdicts are sticky) and parks it
+    /// for sign-off again. Written by `TaskStore.editAcceptanceContract` in the same write as the edit.
+    case signOffContractChanged
     /// No validator model is assigned; the task is parked until one is.
     case validationBlocked
     /// A validator model appeared; the parked task resumes validation.
@@ -161,7 +166,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
             return from == .awaitingReview && to == .completed
         case .userFailed:
             return from == .awaitingReview && to == .failed
-        case .userRevalidated:
+        case .userRevalidated, .signOffContractChanged:
             return from == .awaitingReview && to == .validating
         case .userSentBack:
             return from == .awaitingReview && (to == .running || to == .pending)
@@ -180,9 +185,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
         case .smithTerminatedWorker:
             return [.running, .awaitingHelp].contains(from) && to == .failed
         case .smithSetStatus:
-            // `.awaitingReview` belongs to the user (and to validator configuration): `update_task`
-            // must not be a side door out of a park its resolvers own.
-            return from != .awaitingReview && UpdateTaskStatusPolicy.settable.contains(to)
+            return UpdateTaskStatusPolicy.permits(from: from, to: to)
         case .orphanRecovered:
             return from == .running && to == .interrupted
         case .resetForRun:
@@ -219,7 +222,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
              .workerStartedAtRuntimeStart, .submittedForValidation, .validationPassed,
              .validationFailedNoProgress, .validationReleased, .rejectionsReturned, .helpRequested,
              .helpProvided, .userPaused, .userStopped, .userAccepted, .userAcceptanceGranted, .userFailed,
-             .userRevalidated, .userSentBack, .capacityShed, .scheduledAction, .scheduledTimeReached,
+             .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed, .scheduledAction, .scheduledTimeReached,
              .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus, .orphanRecovered, .resetForRun,
              .reopenedForRun, .templateLauncherNormalized, .coldBootRecovery, .coldBootSpawnAbandoned,
              .coldBootRevalidate, .sessionShutdown, .sessionDeletion:
@@ -237,7 +240,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
              .workerStartedAtRuntimeStart, .submittedForValidation, .validationPassed,
              .validationFailedNoProgress, .validationEscalated, .userAcceptanceRequested, .validationBlocked,
              .validationReleased, .rejectionsReturned, .helpRequested, .helpProvided, .userPaused,
-             .userStopped, .userFailed, .userRevalidated, .userSentBack, .capacityShed, .scheduledAction,
+             .userStopped, .userFailed, .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed, .scheduledAction,
              .scheduledTimeReached, .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus,
              .orphanRecovered, .resetForRun, .reopenedForRun, .templateLauncherNormalized,
              .coldBootRecovery, .coldBootSpawnAbandoned, .coldBootRevalidate, .sessionShutdown, .sessionDeletion:
@@ -259,4 +262,12 @@ public enum AwaitingReviewPark: Equatable, Sendable {
 /// validation escalation for awaitingReview). One list, read by both the tool and the matrix.
 public enum UpdateTaskStatusPolicy {
     public static let settable: Set<AgentTask.Status> = [.pending, .paused, .interrupted, .completed, .failed]
+
+    /// Whether `update_task` may move a task from `from` to `to`. Never out of `.awaitingReview`: its
+    /// resolvers (the user, configuration) own that park. Never `.validating` → `.completed`: that
+    /// would finish a submission its validator is judging, skipping the judgment (decided 2026-10-04).
+    public static func permits(from: AgentTask.Status, to: AgentTask.Status) -> Bool {
+        guard settable.contains(to), from != .awaitingReview else { return false }
+        return !(from == .validating && to == .completed)
+    }
 }

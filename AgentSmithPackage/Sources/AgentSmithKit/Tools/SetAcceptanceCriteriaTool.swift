@@ -228,7 +228,13 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             return .failure("Task \(taskID.uuidString) disappeared while its acceptance contract was being edited.")
         }
         let gateSentence = gateChange.map { Self.gateSentence(requested: $0.requiresUserAcceptance, wasRequired: task.requiresUserAcceptance, after: updated) }
-        let gateSuffix = gateSentence.map { " \($0)" } ?? ""
+        // A criteria edit on a task waiting for the user's sign-off sends it back to validation in the
+        // store's same write (`editAcceptanceContract`); say so, or Smith would tell the user it is
+        // still waiting for them.
+        let revalidationNote = task.status == .awaitingReview && updated.status == .validating
+            ? " Because the task was waiting for the user's sign-off and a criterion is now unjudged, it went back to acceptance validation; it will ask for sign-off again once every criterion is judged."
+            : ""
+        let gateSuffix = (gateSentence.map { " \($0)" } ?? "") + revalidationNote
         let gateChanged = gateChange.map { $0.requiresUserAcceptance != task.requiresUserAcceptance } ?? false
         // The store already logged a gate change on the task (naming who made it); the transcript post
         // carries it too, so the user sees it.

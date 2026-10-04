@@ -74,7 +74,7 @@ public enum SmithTaskBriefing {
         case .startClaimed, .startAbandoned, .workerStartedAtRuntimeStart,
              .spawnFailedAtRuntimeStart, .submittedForValidation, .validationEscalated,
              .validationBlocked, .validationReleased, .rejectionsReturned, .helpRequested,
-             .helpProvided, .userPaused, .userStopped, .userFailed, .userRevalidated, .userSentBack,
+             .helpProvided, .userPaused, .userStopped, .userFailed, .userRevalidated, .signOffContractChanged, .userSentBack,
              .capacityShed, .scheduledAction, .scheduledTimeReached, .workerSelfTerminated,
              .smithTerminatedWorker, .smithSetStatus, .orphanRecovered, .resetForRun,
              .reopenedForRun, .templateLauncherNormalized, .coldBootRecovery,

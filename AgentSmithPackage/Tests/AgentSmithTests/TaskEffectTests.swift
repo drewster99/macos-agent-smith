@@ -209,7 +209,7 @@ struct SmithTaskBriefingTests {
         let silent: [TaskTransitionCause] = [
             .startClaimed, .startAbandoned, .submittedForValidation, .validationEscalated,
             .validationBlocked, .validationReleased, .rejectionsReturned, .helpRequested, .helpProvided,
-            .userPaused, .userStopped, .userFailed, .userRevalidated, .userSentBack, .capacityShed,
+            .userPaused, .userStopped, .userFailed, .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed,
             .scheduledAction(.pause), .scheduledTimeReached, .workerSelfTerminated, .smithTerminatedWorker,
             .smithSetStatus, .orphanRecovered, .resetForRun, .reopenedForRun, .templateLauncherNormalized,
             .coldBootRecovery(.interrupt), .coldBootSpawnAbandoned, .coldBootRevalidate, .sessionShutdown, .sessionDeletion

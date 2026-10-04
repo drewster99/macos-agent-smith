@@ -156,7 +156,7 @@ public struct TaskStatusTransition: Sendable, Equatable {
     `.validationPassed(validationWasRun:)`, `.validationFailedNoProgress`, `.validationEscalated`,
     `.userAcceptanceRequested(validationWasRun:)`, `.userAcceptanceGranted(validationWasRun:)`,
     `.rejectionsReturned`, `.userPaused`, `.userStopped`, `.userAccepted`, `.userFailed`,
-    `.userRevalidated`, `.userSentBack`, `.capacityShed`, `.scheduledAction(TaskActionKind)`,
+    `.userRevalidated`, `.signOffContractChanged`, `.userSentBack`, `.capacityShed`, `.scheduledAction(TaskActionKind)`,
     `.scheduledTimeReached`, `.helpRequested`, `.helpProvided`, `.workerSelfTerminated`,
     `.orphanRecovered`, `.smithSetStatus`, `.resetForRun`, `.reopenedForRun`,
     `.validationBlocked`, `.validationReleased`, `.templateLauncherNormalized`,
@@ -223,6 +223,7 @@ public struct TaskStatusTransition: Sendable, Equatable {
 | `.validationEscalated` | validating → awaitingReview | **needs review** | as today (none) | escalation row (validator error ONLY since 2026-10-02) |
 | `.userAcceptanceRequested(validationWasRun:)` | validating → awaitingReview | **needs review** | **yes** (tell the user; relay their decision) — widened 2026-10-02 | sign-off row |
 | `.userAcceptanceGranted(validationWasRun:)` | awaitingReview → completed | **completed** | **yes** (completion) — widened 2026-10-02 | banner, teardown, summary |
+| `.signOffContractChanged` | awaitingReview → validating (2026-10-04) | — | no | the runtime starts validation; the task re-parks for sign-off |
 | `.rejectionsReturned` | validating → running | — | as today (none) | punch list to Brown |
 | `.validationBlocked` / `.validationReleased` | ↔ awaitingReview / validating | — | as today (none) | — |
 | `.helpRequested` / `.helpProvided` | → awaitingHelp / → running | needs help / — | as today | — |
@@ -230,7 +231,7 @@ public struct TaskStatusTransition: Sendable, Equatable {
 | `.capacityShed` | running → paused | — | as today | capacity row |
 | `.scheduledAction` / `.scheduledTimeReached` | per action / scheduled → pending | interrupted when reached | as today | — |
 | `.workerSelfTerminated` / `.orphanRecovered` | running → interrupted/failed | interrupted / failed | as today (`.agentLifecycle` row) | — |
-| `.smithSetStatus` | per `update_task`, never out of awaitingReview (2026-10-02) | per state reached | — (Smith did it) | — |
+| `.smithSetStatus` | per `update_task`, never out of awaitingReview (2026-10-02), never validating → completed (2026-10-04) | per state reached | — (Smith did it) | — |
 | `.resetForRun` / `.reopenedForRun` | failed/completed → pending | — | as today | — |
 | `.coldBootRecovery` | running → validating/interrupted | interrupted (crash) | no (initial instruction covers launch) | recovery note |
 | `.coldBootSpawnAbandoned` | starting → pending | — | no | — |

@@ -1565,7 +1565,7 @@ public actor AgentActor {
                 } else {
                     toolDefinitions = activeTools
                         .filter { $0.isAvailable(in: availabilityContext) }
-                        .map { $0.definition(for: configuration.role) }
+                        .map { $0.definition(for: configuration.role, in: availabilityContext) }
                 }
                 toolContext.onProcessingStateChange(true)
                 // Stall watchdog: if this turn (LLM call + tool execution) is still
@@ -3124,7 +3124,8 @@ public actor AgentActor {
             // a user-owned park with its worker already gone; letting it gate would disable
             // notify_brown / provide_help across unrelated running workers.
             hasAwaitingReviewTasks: activeTasks.contains { $0.status == .awaitingHelp },
-            hasTasksAwaitingUserSignOff: activeTasks.contains { $0.relayableSignOffPark != nil }
+            hasTasksAwaitingUserSignOff: activeTasks.contains { $0.relayableSignOffPark != nil },
+            hasTasksInValidation: activeTasks.contains { $0.status == .validating }
         )
     }
 
