@@ -200,8 +200,8 @@ between calls.
   `Tools/PerformAXActionTool.swift`, `Tools/ListAXAppsTool.swift`,
   `Tools/WatchAXEventsTool.swift` — **new**. One per public tool. Structured
   like `RunAppleScriptTool`: `isAvailable { $0.agentRole == .brown }`,
-  Brown-facing description with `BrownBehavior.approvalGateNote(...)`,
-  JSON-schema parameters, `execute` parses args and dispatches to
+  one plain `toolDescription` (the security-review note helper was deleted
+  2026-10-04 — Brown's system prompt covers the review), JSON-schema parameters, `execute` parses args and dispatches to
   `AccessibilityService.shared`.
 
 **Edits:**
