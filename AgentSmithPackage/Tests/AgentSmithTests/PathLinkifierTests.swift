@@ -384,6 +384,31 @@ struct PathLinkifierTests {
         #expect(links.map(\.text) == [first, second])
     }
 
+    @Test("a location suffix stays outside the link, as before paths could hold spaces")
+    func linkifyPathsWithLocationSuffix() throws {
+        let base = try makeTree(files: ["Sources Dir/File.swift", "page.html"])
+        defer { removeTree(base) }
+        let file = base.path + "/Sources Dir/File.swift"
+        let fileURL = URL(fileURLWithPath: file).absoluteString
+        #expect(PathLinkifier.linkifyPaths("at \(file):42 here")
+                == "at [\(file)](\(fileURL)):42 here")
+        #expect(PathLinkifier.linkifyPaths("at \(file):42:7")
+                == "at [\(file)](\(fileURL)):42:7")
+        let page = base.path + "/page.html"
+        let pageURL = URL(fileURLWithPath: page).absoluteString
+        #expect(PathLinkifier.linkifyPaths("\(page)#top") == "[\(page)](\(pageURL))#top")
+    }
+
+    @Test("a name containing non-token characters links whole when it exists")
+    func linkifyPathsWithNonTokenCharacters() throws {
+        let name = "résumé (1)@2x.pdf"
+        let base = try makeTree(files: [name])
+        defer { removeTree(base) }
+        let path = base.path + "/" + name
+        let links = try renderedLinks(of: PathLinkifier.linkify("see \(path) ok"))
+        #expect(links.map(\.text) == [path])
+    }
+
     @Test("a standalone path with spaces links only when it exists")
     func standaloneLinkTargetWithSpaces() throws {
         let base = try makeTree(files: ["Application Support/x.md"])

@@ -250,9 +250,9 @@ public enum PathLinkifier {
     /// that exists wins ("Application Support" over a sibling "Application").
     /// Only a directory continues the walk past its `/`.
     ///
-    /// A path is linked only when it ends at a prose boundary — whitespace, end of
-    /// text, or trailing punctuation followed by one of those (a trailing `/` after
-    /// a directory is kept). Text that keeps going past what exists
+    /// A path is linked only when it ends at a path-end boundary (see
+    /// `isPathEndBoundary`; a trailing `/` after a directory is kept). Text that
+    /// keeps going past what exists
     /// ("/Users/me/missing.txt") links nothing rather than a misleading fragment.
     ///
     /// Bounded by the filesystem's own limits: a component never exceeds
@@ -279,7 +279,7 @@ public enum PathLinkifier {
                 let atLimit = i == text.endIndex || text[i] == "/"
                     || (text[i].isWhitespace && text[i] != " ")
                 if i > componentStart, !text[text.index(before: i)].isWhitespace,
-                   atLimit || isProseBoundary(at: i, in: text) {
+                   atLimit || isPathEndBoundary(at: i, in: text) {
                     componentEnds.append(i)
                 }
                 if atLimit { break scan }
@@ -310,14 +310,30 @@ public enum PathLinkifier {
         }
 
         guard let resolvedEnd else { return nil }
-        if isProseBoundary(at: resolvedEnd, in: text) { return resolvedEnd }
+        if isPathEndBoundary(at: resolvedEnd, in: text) { return resolvedEnd }
         // A directory written with its trailing slash ("see /tmp/foo/ for …"):
         // the walk stopped at the slash because no component followed it.
         if text[resolvedEnd] == "/" {
             let afterSlash = text.index(after: resolvedEnd)
-            if isProseBoundary(at: afterSlash, in: text) { return afterSlash }
+            if isPathEndBoundary(at: afterSlash, in: text) { return afterSlash }
         }
         return nil
+    }
+
+    /// Where a path may end: a prose boundary, or a character the token-based
+    /// matcher this resolver replaced already treated as ending a path — the `:` of
+    /// `File.swift:42`, the `#` of `page.html#top`, `(`, `@`, non-ASCII. Keeping
+    /// those means the paths that matcher linked still link; what the filesystem
+    /// walk adds is paths containing spaces (and, via the longest-first search,
+    /// names containing those characters).
+    private static func isPathEndBoundary(at index: String.Index, in text: String) -> Bool {
+        if isProseBoundary(at: index, in: text) { return true }
+        // Not a prose boundary, so `index` is not `endIndex`.
+        let character = text[index]
+        let continuesLegacyToken = character == "/" || character == "." || character == "_"
+            || character == "~" || character == "-"
+            || (character.isASCII && (character.isLetter || character.isNumber))
+        return !continuesLegacyToken
     }
 
     /// True when the text from `index` on is whitespace, end of text, or a run of
