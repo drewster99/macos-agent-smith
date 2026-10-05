@@ -552,6 +552,18 @@ public actor AgentActor {
         /// Nil means the caller resolved no capability, so the agent keeps its current value.
         let supportsVision: Bool?
         let supportsDocuments: Bool?
+        /// The runtime's model generation this change was built from (see
+        /// `OrchestrationRuntime.modelChangeGeneration`).
+        let generation: UInt64
+    }
+
+    /// The newest model generation this agent has been built from or scheduled. A change older than
+    /// it is stale — it reached this actor after a newer one — and is dropped.
+    private var modelGeneration: UInt64 = 0
+
+    /// Records the generation of the configuration this agent was spawned with.
+    func setModelGeneration(_ generation: UInt64) {
+        modelGeneration = generation
     }
 
     /// Re-points this agent at a new provider build for its role, taking effect at the top of the
@@ -564,6 +576,11 @@ public actor AgentActor {
     /// not accept) that must be made portable first. Decided 2026-10-05 (user): live agents follow a
     /// model change instead of keeping their spawn-time model until respawn.
     func scheduleModelChange(_ change: ModelChange) {
+        guard change.generation >= modelGeneration else {
+            Self.agentLogger.notice("Agent \(self.configuration.role.rawValue, privacy: .public): dropped a stale model change (generation \(change.generation, privacy: .public) < \(self.modelGeneration, privacy: .public))")
+            return
+        }
+        modelGeneration = change.generation
         pendingModelChange = change
     }
 

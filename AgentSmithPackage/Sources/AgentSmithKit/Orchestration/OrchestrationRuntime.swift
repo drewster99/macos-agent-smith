@@ -64,6 +64,12 @@ public actor OrchestrationRuntime {
     /// `setOnProviderWaitsChanged`.
     public nonisolated let providerWaitBoard = ProviderWaitBoard()
 
+    /// Bumped by every `setProviders` merge and carried by every `AgentActor.ModelChange` built from
+    /// it. An agent applies a change only if it is at least as new as the newest it has seen (or
+    /// spawned with), so pushes that reach it out of order — two overlapping `setProviders` calls
+    /// each suspend once per agent — can never leave it on an older model than the runtime holds.
+    private var modelChangeGeneration: UInt64 = 0
+
     /// Fixed UUID representing the human user for private Smith→User messages
     /// (`00000000-0000-0000-0000-000000000001`).
     public static let userID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
@@ -2332,20 +2338,14 @@ public actor OrchestrationRuntime {
         // some providers mint per-instance state (the ChatGPT-subscription provider's
         // `prompt_cache_key`, its prefix-cache routing hint), so re-pointing a role nobody touched
         // would throw away a live agent's cache locality for a change that isn't there.
-        var modelChanges: [AgentRole: AgentActor.ModelChange] = [:]
+        var rolesToRepoint: Set<AgentRole> = []
         // Roles whose model IDENTITY changed — the ones whose sleepers are woken below.
         var switchedRoles: Set<AgentRole> = []
         for (role, newConfig) in configurations {
             guard let currentConfig = llmConfigs[role],
                   currentConfig != newConfig,
-                  let newBuild = builds[role] else { continue }
-            modelChanges[role] = AgentActor.ModelChange(
-                provider: newBuild.provider,
-                llmConfig: newConfig,
-                providerAPIType: newBuild.apiType,
-                supportsVision: supportsVisionByRole[role],
-                supportsDocuments: supportsDocumentsByRole[role]
-            )
+                  builds[role] != nil else { continue }
+            rolesToRepoint.insert(role)
             if currentConfig.providerID != newConfig.providerID || currentConfig.modelID != newConfig.modelID {
                 switchedRoles.insert(role)
             }
@@ -2361,6 +2361,7 @@ public actor OrchestrationRuntime {
         for (role, apiType) in apiTypes where accepts(role) { providerAPITypes[role] = apiType }
         for (role, vision) in supportsVisionByRole where accepts(role) { self.supportsVisionByRole[role] = vision }
         for (role, docs) in supportsDocumentsByRole where accepts(role) { self.supportsDocumentsByRole[role] = docs }
+        modelChangeGeneration &+= 1
         // New configuration is grounds to retry: close a breaker opened by
         // missing-provider spawn failures (or by scoping failures against a backend the
         // user may just have fixed).
@@ -2374,9 +2375,14 @@ public actor OrchestrationRuntime {
         }
 
         // Push changes AFTER the merge, so a spawn racing this call reads the same configuration
-        // the live agents just received.
-        for (role, change) in modelChanges {
+        // the live agents just received. Each push is built from the CURRENT merged state, not from
+        // a snapshot taken above: the loop suspends per agent, and an overlapping call can merge a newer
+        // configuration in between — pushing this call's snapshot would then hand the agents it had
+        // not reached yet an OLDER model than the runtime holds. Built fresh, whichever call pushes
+        // last delivers the latest; `rolesToRepoint` only decides which roles need a push at all.
+        for role in rolesToRepoint {
             for workerHandle in supervisor.handles(role: role) {
+                guard let change = currentModelChange(for: role) else { continue }
                 await workerHandle.agent.scheduleModelChange(change)
             }
         }
@@ -2405,6 +2411,34 @@ public actor OrchestrationRuntime {
                 metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
             ))
         }
+    }
+
+    /// Hands a just-registered agent any model change merged while it was being built. A spawn reads
+    /// its configuration, then suspends many times before registering, and a `setProviders` push in
+    /// that window could not reach an agent that was not registered yet.
+    private func catchUpOnModelChanges(_ agent: AgentActor, role: AgentRole, builtAt generation: UInt64) async {
+        guard modelChangeGeneration != generation, let change = currentModelChange(for: role) else { return }
+        await agent.scheduleModelChange(change)
+    }
+
+    /// The model change that brings a live agent of `role` to the runtime's current merged state.
+    /// Nil only if the role has no complete build — impossible for a role `setProviders` just
+    /// pushed, since a provider is merged only together with its configuration and API type.
+    private func currentModelChange(for role: AgentRole) -> AgentActor.ModelChange? {
+        guard let provider = llmProviders[role],
+              let configuration = llmConfigs[role],
+              let apiType = providerAPITypes[role] else {
+            providerConfigurationLogger.fault("No complete merged build for \(role.rawValue, privacy: .public); its live agents were not re-pointed")
+            return nil
+        }
+        return AgentActor.ModelChange(
+            provider: provider,
+            llmConfig: configuration,
+            providerAPIType: apiType,
+            supportsVision: supportsVisionByRole[role],
+            supportsDocuments: supportsDocumentsByRole[role],
+            generation: modelChangeGeneration
+        )
     }
 
     /// Operational notices: system lines ABOUT one agent or the run — a stall warning, a retry or
@@ -3026,6 +3060,8 @@ public actor OrchestrationRuntime {
         // is skipped. Rebuilt by `setProviders` whenever the summarizer's model or tuning changes.
         taskSummarizer = await makeTaskSummarizer()
 
+        // The generation of the configuration this Smith is built from, read in the same breath.
+        let smithModelGeneration = modelChangeGeneration
         guard let smithConfig = llmConfigs[.smith],
               let provider = llmProviders[.smith] else {
             await channel.post(ChannelMessage(
@@ -3083,6 +3119,7 @@ public actor OrchestrationRuntime {
         )
         await smithAgent.setUsageStore(usageStore)
         await smithAgent.setProviderWaitBoard(providerWaitBoard)
+        await smithAgent.setModelGeneration(smithModelGeneration)
         await smithAgent.setSessionID(currentSessionID)
 
         // Egress filter: gate Smith's open-world calls (web_fetch / web_search / instant_answer)
@@ -3186,6 +3223,7 @@ public actor OrchestrationRuntime {
         )
 
         supervisor.register(id: id, role: .smith, agent: smithAgent)
+        await catchUpOnModelChanges(smithAgent, role: .smith, builtAt: smithModelGeneration)
 
         let subID = await channel.subscribe { [weak smithAgent] message in
             guard let smithAgent else { return }
@@ -4348,6 +4386,8 @@ public actor OrchestrationRuntime {
             return nil
         }
 
+        // The generation of the configuration this worker is built from, read in the same breath.
+        let brownModelGeneration = modelChangeGeneration
         guard let brownConfig = llmConfigs[.brown],
               let brownProvider = llmProviders[.brown] else {
             await channel.post(ChannelMessage(
@@ -4565,6 +4605,7 @@ public actor OrchestrationRuntime {
         }
         await brownAgent.setUsageStore(usageStore)
         await brownAgent.setProviderWaitBoard(providerWaitBoard)
+        await brownAgent.setModelGeneration(brownModelGeneration)
         await brownAgent.setSessionID(currentSessionID)
         if let callCallback = onLLMCallRecorded {
             await brownAgent.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .brown, instanceID: brownID), event) }
@@ -4596,6 +4637,7 @@ public actor OrchestrationRuntime {
         }
         // A Brown worker just went live — refresh the concurrency meter's Brown count.
         refreshBrownWorkerActivityCount()
+        await catchUpOnModelChanges(brownAgent, role: .brown, builtAt: brownModelGeneration)
 
         // Label the worker's channel messages with its task so the UI can distinguish
         // workers ("Brown" alone is ambiguous once several run concurrently).

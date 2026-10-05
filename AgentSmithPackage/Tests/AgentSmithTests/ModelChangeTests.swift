@@ -149,7 +149,8 @@ struct ModelChangeTests {
             llmConfig: Self.config(temperature: 0.9),
             providerAPIType: .openAICompatible,
             supportsVision: nil,
-            supportsDocuments: nil
+            supportsDocuments: nil,
+            generation: 1
         ))
 
         // Something to answer, so the loop actually reaches `provider.send` rather than idling.
@@ -185,7 +186,8 @@ struct ModelChangeTests {
             llmConfig: Self.config(temperature: 0.2, modelID: "a-different-model"),
             providerAPIType: .anthropic,
             supportsVision: nil,
-            supportsDocuments: nil
+            supportsDocuments: nil,
+            generation: 1
         ))
         await agent.appendUserMessage("say ok")
         #expect(await agent.configuration.llmConfig.modelID == "test-model", "a switch must wait for the boundary")
@@ -221,7 +223,8 @@ struct ModelChangeTests {
             llmConfig: Self.config(temperature: 0.2, modelID: "a-different-model"),
             providerAPIType: .openAICompatible,
             supportsVision: nil,
-            supportsDocuments: nil
+            supportsDocuments: nil,
+            generation: 1
         ))
         await agent.start()
         let deadline = Date().addingTimeInterval(3.0)
@@ -263,7 +266,8 @@ struct ModelChangeTests {
             llmConfig: Self.config(temperature: 0.2, modelID: "a-different-model"),
             providerAPIType: .openAICompatible,
             supportsVision: nil,
-            supportsDocuments: nil
+            supportsDocuments: nil,
+            generation: 1
         ))
         await agent.appendUserMessage("say ok")
         await agent.start()
@@ -304,7 +308,8 @@ struct ModelChangeTests {
             llmConfig: Self.config(temperature: 0.2, modelID: "a-different-model"),
             providerAPIType: .openAICompatible,
             supportsVision: nil,
-            supportsDocuments: nil
+            supportsDocuments: nil,
+            generation: 1
         ))
         #expect(board.wakeForModelChange(of: .brown) == 1)
 
@@ -422,5 +427,61 @@ struct ModelChangeTests {
         if let smithID = await runtime.agentIDForRole(.smith), let smith = await runtime.liveAgent(id: smithID) {
             #expect(await smith.configuration.llmConfig.modelID == "test-model")
         }
+    }
+
+    @Test("A model change older than one the agent already has is dropped")
+    func staleModelChangeIsDropped() async {
+        let agent = Self.makeAgent(provider: MockLLMProvider(responses: [LLMResponse(text: "ok")]), llmConfig: Self.config(temperature: 0.2))
+        await agent.scheduleModelChange(AgentActor.ModelChange(
+            provider: MockLLMProvider(responses: [LLMResponse(text: "ok")]),
+            llmConfig: Self.config(temperature: 0.2, modelID: "newer"),
+            providerAPIType: .openAICompatible, supportsVision: nil, supportsDocuments: nil, generation: 5
+        ))
+        // Arrives late, built from an older merge.
+        await agent.scheduleModelChange(AgentActor.ModelChange(
+            provider: MockLLMProvider(responses: [LLMResponse(text: "ok")]),
+            llmConfig: Self.config(temperature: 0.2, modelID: "older"),
+            providerAPIType: .openAICompatible, supportsVision: nil, supportsDocuments: nil, generation: 4
+        ))
+        await agent.appendUserMessage("say ok")
+        await agent.start()
+        let deadline = Date().addingTimeInterval(3.0)
+        while await agent.configuration.llmConfig.modelID == "test-model", Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        await agent.stop()
+        #expect(await agent.configuration.llmConfig.modelID == "newer", "a stale change overwrote a newer one")
+    }
+
+    @Test("Overlapping setProviders calls leave the live Smith on the runtime's final model")
+    func overlappingSetProvidersConverge() async {
+        let runtime = makeRuntime()
+        await runtime.start()
+        defer { Task { await runtime.stopAll() } }
+
+        for round in 0..<10 {
+            async let first: Void = runtime.setProviders(
+                providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
+                configurations: [.smith: Self.config(temperature: 0.2, modelID: "model-a-\(round)")],
+                apiTypes: [.smith: .openAICompatible]
+            )
+            async let second: Void = runtime.setProviders(
+                providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
+                configurations: [.smith: Self.config(temperature: 0.2, modelID: "model-b-\(round)")],
+                apiTypes: [.smith: .openAICompatible]
+            )
+            _ = await (first, second)
+        }
+        let finalModelID = await runtime.llmConfigs[.smith]?.modelID
+        guard let smithID = await runtime.agentIDForRole(.smith),
+              let smith = await runtime.liveAgent(id: smithID) else {
+            Issue.record("no live Smith")
+            return
+        }
+        let deadline = Date().addingTimeInterval(3.0)
+        while await smith.configuration.llmConfig.modelID != finalModelID, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(await smith.configuration.llmConfig.modelID == finalModelID, "the live Smith ended on a model the runtime no longer holds")
     }
 }
