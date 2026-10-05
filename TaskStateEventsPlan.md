@@ -152,7 +152,7 @@ public struct TaskStatusTransition: Sendable, Equatable {
   `(from, to, cause)`. `applyStatus` REFUSES an illegal combination: it logs an error and returns
   false, so a wrong cause fails visibly instead of silently steering watches. Free-form text is
   display context only. Watch matching reads `cause`, never prose.
-  - Cause cases: `.startClaimed`, `.workerStarted`, `.spawnFailed`, `.submittedForValidation`,
+  - Cause cases: `.startClaimed`, `.startAbandoned`, `.workerStarted`, `.spawnFailed`, `.submittedForValidation`,
     `.validationPassed(validationWasRun:)`, `.validationFailedNoProgress`, `.validationEscalated`,
     `.userAcceptanceRequested(validationWasRun:)`, `.userAcceptanceGranted(validationWasRun:)`,
     `.rejectionsReturned`, `.userPaused`, `.userStopped`, `.userAccepted`, `.userFailed`,
@@ -215,6 +215,7 @@ public struct TaskStatusTransition: Sendable, Equatable {
 | Cause | from → to | Watches | Smith briefed | Adjacent effect kept at call site |
 |---|---|---|---|---|
 | `.startClaimed` | pending/paused/interrupted → starting | — | — | — |
+| `.startAbandoned` | starting → pending; starting → interrupted for a refused RESUME going back onto its resume queue (2026-10-05) | **no** (an internal deferral, like `.capacityShed`) | no | queued-at-capacity row |
 | `.workerStarted` | starting → running | **started** | as today | Brown briefing |
 | `.spawnFailed` | starting → pending/failed | failed (if →failed) | as today | channel error |
 | `.submittedForValidation` | running → validating | — | as today (none) | submission banner |
