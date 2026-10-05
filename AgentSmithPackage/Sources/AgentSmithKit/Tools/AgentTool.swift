@@ -283,8 +283,10 @@ public struct ToolContext: Sendable {
     /// Provider API type (e.g. "anthropic", "openAICompatible") for the owning
     /// agent's current configuration. Not derivable from ModelConfiguration alone.
     public var currentProviderType: String?
-    /// Callback to request spawning a new Brown+Security Agent pair. Returns the Brown agent's ID.
-    public let spawnBrown: @Sendable () async -> UUID?
+    /// Spawns a worker FOR `task` — scoped, with the user's tool policy and the task's overrides,
+    /// exactly like a normal start — and returns its ID. Never task-less: a task-less worker skips
+    /// scoping and every tool policy, so a Never tool would be offered to it.
+    public let spawnBrown: @Sendable (AgentTask) async -> UUID?
     /// Callback to terminate an agent by ID. Second parameter is the caller's agent ID.
     public let terminateAgent: @Sendable (UUID, UUID) async -> Bool
     /// Emergency abort: stops all agents. Requires user interaction to restart.
@@ -473,7 +475,7 @@ public struct ToolContext: Sendable {
         taskStore: TaskStore,
         currentConfiguration: ModelConfiguration? = nil,
         currentProviderType: String? = nil,
-        spawnBrown: @escaping @Sendable () async -> UUID?,
+        spawnBrown: @escaping @Sendable (AgentTask) async -> UUID?,
         terminateAgent: @escaping @Sendable (UUID, UUID) async -> Bool,
         abort: @escaping @Sendable (String, AgentRole?) async -> Void,
         agentRoleForID: @escaping @Sendable (UUID) async -> AgentRole?,

@@ -570,14 +570,25 @@ struct TaskEditorSheet: View {
                     requiredCapabilities: capabilitiesToSave
                 )
             case .edit(let task):
-                saved = await viewModel.updateTaskDefinition(
-                    id: task.id,
-                    title: trimmedTitle,
-                    description: trimmedDescription,
-                    isTemplate: isTemplate,
-                    templateInputDefinitions: inputDefinitions,
-                    templateInstanceTitleTemplate: instanceTitleTemplate
-                )
+                // Written only when one of its fields changed: the definition is refused once the
+                // task is running, and that refusal must not block a change it doesn't cover (a
+                // capability added to a task that started while this sheet was open).
+                let definitionChanged = trimmedTitle != task.title
+                    || trimmedDescription != task.description
+                    || isTemplate != task.isTemplate
+                    || inputDefinitions != task.templateInputDefinitions
+                    || instanceTitleTemplate.trimmingCharacters(in: .whitespacesAndNewlines) != (task.templateInstanceTitleTemplate ?? "")
+                saved = true
+                if definitionChanged {
+                    saved = await viewModel.updateTaskDefinition(
+                        id: task.id,
+                        title: trimmedTitle,
+                        description: trimmedDescription,
+                        isTemplate: isTemplate,
+                        templateInputDefinitions: inputDefinitions,
+                        templateInstanceTitleTemplate: instanceTitleTemplate
+                    )
+                }
                 if saved && canEditValidationContract {
                     // Only a gate the user actually changed is written: comparing against the value the
                     // sheet opened with means a gate Smith changed while the sheet was open is not

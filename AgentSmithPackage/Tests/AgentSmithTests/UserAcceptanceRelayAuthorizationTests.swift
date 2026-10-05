@@ -217,7 +217,7 @@ struct UserAcceptanceRelayAuthorizationTests {
             agentRole: .smith,
             channel: MessageChannel(),
             taskStore: TaskStore(),
-            spawnBrown: { nil },
+            spawnBrown: { _ in nil },
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in .smith },

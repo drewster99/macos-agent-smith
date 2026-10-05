@@ -43,7 +43,7 @@ struct WorkerAddressingTests {
             agentRole: .smith,
             channel: channel,
             taskStore: taskStore,
-            spawnBrown: { nil },
+            spawnBrown: { _ in nil },
             terminateAgent: terminateAgent,
             abort: { _, _ in },
             agentRoleForID: { id in liveWorkers.contains(id) ? .brown : nil },

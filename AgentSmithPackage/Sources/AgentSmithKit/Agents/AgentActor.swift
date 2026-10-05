@@ -1442,7 +1442,7 @@ public actor AgentActor {
 
         // Layer global policy + per-task overrides on top of the base verdict, then force lifecycle.
         let resolved = ToolPolicy.effectiveApprovedTools(
-            base: approvedToolNames,
+            base: approvedToolNames.union(ToolPolicy.workerToolsApprovedByDefault),
             candidates: candidateNames,
             globalPolicies: globalToolPolicy,
             taskOverrides: userToolOverrides
@@ -1483,7 +1483,6 @@ public actor AgentActor {
         toolRegistry.setForcedAvailable("task_complete", taskAcknowledged)
         toolRegistry.setForcedAvailable("request_help", taskAcknowledged)
         toolRegistry.setForcedAvailable("reply_to_user", true)
-        toolRegistry.setForcedAvailable("save_memory", true)
     }
 
     /// Re-runs the security scoping pass against the current candidate set (stateless — no
@@ -1508,7 +1507,9 @@ public actor AgentActor {
         guard result.succeeded else {
             // Last-known-good is kept, but not silently: a re-scope asked for because the task
             // gained a required capability leaves that need unmet, and nobody else would say so.
-            if result.rawResponse != ToolScopingResult.cancelledSentinel {
+            // A stop is not a failure — and scoping cancelled mid-retry-sleep reports an ordinary
+            // failure, so the cancellation is read from the task itself, never from the response.
+            if !Task.isCancelled && isRunning {
                 await toolContext.post(ChannelMessage(
                     sender: .system,
                     content: "Re-scoping the worker's tools for task \"\(task.title)\" failed, so it keeps the tools it had. \(result.rawResponse)",
@@ -2714,6 +2715,17 @@ public actor AgentActor {
                     turnToolExecutionMs += r.executionMs
                     turnToolResultChars += r.result.count
                     recordToolOutcome(name: r.toolName, succeeded: r.succeeded, output: r.result)
+                    // Every execution path applies the tool's declared effects. This one used to
+                    // skip them, so a `run_task` batched with other calls lost its restart effect.
+                    updatePostCallFlags(
+                        call: segment.calls[r.batchIndex],
+                        tool: activeTools.first(where: { $0.name == r.toolName }),
+                        succeeded: r.succeeded,
+                        sentMessage: &sentMessage,
+                        calledTaskComplete: &calledTaskComplete,
+                        startedWaitingForChildTasks: &startedWaitingForChildTasks,
+                        triggeredRuntimeRestart: &triggeredRuntimeRestart
+                    )
                     conversationHistory.append(.toolResult(Self.capToolResult(r.result), callID: r.callID))
                 }
                 pushLiveContext()
@@ -3574,12 +3586,14 @@ public actor AgentActor {
         ))
     }
 
-    /// Tools executed sequentially with no security approval, as one contiguous segment. Kept
-    /// as a named constant (rather than a literal inside the run loop) because
-    /// `handoffLifecycleTools` must stay a subset of it — see `parkingToolsAreLifecycleTools`.
+    /// Tools executed sequentially, in order, as one contiguous segment (each still routed through
+    /// the Security Agent, pre-cleared). Kept as a named constant (rather than a literal inside the
+    /// run loop) because `handoffLifecycleTools` must stay a subset of it — see
+    /// `parkingToolsAreLifecycleTools`. `wait_for_child_tasks` is here so it runs AFTER any
+    /// `create_child_task` earlier in the same response, never alongside it.
     static let taskLifecycleTools: Set<String> = [
         "task_update", "task_complete", "request_help", "reply_to_user",
-        "message_user", "notify_brown"
+        "message_user", "notify_brown", "wait_for_child_tasks"
     ]
 
     /// Smith tools that ACT ON a specific task, identified by a `task_id` argument. A Smith turn

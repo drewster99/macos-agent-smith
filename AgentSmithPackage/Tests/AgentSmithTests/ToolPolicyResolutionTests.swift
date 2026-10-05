@@ -58,6 +58,18 @@ struct ToolPolicyResolutionTests {
         #expect(resolve(base: ["bash"], task: ["file_write": true, "bash": false]) == ["file_write"])
     }
 
+    /// `save_memory` used to be FORCED available, which beat a Never set in Settings.
+    @Test("a tool approved by default is still removed by Never or a per-task Off")
+    func approvedByDefaultObeysRestrictions() {
+        let name = "save_memory"
+        #expect(ToolPolicy.workerToolsApprovedByDefault.contains(name))
+        let base = Set<String>().union(ToolPolicy.workerToolsApprovedByDefault)
+        let candidates: Set<String> = [name]
+        #expect(ToolPolicy.effectiveApprovedTools(base: base, candidates: candidates, globalPolicies: [:], taskOverrides: [:]) == [name])
+        #expect(ToolPolicy.effectiveApprovedTools(base: base, candidates: candidates, globalPolicies: [name: .never], taskOverrides: [:]).isEmpty)
+        #expect(ToolPolicy.effectiveApprovedTools(base: base, candidates: candidates, globalPolicies: [:], taskOverrides: [name: false]).isEmpty)
+    }
+
     @Test("neither a policy nor an override adds a tool the worker does not have")
     func nonCandidatesNeverAdded() {
         let result = resolve(base: [], global: ["create_task": .always], task: ["list_tasks": true])

@@ -1986,6 +1986,19 @@ final class AppViewModel {
     /// holds full authority over the plan — unlike the worker, edits here may delete
     /// steps outright rather than tombstoning them.
     @discardableResult
+    /// Adds one required capability as the user, marked as a later addition. On a task a worker is
+    /// running, the store's change event re-scopes that worker's tools before its next turn.
+    func addTaskRequiredCapability(id: UUID, text: String) async -> Bool {
+        guard let taskStore else { return false }
+        switch await taskStore.addRequiredCapability(id: id, text: text, addedBy: .user, reason: nil) {
+        case .added, .alreadyListed:
+            return true
+        case .refused(let problem):
+            taskActionError = problem
+            return false
+        }
+    }
+
     /// Writes the user's edit of a task's required capabilities. On a task a worker is running,
     /// the store's change event re-scopes that worker's tools.
     func setTaskRequiredCapabilities(

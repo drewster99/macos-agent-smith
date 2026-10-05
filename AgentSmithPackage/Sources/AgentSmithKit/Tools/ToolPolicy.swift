@@ -29,6 +29,11 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
         ReportInboundUserMessageTool.toolName: .never
     ]
 
+    /// Worker tools approved whatever the scoping verdict says — added to the base before the
+    /// policy and the task's overrides, so a global Never or a per-task Off still removes them.
+    /// `save_memory` used to be FORCED available instead, which beat a Never set in Settings.
+    public static let workerToolsApprovedByDefault: Set<String> = ["save_memory"]
+
     /// The policy in force for `tool`: the user's global entry if there is one, else the built-in
     /// default, else `.default`. The one definition every reader (engine and UI) uses.
     public static func effective(for tool: String, globalPolicies: [String: ToolPolicy]) -> ToolPolicy {

@@ -1600,7 +1600,12 @@ public actor OrchestrationRuntime {
     /// private message (which wakes it from `wait_for_child_tasks`), or, with no worker running it,
     /// onto the coordinator's queued worker messages for its next worker. A coordinator that has
     /// since finished or left the active list hears nothing, so the child's own Smith note goes to
-    /// Smith instead — the outcome is never dropped.
+    /// Smith instead. Residuals, both accepted: a note queued for a coordinator with no worker (e.g.
+    /// parked for the user's sign-off) is never read if that coordinator then completes without
+    /// another worker; and a post to a worker that is mid-teardown, or registered but not yet
+    /// subscribed during a respawn, is missed. Neither strands a WAITING coordinator: a parked
+    /// worker is always subscribed, and `wait_for_child_tasks` re-reads every child's status on
+    /// each call, as does the respawn briefing.
     private func deliverCoordinatorBriefing(
         _ ready: ReadyTaskEffect,
         coordinatorID: UUID,
@@ -4790,6 +4795,13 @@ public actor OrchestrationRuntime {
         // A Brown worker just went live — refresh the concurrency meter's Brown count.
         refreshBrownWorkerActivityCount()
         await catchUpOnModelChanges(brownAgent, role: .brown, builtAt: brownModelGeneration, builtWith: brownConfig)
+        // A capability added while scoping ran found no registered worker to re-scope
+        // (`TaskStoreEvent.requiredCapabilitiesChanged` is handled only for a live worker), so
+        // compare against the snapshot scoping used, now that later changes do reach this worker.
+        if let task, let current = await taskStore.task(id: task.id),
+           current.requiredCapabilities != task.requiredCapabilities {
+            await brownAgent.requestToolRescope()
+        }
 
         // Label the worker's channel messages with its task so the UI can distinguish
         // workers ("Brown" alone is ambiguous once several run concurrently).
@@ -5178,9 +5190,9 @@ public actor OrchestrationRuntime {
             taskStore: taskStore,
             currentConfiguration: llmConfigs[role],
             currentProviderType: providerAPITypes[role]?.rawValue,
-            spawnBrown: { [weak self] in
+            spawnBrown: { [weak self] task in
                 guard let self else { return nil }
-                return await self.spawnBrown()
+                return await self.spawnBrown(for: task)
             },
             terminateAgent: { [weak self] id, callerID in
                 guard let self else { return false }

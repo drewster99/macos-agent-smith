@@ -67,7 +67,7 @@ struct ServerMemoryExhaustionTests {
             agentRole: .brown,
             channel: channel,
             taskStore: TaskStore(),
-            spawnBrown: { nil },
+            spawnBrown: { _ in nil },
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in .brown },

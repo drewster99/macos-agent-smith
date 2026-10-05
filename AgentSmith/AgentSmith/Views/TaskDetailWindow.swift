@@ -103,7 +103,8 @@ private func presentSections(_ task: AgentTask) -> [TaskDetailSectionKind] {
     orderedSections(for: task.status).filter { kind in
         switch kind {
         case .description:    return true
-        case .capabilities:   return !task.requiredCapabilities.isEmpty
+        // Offered on any unfinished task, empty or not: it is where the user adds one live.
+        case .capabilities:   return !task.requiredCapabilities.isEmpty || (task.status != .completed && task.disposition == .active)
         // Always offered: it is where a watch is added.
         case .watches:        return true
         case .error:          return task.status == .failed && !(task.result ?? "").isEmpty
@@ -653,7 +654,7 @@ private struct TaskDetailSectionView: View {
         case .description:
             TaskDetailDescriptionSection(task: task, mode: mode, viewModel: viewModel,
                                          attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
-        case .capabilities:   TaskDetailCapabilitiesSection(task: task)
+        case .capabilities:   TaskDetailCapabilitiesSection(task: task, viewModel: viewModel)
         case .watches:        TaskWatchesSection(task: task, viewModel: viewModel)
         case .relatedContext: TaskDetailRelatedContextSection(task: task, viewModel: viewModel, sessionManager: sessionManager)
         }
@@ -1758,6 +1759,7 @@ private struct TaskDetailUpdatesSection: View {
 /// what the worker was scoped against — and what was learned and added while it ran — is visible.
 private struct TaskDetailCapabilitiesSection: View {
     let task: AgentTask
+    let viewModel: AppViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1772,8 +1774,39 @@ private struct TaskDetailCapabilitiesSection: View {
                     }
                 }
             }
+            if task.status != .completed && task.disposition == .active {
+                TaskDetailAddCapabilityField(taskID: task.id, viewModel: viewModel)
+            }
         }
         Divider()
+    }
+}
+
+/// Adds a required capability to an unfinished task — including a running one, whose worker's tools
+/// are then re-scoped before its next turn.
+private struct TaskDetailAddCapabilityField: View {
+    let taskID: UUID
+    let viewModel: AppViewModel
+    @State private var text = ""
+
+    var body: some View {
+        HStack {
+            TextField("Add a capability, e.g. Read the user's calendar", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(add)
+            Button("Add", action: add)
+                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    private func add() {
+        let capability = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !capability.isEmpty else { return }
+        Task {
+            if await viewModel.addTaskRequiredCapability(id: taskID, text: capability) {
+                text = ""
+            }
+        }
     }
 }
 

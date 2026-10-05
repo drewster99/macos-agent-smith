@@ -73,7 +73,7 @@ struct ProvideHelpTool: AgentTool {
                 break
             }
         }
-        if brownID == nil, let newBrownID = await context.spawnBrown() {
+        if brownID == nil, let newBrownID = await context.spawnBrown(task) {
             await context.taskStore.assignAgent(taskID: taskID, agentID: newBrownID)
             brownID = newBrownID
             brownWasSpawned = true
@@ -86,17 +86,18 @@ struct ProvideHelpTool: AgentTool {
         await context.taskStore.updateStatus(id: taskID, status: .running, cause: .helpProvided)
 
         let content: String
+        var briefingMissing = false
         if brownWasSpawned {
-            // New Brown has no prior conversation — give it full context plus the answer.
-            var parts: [String] = []
-            let currentTask = await context.taskStore.task(id: taskID) ?? task
-            parts.append("## Task: \(currentTask.title)\n\n\(currentTask.description)")
-            if !currentTask.updates.isEmpty {
-                let history = currentTask.updates.map { "- \($0.message)" }.joined(separator: "\n")
-                parts.append("## Prior Progress\n\(history)")
+            // New Brown has no prior conversation — give it the ONE worker briefing (criteria,
+            // steps, capabilities, working directories, progress) plus the answer. A thinner copy
+            // composed here used to drop the contract the worker is judged against.
+            let answer = "## Help you requested\n\(trimmedResponse)"
+            if let briefing = await context.composeTaskBriefing(taskID) {
+                content = "\(briefing)\n\n\(answer)"
+            } else {
+                briefingMissing = true
+                content = "Task: \"\(task.title)\" (ID: \(taskID.uuidString))\n\n\(answer)"
             }
-            parts.append("## Help you requested\n\(trimmedResponse)")
-            content = parts.joined(separator: "\n\n")
         } else {
             content = "Response to your help request on task '\(task.title)':\n\n\(trimmedResponse)"
         }
@@ -112,6 +113,9 @@ struct ProvideHelpTool: AgentTool {
             ]
         ))
 
+        if briefingMissing {
+            return .success("Help delivered to a newly spawned Brown, but its task briefing could not be composed, so it received only the task title and your answer. Tell it anything else it needs with notify_brown.")
+        }
         return .success(brownWasSpawned
             ? "Help delivered. A new Brown was spawned, briefed with the full task context and your answer, and is back at work."
             : "Help delivered to Brown. The task is back to running.")

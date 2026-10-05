@@ -61,7 +61,7 @@ struct AgentActorInjectionQueueTests {
             agentRole: .brown,
             channel: channel,
             taskStore: taskStore,
-            spawnBrown: { nil },
+            spawnBrown: { _ in nil },
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in .brown },

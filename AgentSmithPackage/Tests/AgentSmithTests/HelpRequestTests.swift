@@ -15,7 +15,7 @@ struct HelpRequestTests {
             agentRole: .brown,
             channel: channel,
             taskStore: taskStore,
-            spawnBrown: { nil },
+            spawnBrown: { _ in nil },
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { id in id == brownID ? .brown : (id == smithID ? .smith : nil) },
@@ -30,13 +30,57 @@ struct HelpRequestTests {
             agentRole: .smith,
             channel: channel,
             taskStore: taskStore,
-            spawnBrown: { nil },
+            spawnBrown: { _ in nil },
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { id in id == brownID ? .brown : (id == smithID ? .smith : nil) },
             agentIDForRole: { role in role == .brown ? brownID : (role == .smith ? smithID : nil) },
             memoryStore: MemoryStore(engine: SemanticSearchEngine())
         )
+    }
+
+    /// A task-less respawn skipped scoping and every tool policy, so it offered a worker tools the
+    /// user had set to Never. The respawn is for the task, and the worker gets the ONE briefing.
+    @Test("a worker respawned to receive help is spawned FOR the task and gets the full briefing")
+    func respawnIsTaskBound() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let smithID = UUID(), respawnedID = UUID()
+        let task = await taskStore.addTask(title: "Extract hooks", description: "...")
+        await taskStore.driveStatus(id: task.id, to: .running)
+        #expect(await taskStore.requestHelp(id: task.id, request: "Need the transcript."))
+        let spawnedFor = SpawnRecorder()
+        let ctx = ToolContext(
+            agentID: smithID,
+            agentRole: .smith,
+            channel: channel,
+            taskStore: taskStore,
+            spawnBrown: { spawnTask in
+                spawnedFor.record(spawnTask.id)
+                return respawnedID
+            },
+            terminateAgent: { _, _ in false },
+            abort: { _, _ in },
+            agentRoleForID: { id in id == respawnedID ? .brown : .smith },
+            composeTaskBriefing: { _ in "FULL-BRIEFING" },
+            memoryStore: MemoryStore(engine: SemanticSearchEngine())
+        )
+        let result = try await ProvideHelpTool().execute(
+            arguments: ["task_id": .string(task.id.uuidString), "response": .string("Here it is.")],
+            context: ctx
+        )
+        #expect(result.succeeded, "\(result.output)")
+        #expect(spawnedFor.ids == [task.id])
+        let delivered = await channel.allMessages().first { $0.recipientID == respawnedID }
+        #expect(delivered?.content.hasPrefix("FULL-BRIEFING") == true)
+        #expect(delivered?.content.contains("Here it is.") == true)
+    }
+
+    private final class SpawnRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var spawned: [UUID] = []
+        var ids: [UUID] { lock.withLock { spawned } }
+        func record(_ id: UUID) { lock.withLock { spawned.append(id) } }
     }
 
     @Test("request_help parks the task in awaitingHelp, flags it, and notifies Smith (no result set)")

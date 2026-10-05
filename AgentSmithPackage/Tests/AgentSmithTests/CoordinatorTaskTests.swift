@@ -121,6 +121,8 @@ struct CoordinatorTaskTests {
         #expect(BrownBehavior.toolNames.contains("wait_for_child_tasks"))
         #expect(!SmithBehavior.tools().contains { $0.name == "create_child_task" })
         #expect(WaitForChildTasksTool().successEffects == [.waitsForChildTasks])
+        // Sequenced after any create_child_task in the same response, never run alongside it.
+        #expect(AgentActor.taskLifecycleTools.contains("wait_for_child_tasks"))
         #expect(CreateChildTaskTool().successEffects.isEmpty)
     }
 
@@ -252,7 +254,7 @@ struct CoordinatorTaskTests {
             agentRole: .brown,
             channel: MessageChannel(),
             taskStore: store,
-            spawnBrown: { nil },
+            spawnBrown: { _ in nil },
             terminateAgent: { _, _ in false },
             abort: { _, _ in },
             agentRoleForID: { _ in .brown },

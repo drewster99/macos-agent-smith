@@ -177,7 +177,7 @@ struct TaskToolOverrideEditor: View {
         // An override cannot give a worker a tool it can never have.
         guard BrownBehavior.acceptsToolOverride(named: tool) else { return false }
         return ToolPolicy.effectiveApprovedTools(
-            base: approved,
+            base: approved.union(ToolPolicy.workerToolsApprovedByDefault),
             candidates: [tool],
             globalPolicies: viewModel.shared.globalToolPolicies,
             taskOverrides: task.userToolOverrides ?? [:]
