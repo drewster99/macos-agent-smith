@@ -49,6 +49,21 @@ struct TaskEditorSheet: View {
     /// replaces the step array wholesale and an active-only array erases the append-only record
     /// that acceptance validators are promised.
     @State private var preservedTombstones: [TaskStep]
+    /// What this form would save for the task exactly as it opened (`Mode.edit`'s task) — built by
+    /// the same builders `save()` uses, so an untouched part compares equal even where the builders
+    /// normalize (they park tombstones after the active steps and fill an empty prompt from the
+    /// name). Save writes a part only when it differs from this, because the contract and steps are
+    /// refused once the task is running and an untouched part must not block a change that is
+    /// allowed.
+    struct OpenedForm {
+        let title: String
+        let description: String
+        let isTemplate: Bool
+        let inputs: [TemplateInputDefinition]
+        let instanceTitleTemplate: String
+        let criteria: [AcceptanceCriterion]
+        let steps: [TaskStep]
+    }
     @State private var localError: String?
 
     struct InputRow: Identifiable {
@@ -175,23 +190,48 @@ struct TaskEditorSheet: View {
             _description = State(initialValue: task.description)
             _isTemplate = State(initialValue: task.isTemplate)
             _instanceTitleTemplate = State(initialValue: task.templateInstanceTitleTemplate ?? "")
-            _inputs = State(initialValue: task.templateInputDefinitions.map {
-                InputRow(name: $0.name, description: $0.description, required: $0.required)
-            })
-            _criteria = State(initialValue: task.acceptanceCriteria.map {
-                CriterionRow(
-                    id: $0.id,
-                    name: $0.name,
-                    validationPrompt: $0.validationPrompt,
-                    inputEnumeratorPrompt: $0.inputEnumeratorPrompt ?? "",
-                    waivable: $0.waivable
-                )
-            })
-            _steps = State(initialValue: task.steps.filter(\.isActive).map(StepRow.init(step:)))
+            _inputs = State(initialValue: Self.inputRows(of: task))
+            _criteria = State(initialValue: Self.criterionRows(of: task))
+            _steps = State(initialValue: Self.stepRows(of: task))
             _capabilities = State(initialValue: task.requiredCapabilities.map(CapabilityRow.init(capability:)))
             _requiresUserAcceptance = State(initialValue: task.requiresUserAcceptance)
             _preservedTombstones = State(initialValue: task.steps.filter { !$0.isActive })
         }
+    }
+
+    private static func inputRows(of task: AgentTask) -> [InputRow] {
+        task.templateInputDefinitions.map {
+            InputRow(name: $0.name, description: $0.description, required: $0.required)
+        }
+    }
+
+    private static func criterionRows(of task: AgentTask) -> [CriterionRow] {
+        task.acceptanceCriteria.map {
+            CriterionRow(
+                id: $0.id,
+                name: $0.name,
+                validationPrompt: $0.validationPrompt,
+                inputEnumeratorPrompt: $0.inputEnumeratorPrompt ?? "",
+                waivable: $0.waivable
+            )
+        }
+    }
+
+    private static func stepRows(of task: AgentTask) -> [StepRow] {
+        task.steps.filter(\.isActive).map(StepRow.init(step:))
+    }
+
+    /// `OpenedForm` for `task`, from the same rows and builders the form itself uses.
+    private static func openedForm(of task: AgentTask) -> OpenedForm {
+        OpenedForm(
+            title: task.title.trimmingCharacters(in: .whitespacesAndNewlines),
+            description: task.description.trimmingCharacters(in: .whitespacesAndNewlines),
+            isTemplate: task.isTemplate,
+            inputs: builtInputs(from: inputRows(of: task)),
+            instanceTitleTemplate: (task.templateInstanceTitleTemplate ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            criteria: builtCriteria(from: criterionRows(of: task)),
+            steps: builtActiveSteps(from: stepRows(of: task)) + task.steps.filter { !$0.isActive }
+        )
     }
 
     var body: some View {
@@ -494,8 +534,10 @@ struct TaskEditorSheet: View {
 
     /// The template input definitions this form would save. Shared with `save()` so the live
     /// warning and the refusal that actually blocks Save can never disagree about what is written.
-    private var builtInputs: [TemplateInputDefinition] {
-        inputs.compactMap { row -> TemplateInputDefinition? in
+    private var builtInputs: [TemplateInputDefinition] { Self.builtInputs(from: inputs) }
+
+    private static func builtInputs(from rows: [InputRow]) -> [TemplateInputDefinition] {
+        rows.compactMap { row -> TemplateInputDefinition? in
             let name = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let description = row.description.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty || !description.isEmpty else { return nil }
@@ -507,8 +549,10 @@ struct TaskEditorSheet: View {
     /// dropped, and an empty name falls back to the prompt — which is also the name the store
     /// quotes back in a placeholder refusal, so the live warning has to be built from exactly this
     /// list or it names a different criterion than the save does.
-    private var builtCriteria: [AcceptanceCriterion] {
-        criteria.compactMap { row -> AcceptanceCriterion? in
+    private var builtCriteria: [AcceptanceCriterion] { Self.builtCriteria(from: criteria) }
+
+    private static func builtCriteria(from rows: [CriterionRow]) -> [AcceptanceCriterion] {
+        rows.compactMap { row -> AcceptanceCriterion? in
             let name = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let prompt = row.validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty || !prompt.isEmpty else { return nil }
@@ -527,18 +571,10 @@ struct TaskEditorSheet: View {
     /// The ACTIVE steps this form would save, in plan order. Empty rows are dropped HERE, exactly
     /// as they are on save, so the position a placeholder problem names is the position `setSteps`
     /// names.
-    private var builtActiveSteps: [TaskStep] {
-        steps.compactMap { $0.built() }
-    }
+    private var builtActiveSteps: [TaskStep] { Self.builtActiveSteps(from: steps) }
 
-    /// Whether the criteria differ in anything the user edits here. `origin` is not compared: this
-    /// form rebuilds every row as `.user`, so comparing it would call every save a change.
-    private static func criteriaChanged(_ edited: [AcceptanceCriterion], from stored: [AcceptanceCriterion]) -> Bool {
-        guard edited.count == stored.count else { return true }
-        return zip(edited, stored).contains { lhs, rhs in
-            lhs.id != rhs.id || lhs.name != rhs.name || lhs.validationPrompt != rhs.validationPrompt
-                || lhs.inputEnumeratorPrompt != rhs.inputEnumeratorPrompt || lhs.waivable != rhs.waivable
-        }
+    private static func builtActiveSteps(from rows: [StepRow]) -> [TaskStep] {
+        rows.compactMap { $0.built() }
     }
 
     /// The required capabilities this form would save, in order, empty rows dropped — shared with
@@ -583,11 +619,12 @@ struct TaskEditorSheet: View {
                 // Written only when one of its fields changed: the definition is refused once the
                 // task is running, and that refusal must not block a change it doesn't cover (a
                 // capability added to a task that started while this sheet was open).
-                let definitionChanged = trimmedTitle != task.title
-                    || trimmedDescription != task.description
-                    || isTemplate != task.isTemplate
-                    || inputDefinitions != task.templateInputDefinitions
-                    || instanceTitleTemplate.trimmingCharacters(in: .whitespacesAndNewlines) != (task.templateInstanceTitleTemplate ?? "")
+                let opened = Self.openedForm(of: task)
+                let definitionChanged = trimmedTitle != opened.title
+                    || trimmedDescription != opened.description
+                    || isTemplate != opened.isTemplate
+                    || inputDefinitions != opened.inputs
+                    || instanceTitleTemplate.trimmingCharacters(in: .whitespacesAndNewlines) != opened.instanceTitleTemplate
                 saved = true
                 if definitionChanged {
                     saved = await viewModel.updateTaskDefinition(
@@ -607,11 +644,11 @@ struct TaskEditorSheet: View {
                     // Like the definition above, each part is written only when it changed: the
                     // contract and steps are refused once the task is running, and an unchanged part
                     // must not block a change that is allowed (a capability edit).
-                    if gateChange != nil || Self.criteriaChanged(criteriaToSave, from: task.acceptanceCriteria) {
+                    if gateChange != nil || criteriaToSave != opened.criteria {
                         saved = await viewModel.editTaskAcceptanceContract(
                             id: task.id, criteria: criteriaToSave, requiresUserAcceptance: gateChange)
                     }
-                    if saved && builtSteps != task.steps {
+                    if saved && builtSteps != opened.steps {
                         saved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
                     }
                 }
