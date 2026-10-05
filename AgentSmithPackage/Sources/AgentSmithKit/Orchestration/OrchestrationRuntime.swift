@@ -2415,9 +2415,18 @@ public actor OrchestrationRuntime {
 
     /// Hands a just-registered agent any model change merged while it was being built. A spawn reads
     /// its configuration, then suspends many times before registering, and a `setProviders` push in
-    /// that window could not reach an agent that was not registered yet.
-    private func catchUpOnModelChanges(_ agent: AgentActor, role: AgentRole, builtAt generation: UInt64) async {
-        guard modelChangeGeneration != generation, let change = currentModelChange(for: role) else { return }
+    /// that window could not reach an agent that was not registered yet. Only a change to THIS
+    /// role's configuration counts — the same rule `setProviders` applies — so a refresh that left
+    /// the role alone doesn't swap in an identical provider and throw away its prompt cache.
+    private func catchUpOnModelChanges(
+        _ agent: AgentActor,
+        role: AgentRole,
+        builtAt generation: UInt64,
+        builtWith configuration: ModelConfiguration
+    ) async {
+        guard modelChangeGeneration != generation,
+              llmConfigs[role] != configuration,
+              let change = currentModelChange(for: role) else { return }
         await agent.scheduleModelChange(change)
     }
 
@@ -3223,7 +3232,7 @@ public actor OrchestrationRuntime {
         )
 
         supervisor.register(id: id, role: .smith, agent: smithAgent)
-        await catchUpOnModelChanges(smithAgent, role: .smith, builtAt: smithModelGeneration)
+        await catchUpOnModelChanges(smithAgent, role: .smith, builtAt: smithModelGeneration, builtWith: smithConfig)
 
         let subID = await channel.subscribe { [weak smithAgent] message in
             guard let smithAgent else { return }
@@ -4637,7 +4646,7 @@ public actor OrchestrationRuntime {
         }
         // A Brown worker just went live — refresh the concurrency meter's Brown count.
         refreshBrownWorkerActivityCount()
-        await catchUpOnModelChanges(brownAgent, role: .brown, builtAt: brownModelGeneration)
+        await catchUpOnModelChanges(brownAgent, role: .brown, builtAt: brownModelGeneration, builtWith: brownConfig)
 
         // Label the worker's channel messages with its task so the UI can distinguish
         // workers ("Brown" alone is ambiguous once several run concurrently).
