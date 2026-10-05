@@ -52,8 +52,9 @@ struct TaskCostDetailWindow: View {
 
     private func load() async {
         isLoading = true
-        let all = await shared.usageStore.allRecords()
-        let mine = all.filter { $0.taskID == taskID }
+        // Only this task's records: a filtered, independently owned array. Fetching the whole store
+        // here shared `UsageStore`'s buffer for the length of this function.
+        let mine = await shared.usageStore.records(for: taskID)
         records = mine
         resolvedSessionID = mine.first?.sessionID
 
@@ -61,10 +62,10 @@ struct TaskCostDetailWindow: View {
             ?? shared.deletedTasks.first(where: { $0.id == taskID })
         summary = shared.storedTaskSummaries.first(where: { $0.id == taskID })
 
-        // All-time average TASK cost (task-attributed records only — nil-task Orchestration cost is
-        // excluded so it doesn't inflate the average), the same basis the dashboard uses per-range.
-        let byTask = aggregator.byTask(all)
-        let taskCosts = byTask.compactMap { key, value in key == nil ? nil : value.totalCostUSD }
+        // All-time average TASK cost, from the one per-task source (`CostBoard.taskUsage`, mirrored
+        // here). Task-attributed records only — nil-task Orchestration cost is not in that map, so
+        // it can't inflate the average — the same basis the dashboard uses per-range.
+        let taskCosts = shared.taskUsage.values.map(\.cost)
         taskCount = taskCosts.count
         averageTaskCostUSD = taskCosts.isEmpty ? 0 : taskCosts.reduce(0, +) / Double(taskCosts.count)
 

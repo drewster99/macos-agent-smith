@@ -20,7 +20,14 @@ struct SpendingDashboardView: View {
     // MARK: - State
 
     @State private var selectedRange: TimeRange = .week
-    @State private var allRecords: [UsageRecord] = []
+    /// The bounds the current figures were computed for (inclusive), so a drill-down fetches the
+    /// same window the cards show.
+    @State private var loadedRangeBounds: DateInterval?
+    /// Bumped by every load; a load whose number is no longer current when its off-main pass returns
+    /// is discarded, so a slow load for an earlier range can never overwrite a newer one.
+    @State private var loadGeneration = 0
+    /// The Orchestration bucket's records, fetched only while its drill-down sheet is open.
+    @State private var orchestrationSheetRecords: [UsageRecord] = []
     /// What the cost-detail sheet is drilling into (nil = no sheet). A specific task, or the
     /// Orchestration bucket (records not attributed to any task).
     @State private var costDetail: CostDetail?
@@ -111,15 +118,16 @@ struct SpendingDashboardView: View {
     @State private var providerNames: [String: String] = [:]
     @State private var isLoading = true
 
-    // MARK: - Cached derived state (recomputed on load and range change)
+    // MARK: - Derived state (recomputed off the main thread on load and range change)
+    //
+    // Only finished figures live in `@State` — never the records they came from. The window used to
+    // keep the store's whole record array (and filtered copies) in `@State`: an exported array
+    // shares `UsageStore`'s buffer, so while the dashboard was open every usage append copied the
+    // entire history (~150 MB at 65k records), and the main thread re-aggregated it every 1.5 s.
 
-    /// Filtered to the selected time range. Recomputed via `recomputeDerivedState()`.
-    @State private var filteredRecords: [UsageRecord] = []
-    /// Records from the equivalent prior period (for delta comparison).
-    @State private var priorRecords: [UsageRecord] = []
-    /// Aggregated summary of `filteredRecords`.
+    /// Aggregated summary of the selected range.
     @State private var currentSummary: UsageSummary = .empty()
-    /// Aggregated summary of `priorRecords`.
+    /// Aggregated summary of the equivalent prior period (for the delta).
     @State private var priorSummary: UsageSummary = .empty()
 
     /// Cost-over-time bars (stacked by provider), precomputed so chart hover doesn't re-aggregate.
@@ -130,7 +138,7 @@ struct SpendingDashboardView: View {
     @State private var chartBucketUnit: Calendar.Component = .day
 
     /// Breakdown-card datasets, one per card, precomputed so a chart hover or filter keystroke
-    /// doesn't re-aggregate `filteredRecords` four times.
+    /// doesn't re-aggregate four times.
     @State private var providerBreakdown: [BreakdownBar] = []
     @State private var agentBreakdown: [BreakdownBar] = []
     @State private var modelBreakdown: [ModelBreakdownRow] = []
@@ -259,8 +267,11 @@ struct SpendingDashboardView: View {
             await loadRecords()
         }
         .onChange(of: selectedRange) {
-            // Project rule: defer @State mutations out of .onChange.
-            DispatchQueue.main.async { recomputeDerivedState() }
+            // Project rule: defer @State mutations out of .onChange. A range change is a reload: the
+            // figures are computed off-main from that range's records.
+            DispatchQueue.main.async {
+                Task { await loadRecords(silent: true) }
+            }
         }
         .onChange(of: ledgerSearch) {
             DispatchQueue.main.async { recomputeDisplayRows() }
@@ -276,14 +287,14 @@ struct SpendingDashboardView: View {
                 ProgressView("Loading usage data...")
             }
         }
-        .sheet(item: $costDetail) { _ in
+        .sheet(item: $costDetail, onDismiss: { orchestrationSheetRecords = [] }) { _ in
             // Orchestration is not a task, so "vs Average" (a per-task comparison) is hidden (0).
             TaskCostDetailSheet(
                 taskID: nil,
                 titleOverride: "Orchestration",
                 task: nil,
                 taskSummary: nil,
-                records: filteredRecords.filter { $0.taskID == nil },
+                records: orchestrationSheetRecords,
                 taskCountInRange: max(1, ledgerRows.count),
                 averageTaskCostUSD: 0,
                 aggregator: aggregator
@@ -291,11 +302,13 @@ struct SpendingDashboardView: View {
         }
     }
 
-    /// Loads all usage records and recomputes derived state. `silent` skips the loading overlay,
-    /// used by the throttled live-refresh so it doesn't flash a spinner on every insert burst.
+    /// Computes the dashboard's figures for the selected range and applies them. `silent` skips the
+    /// loading overlay, used by the throttled live-refresh so it doesn't flash a spinner on every
+    /// insert burst.
     private func loadRecords(silent: Bool = false) async {
         if !silent { isLoading = true }
-        allRecords = await shared.usageStore.allRecords()
+        loadGeneration += 1
+        let generation = loadGeneration
         // Snapshot pricing keyed by "providerID/modelID" so the aggregator closure
         // doesn't need to cross the main-actor boundary at query time.
         var pricing: [String: ModelPricing] = [:]
@@ -313,52 +326,55 @@ struct SpendingDashboardView: View {
             names[provider.id] = provider.name
         }
         providerNames = names
-        recomputeDerivedState()
+
+        let request = DashboardAggregationRequest(range: selectedRange)
+        let aggregate = await DashboardAggregate.compute(
+            request,
+            store: shared.usageStore,
+            aggregator: aggregator
+        )
+        // A newer load started while this one ran; its result is the one that counts.
+        guard generation == loadGeneration else { return }
+        apply(aggregate)
         isLoading = false
     }
 
-    /// Recomputes cached derived state from `allRecords`, `selectedRange`, and
-    /// `pricingSnapshot`. Called after data loads and when the time range changes.
-    /// Avoids redundant O(n) passes — without caching, each computed property
-    /// was recalculated on every body evaluation (5-7 accesses per render).
-    /// NOTE: If `allRecords` is ever set outside `loadRecords()`, this must be
-    /// called afterward (or an `.onChange(of: allRecords)` handler added).
-    private func recomputeDerivedState() {
-        let interval = selectedRange.dateInterval()
-        if selectedRange == .all {
-            filteredRecords = allRecords
-            priorRecords = []
-        } else {
-            filteredRecords = allRecords.filter { $0.timestamp >= interval.current.start && $0.timestamp <= interval.current.end }
-            priorRecords = allRecords.filter { $0.timestamp >= interval.prior.start && $0.timestamp < interval.prior.end }
-        }
-        let agg = aggregator
-        currentSummary = agg.summarize(filteredRecords, scopeLabel: selectedRange.rawValue)
-        priorSummary = agg.summarize(priorRecords, scopeLabel: "Prior \(selectedRange.rawValue)")
+    /// Writes one computed aggregate into the view's state. Cheap — maps and sorts small results.
+    private func apply(_ aggregate: DashboardAggregate) {
+        loadedRangeBounds = aggregate.currentBounds
+        currentSummary = aggregate.current
+        priorSummary = aggregate.prior
 
-        // Pre-compute the ledger rows ONCE here (the expensive per-task aggregation) so the
-        // Tasks section only sorts/filters a small array in its body — no re-aggregation while
-        // scrolling. `nil` is the Orchestration bucket, kept separate.
-        let grouped = agg.byTask(filteredRecords)
-        orchestrationSummary = grouped[nil].flatMap { $0.callCount > 0 ? $0 : nil }
+        // `nil` is the Orchestration bucket, kept separate from the per-task ledger.
+        orchestrationSummary = aggregate.byTask[nil].flatMap { $0.callCount > 0 ? $0 : nil }
         let taskLookup = taskTitleLookup()
-        ledgerRows = grouped.compactMap { key, value in
+        ledgerRows = aggregate.byTask.compactMap { key, value in
             guard let key else { return nil }
             return TaskLedgerRow(id: key.uuidString, taskID: key, title: ledgerTitle(for: key, using: taskLookup), summary: value)
         }
         recomputeDisplayRows()
-        recomputeChartSeries(agg)
-        recomputeBreakdowns(agg)
+        applyChartSeries(aggregate)
+        applyBreakdowns(aggregate)
     }
 
-    /// Builds the four breakdown-card datasets once per data/range change (one pass each over
-    /// `filteredRecords`), so the cards render from ready arrays. Shares run before the ledger so
-    /// `currentSummary` (the denominator) is already set.
-    private func recomputeBreakdowns(_ agg: UsageAggregator) {
+    /// Opens the Orchestration drill-down with exactly the window the cards were computed for. Its
+    /// records are fetched now and dropped when the sheet closes, never held while it is shut.
+    private func openOrchestrationDetail() {
+        guard let bounds = loadedRangeBounds else { return }
+        Task {
+            let records = await shared.usageStore.records(from: bounds.start, to: bounds.end)
+            orchestrationSheetRecords = records.filter { $0.taskID == nil }
+            costDetail = .orchestration
+        }
+    }
+
+    /// Builds the four breakdown-card datasets from the computed aggregate. Shares run against
+    /// `currentSummary` (the denominator), which `apply` sets first.
+    private func applyBreakdowns(_ aggregate: DashboardAggregate) {
         let total = currentSummary.totalCostUSD
         func share(_ cost: Double) -> Double { total > 0 ? cost / total : 0 }
 
-        providerBreakdown = agg.byProvider(filteredRecords)
+        providerBreakdown = aggregate.byProvider
             .compactMap { key, value -> BreakdownBar? in
                 guard let key else { return nil }
                 return BreakdownBar(id: key, name: providerDisplayName(key), cost: value.totalCostUSD,
@@ -366,7 +382,7 @@ struct SpendingDashboardView: View {
             }
             .sorted { $0.cost > $1.cost }
 
-        agentBreakdown = agg.byAgent(filteredRecords)
+        agentBreakdown = aggregate.byAgent
             .map { role, value in
                 BreakdownBar(id: role.rawValue, name: role.displayName, cost: value.totalCostUSD,
                              fraction: share(value.totalCostUSD), color: AppColors.color(for: .agent(role)))
@@ -374,14 +390,14 @@ struct SpendingDashboardView: View {
             .sorted { $0.cost > $1.cost }
 
         modelBreakdown = Array(
-            agg.byModel(filteredRecords)
+            aggregate.byModel
                 .map { ModelBreakdownRow(id: $0.key, model: $0.key, cost: $0.value.totalCostUSD, calls: $0.value.callCount) }
                 .sorted { $0.cost > $1.cost }
                 .prefix(8)
         )
 
         toolBreakdown = Array(
-            toolFrequencyFromRecords(filteredRecords)
+            aggregate.toolCallCounts
                 .map { ToolBreakdownRow(id: $0.key, tool: $0.key, count: $0.value) }
                 .sorted { $0.count > $1.count }
                 .prefix(8)
@@ -595,29 +611,15 @@ struct SpendingDashboardView: View {
         let cost: Double
     }
 
-    /// Builds the cost-over-time bars once per data/range change (multiple O(n) passes over
-    /// `filteredRecords`), so chart hover and unrelated body updates don't re-aggregate them.
-    private func recomputeChartSeries(_ agg: UsageAggregator) {
-        let bucketUnit: Calendar.Component
-        switch selectedRange {
-        case .today: bucketUnit = .hour
-        case .week, .month: bucketUnit = .day
-        case .all: bucketUnit = .month
-        }
-        chartBucketUnit = bucketUnit
-
-        let providerIDs = agg.byProvider(filteredRecords).keys.compactMap { $0 }.sorted()
-        var items: [ChartItem] = []
-        for providerID in providerIDs {
-            let providerRecords = filteredRecords.filter { $0.providerID == providerID }
-            let buckets = agg.byTimeBucket(providerRecords, unit: bucketUnit)
-            let displayName = providerDisplayName(providerID)
-            for (date, summary) in buckets {
-                items.append(ChartItem(
-                    id: "\(displayName)|\(date.timeIntervalSinceReferenceDate)",
-                    date: date, provider: displayName, cost: summary.totalCostUSD
-                ))
-            }
+    /// Builds the cost-over-time bars from the computed aggregate's per-provider buckets.
+    private func applyChartSeries(_ aggregate: DashboardAggregate) {
+        chartBucketUnit = aggregate.bucketUnit
+        var items: [ChartItem] = aggregate.chartBuckets.map { bucket in
+            let displayName = providerDisplayName(bucket.providerID)
+            return ChartItem(
+                id: "\(displayName)|\(bucket.date.timeIntervalSinceReferenceDate)",
+                date: bucket.date, provider: displayName, cost: bucket.cost
+            )
         }
         items.sort { $0.date < $1.date }
         chartSeries = items
@@ -919,7 +921,7 @@ struct SpendingDashboardView: View {
                 ledgerHeader(sortable: false)
                 Divider()
 
-                LedgerRowButton(onTap: { costDetail = .orchestration }, content: {
+                LedgerRowButton(onTap: openOrchestrationDetail, content: {
                     ledgerRow(title: "Orchestration", summary: planningSummary)
                 })
             }
@@ -1003,18 +1005,6 @@ struct SpendingDashboardView: View {
     /// Resolves a provider ID to its display name, falling back to the raw ID.
     private func providerDisplayName(_ id: String) -> String {
         providerNames[id] ?? id
-    }
-
-    /// Counts tool invocations across all records by flattening toolCallNames.
-    private func toolFrequencyFromRecords(_ records: [UsageRecord]) -> [String: Int] {
-        var counts: [String: Int] = [:]
-        for record in records {
-            guard let names = record.toolCallNames else { continue }
-            for name in names {
-                counts[name, default: 0] += 1
-            }
-        }
-        return counts
     }
 
     private func formatCost(_ cost: Double) -> String {

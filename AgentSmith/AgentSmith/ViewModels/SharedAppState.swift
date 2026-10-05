@@ -1613,9 +1613,9 @@ final class SharedAppState {
     }
 
     private func runUsageHealthCheck() async {
-        let allRecords = await usageStore.allRecords()
         let cutoff = Date().addingTimeInterval(-7 * 24 * 60 * 60)
-        let recent = allRecords.filter { $0.timestamp >= cutoff }
+        // A filtered, independently owned array — never the store's whole buffer.
+        let recent = await usageStore.records(from: cutoff, to: .distantFuture)
         guard recent.count >= 20 else { return }
 
         let cacheCapableProviders: Set<String> = [
