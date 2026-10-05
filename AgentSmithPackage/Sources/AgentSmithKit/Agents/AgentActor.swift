@@ -2413,19 +2413,27 @@ public actor AgentActor {
         struct CallSegment {
             let isLifecycle: Bool
             var calls: [LLMToolCall]
+            /// Each call's position in `callsToExecute`, parallel to `calls`.
+            var positions: [Int]
         }
 
         var segments: [CallSegment] = []
-        for call in callsToExecute {
+        for (position, call) in callsToExecute.enumerated() {
             let isLifecycle = Self.taskLifecycleTools.contains(call.name)
             if let last = segments.last, last.isLifecycle == isLifecycle {
                 segments[segments.count - 1].calls.append(call)
+                segments[segments.count - 1].positions.append(position)
             } else {
-                segments.append(CallSegment(isLifecycle: isLifecycle, calls: [call]))
+                segments.append(CallSegment(isLifecycle: isLifecycle, calls: [call], positions: [position]))
             }
         }
 
-        var executedCallIDs = Set<String>()
+        // Which calls got a result, by POSITION in `callsToExecute` — never by id. A call id is
+        // provider data and need not be unique within one response (empty or reused ids occur), so
+        // an id set would mark a second same-id call as answered and the placeholder pass below
+        // would leave it without a result: a `tool_use` with no `tool_result`, which providers
+        // reject outright.
+        var answeredPositions = Set<Int>()
 
         toolSegments: for segment in segments {
             guard isRunning else { break }
@@ -2439,7 +2447,7 @@ public actor AgentActor {
                 // in `autoApprovedToolsByRole`, so routing them costs a recorded auto-approval
                 // rather than an LLM round-trip; the sequencing and the `task_complete` break
                 // below are unchanged, because a lifecycle segment still runs its calls in order.
-                for call in segment.calls {
+                for (offset, call) in segment.calls.enumerated() {
                     guard isRunning else { break }
                     let result: String
                     let succeeded: Bool
@@ -2459,7 +2467,7 @@ public actor AgentActor {
                         await toolContext.setToolExecutionStatus(call.id, false)
                         recordToolOutcome(name: call.name, succeeded: false, output: result)
                     }
-                    executedCallIDs.insert(call.id)
+                    answeredPositions.insert(segment.positions[offset])
                     updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, triggeredRuntimeRestart: &triggeredRuntimeRestart)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
@@ -2669,7 +2677,7 @@ public actor AgentActor {
                     merged.append(MergedEntry(batchIndex: r.batchIndex, callID: r.callID, toolName: r.toolName, result: r.result, succeeded: false, executionMs: 0))
                 }
                 for r in merged.sorted(by: { $0.batchIndex < $1.batchIndex }) {
-                    executedCallIDs.insert(r.callID)
+                    answeredPositions.insert(segment.positions[r.batchIndex])
                     turnToolExecutionMs += r.executionMs
                     turnToolResultChars += r.result.count
                     recordToolOutcome(name: r.toolName, succeeded: r.succeeded, output: r.result)
@@ -2710,7 +2718,7 @@ public actor AgentActor {
                         await toolContext.setToolExecutionStatus(call.id, false)
                         recordToolOutcome(name: call.name, succeeded: false, output: result)
                     }
-                    executedCallIDs.insert(call.id)
+                    answeredPositions.insert(segment.positions[batchIndex])
                     updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, triggeredRuntimeRestart: &triggeredRuntimeRestart)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
@@ -2726,7 +2734,7 @@ public actor AgentActor {
         // Safety: if any segment loop exited early (stop() during await), append placeholder
         // results for remaining tool_calls to maintain the API invariant.
         var appendedPlaceholders = false
-        for call in callsToExecute where !executedCallIDs.contains(call.id) {
+        for (position, call) in callsToExecute.enumerated() where !answeredPositions.contains(position) {
             let cancellationReason = calledTaskComplete
                 ? "Tool not executed because the preceding lifecycle handoff parked the agent."
                 : "Tool execution cancelled (agent stopped)"
