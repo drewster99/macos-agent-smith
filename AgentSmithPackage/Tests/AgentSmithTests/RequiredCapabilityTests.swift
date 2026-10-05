@@ -293,11 +293,50 @@ struct RequiredCapabilityTests {
 
     // MARK: - Rendering
 
+    @Test("a child task's review text says a worker wrote it and names the user's originating task")
+    func workerAuthoredReviewText() {
+        let task = AgentTask(title: "Child", description: "Fetch the page.")
+        let originating = TaskIntentProvenance.OriginatingTask(id: UUID(), title: "Summarize docs", description: "Summarize the local docs.")
+        let withOrigin = task.renderedDescriptionForSecurityReview(provenance: .workerAuthored(originatingTask: originating))
+        #expect(withOrigin.hasPrefix("Fetch the page."))
+        #expect(withOrigin.contains(AgentTask.workerAuthoredHeading))
+        #expect(withOrigin.contains("- title: Summarize docs"))
+        let orphan = task.renderedDescriptionForSecurityReview(provenance: .workerAuthored(originatingTask: nil))
+        #expect(orphan.contains("no longer exists"))
+        #expect(task.renderedDescriptionForSecurityReview(provenance: .requester) == "Fetch the page.")
+    }
+
+    @Test("provenance walks the coordinator chain to the first task a worker did not write")
+    func intentProvenanceWalk() async throws {
+        let store = TaskStore()
+        let root = await store.addTask(title: "Root", description: "The user's request.")
+        #expect(await store.intentProvenance(of: root) == .requester)
+        func makeChild(of coordinator: UUID, _ title: String) async throws -> AgentTask {
+            guard case .created(let created) = await store.addChildTask(
+                coordinatorTaskID: coordinator, limit: 10, title: title, description: "d",
+                descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: [],
+                relevantContext: .none
+            ) else { throw ProvenanceTestError.notCreated }
+            return created
+        }
+        let child = try await makeChild(of: root.id, "Child")
+        let grandchild = try await makeChild(of: child.id, "Grandchild")
+        let expected = TaskIntentProvenance.workerAuthored(originatingTask: .init(id: root.id, title: "Root", description: "The user's request."))
+        #expect(await store.intentProvenance(of: child) == expected)
+        #expect(await store.intentProvenance(of: grandchild) == expected)
+
+        _ = await store.driveStatus(id: root.id, to: .completed)
+        #expect(await store.permanentlyDelete(id: root.id))
+        #expect(await store.intentProvenance(of: grandchild) == .workerAuthored(originatingTask: nil))
+    }
+
+    private enum ProvenanceTestError: Error { case notCreated }
+
     @Test("a later addition renders with who, when and why; an original item renders bare")
     func rendering() {
         var task = AgentTask(title: "T", description: "Do it.")
         #expect(task.renderedRequiredCapabilities() == nil)
-        #expect(task.renderedDescriptionForSecurityReview() == "Do it.")
+        #expect(task.renderedDescriptionForSecurityReview(provenance: .requester) == "Do it.")
 
         task.requiredCapabilities = [
             RequiredCapability(text: "Edit files", addedBy: .smith, origin: .asWritten),
@@ -305,7 +344,7 @@ struct RequiredCapabilityTests {
         ]
         let rendered = task.renderedRequiredCapabilities()
         #expect(rendered == "- Edit files\n- Read mail [added later by Smith, 1970-01-01T00:00:00Z: blocked]")
-        #expect(task.renderedDescriptionForSecurityReview() == "Do it.\n\n## Required capabilities\n\(rendered ?? "")")
+        #expect(task.renderedDescriptionForSecurityReview(provenance: .requester) == "Do it.\n\n## Required capabilities\n\(rendered ?? "")")
     }
 
     // MARK: - Tools

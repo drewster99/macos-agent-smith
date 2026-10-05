@@ -36,7 +36,8 @@ struct SecurityEvaluatorScopingTests {
             taskTitle: "Test",
             taskID: UUID().uuidString,
             taskDescription: "Check the time",
-            requiredCapabilities: []
+            requiredCapabilities: [],
+            intentProvenance: .requester
         )
 
         #expect(result.succeeded)
@@ -66,7 +67,8 @@ struct SecurityEvaluatorScopingTests {
                 taskTitle: "Test",
                 taskID: UUID().uuidString,
                 taskDescription: "Check the time",
-                requiredCapabilities: capabilities
+                requiredCapabilities: capabilities,
+                intentProvenance: .requester
             )
             guard let user = provider.receivedMessages.first?.last, case .text(let text) = user.content else { return nil }
             return text
@@ -79,6 +81,43 @@ struct SecurityEvaluatorScopingTests {
         let without = await userMessage(capabilities: [])
         #expect(without != nil)
         #expect(without?.contains("requiredCapabilities") == false)
+    }
+
+    /// A child task's text is a worker's claim, not the user's request (/stupid A1): the scoper is
+    /// told who wrote it and what the user actually asked for.
+    @Test("the scoping request says who wrote the task and, for a child, the originating task")
+    func taskAuthorField() async {
+        func userMessage(_ provenance: TaskIntentProvenance) async -> String? {
+            let provider = MockLLMProvider(responses: [LLMResponse(text: json([("get_current_time", true)]))])
+            let evaluator = SecurityEvaluator(
+                provider: provider,
+                systemPrompt: "unused per-call prompt",
+                channel: MessageChannel(),
+                abort: { _, _ in },
+                hasToolSucceeded: { _ in false },
+                hasToolFailed: { _ in false }
+            )
+            _ = await evaluator.scopeTools(
+                candidateTools: [CurrentTimeTool()],
+                taskTitle: "Child",
+                taskID: UUID().uuidString,
+                taskDescription: "Check the time",
+                requiredCapabilities: [],
+                intentProvenance: provenance
+            )
+            guard let user = provider.receivedMessages.first?.last, case .text(let text) = user.content else { return nil }
+            return text
+        }
+        let requester = await userMessage(.requester)
+        #expect(requester?.contains("\"taskAuthor\" : \"requester\"") == true)
+        #expect(requester?.contains("originatingTask") == false)
+
+        let originating = TaskIntentProvenance.OriginatingTask(id: UUID(), title: "Plan the trip", description: "Plan my trip.")
+        let child = await userMessage(.workerAuthored(originatingTask: originating))
+        #expect(child?.contains("\"taskAuthor\" : \"coordinatingWorker\"") == true)
+        #expect(child?.contains("Plan the trip") == true)
+        #expect(SecurityAgentBehavior.toolScopingSystemPrompt.contains("coordinatingWorker"))
+        #expect(SecurityAgentBehavior.systemPrompt.contains(AgentTask.workerAuthoredHeading))
     }
 
     @Test("clean JSON parses to the allowed set")

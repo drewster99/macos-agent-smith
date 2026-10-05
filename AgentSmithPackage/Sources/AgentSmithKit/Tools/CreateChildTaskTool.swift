@@ -108,6 +108,9 @@ struct CreateChildTaskTool: AgentTool {
         case .failure(let problem): return .failure("Child task NOT created — \(problem.message)")
         }
 
+        // Retrieved BEFORE the write, so the child lands with its context in the same write that
+        // makes it startable (the drain may start it at once).
+        let retrieved = await context.retrieveContext(.newTask, title + " " + description)
         let creation = await context.taskStore.addChildTask(
             coordinatorTaskID: coordinator.id,
             limit: childLimit,
@@ -116,7 +119,8 @@ struct CreateChildTaskTool: AgentTool {
             descriptionAttachments: attachments,
             acceptanceCriteria: criteria,
             steps: steps,
-            requiredCapabilities: capabilities
+            requiredCapabilities: capabilities,
+            relevantContext: TaskContextRetrieval.relevantContext(from: retrieved)
         )
         let child: AgentTask
         switch creation {
@@ -124,11 +128,12 @@ struct CreateChildTaskTool: AgentTool {
             child = created
         case .limitReached(let limit):
             return .failure("Child task NOT created — this task has already created \(limit) child task(s), the limit set in Settings. Work with the children you have, or report the blocker with `request_help`.")
+        case .duplicateOfUnfinishedChild(let existing):
+            return .failure("Child task NOT created — your child task \"\(existing.title)\" (ID: \(existing.id.uuidString)) is still \(existing.status.displayName.lowercased()). Wait for it with `wait_for_child_tasks`, or give a genuinely different piece of work a distinct title.")
         case .coordinatorNotFound:
             return .failure("Child task NOT created — your task is no longer in the active task list.")
         }
 
-        let contextNote = await TaskCreationSupport.attachRelevantContext(to: child, context: context)
         await TaskCreationSupport.announceCreated(
             taskID: child.id,
             title: title,
@@ -137,6 +142,6 @@ struct CreateChildTaskTool: AgentTool {
             context: context
         )
         await context.startChildTask(child.id)
-        return .success("Child task created (ID: \(child.id.uuidString), title: \"\(title)\").\(contextNote) It starts as soon as a worker slot is free. Its outcome will be delivered to you; call `wait_for_child_tasks` when you have nothing else to do until then.")
+        return .success("Child task created (ID: \(child.id.uuidString), title: \"\(title)\"). It starts as soon as a worker slot is free. Its outcome will be delivered to you; call `wait_for_child_tasks` when you have nothing else to do until then.")
     }
 }

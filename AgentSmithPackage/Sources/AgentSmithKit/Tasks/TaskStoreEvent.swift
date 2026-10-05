@@ -11,6 +11,26 @@ public enum TaskStoreEvent: Sendable, Equatable {
     /// A session task's required capabilities changed, so a worker running it must have its tools
     /// re-scoped against the new list. Never emitted for a library template: no worker runs one.
     case requiredCapabilitiesChanged(taskID: UUID)
+    /// A coordinator's child left the active list while the coordinator was still coordinating —
+    /// unfinished, or carrying an outcome its coordinator had not been handed yet.
+    case childLeftCoordination(CoordinatorChildDeparture)
+}
+
+/// A child task leaving its open coordinator's reach (archived, deleted, permanently deleted). The
+/// move drops a task's undelivered effects, so the outcome records it dropped travel here, to be
+/// delivered under their original ids (a delivery already made dedups).
+public struct CoordinatorChildDeparture: Sendable, Equatable {
+    public enum Departure: Sendable, Equatable {
+        case leftActive(AgentTask.TaskDisposition)
+        case permanentlyDeleted
+    }
+
+    public let coordinatorTaskID: UUID
+    /// The child as it was just before it left (its effects not yet stripped).
+    public let child: AgentTask
+    public let departure: Departure
+    /// The `.coordinatorBriefing` records the move dropped.
+    public let undeliveredOutcomes: [TaskEffectRecord]
 }
 
 /// A task entering or leaving this session's active store. Deliberately NOT a status transition:

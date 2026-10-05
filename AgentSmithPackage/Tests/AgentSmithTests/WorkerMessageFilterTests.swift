@@ -24,6 +24,11 @@ struct WorkerMessageFilterTests {
         )
     }
 
+    @Test("a queued-at-capacity notice is no worker's, even one stamped with its own task")
+    func queuedNoticeDropped() {
+        #expect(!OrchestrationRuntime.workerAccepts(notice(.taskQueuedAtCapacity, taskID: ownTask), workerTaskID: ownTask))
+    }
+
     @Test("another worker's or Smith's operational notices are dropped")
     func othersNoticesDropped() {
         for kind in OrchestrationRuntime.operationalNoticeKinds {

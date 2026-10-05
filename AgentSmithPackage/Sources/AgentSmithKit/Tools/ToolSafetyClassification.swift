@@ -38,16 +38,19 @@ enum ToolSafetyClassification {
     /// Built-in tools whose effects can be destructive or hard to reverse (data loss,
     /// irreversible state change). `save_memory` is here because memory writes run
     /// auto-consolidation that can rewrite/merge existing memories with no clean undo.
+    /// `create_child_task` is here transitively: the child's worker is scoped separately, but from
+    /// text this worker wrote, and can hold shell, file and Internet tools.
     private static let destructiveNames: Set<String> = [
         "file_write", "file_edit", "save_memory", "manage_task_disposition",
-        "terminate_agent", "abort", "bash", "gh", "run_applescript"
+        "terminate_agent", "abort", "bash", "gh", "run_applescript", "create_child_task"
     ]
 
     /// Built-in tools that reach an open/external world beyond a closed local system
     /// (arbitrary network access, external app control, the internet). `web_search` is here
     /// (it queries the internet) but is NOT destructive — read-only network access.
+    /// `create_child_task` is here for the reason it is destructive.
     private static let openWorldNames: Set<String> = [
-        "bash", "gh", "run_applescript", "web_search", "instant_answer", "web_fetch"
+        "bash", "gh", "run_applescript", "web_search", "instant_answer", "web_fetch", "create_child_task"
     ]
 
     /// Built-in tools that are read-only — they inspect state but don't modify anything, so

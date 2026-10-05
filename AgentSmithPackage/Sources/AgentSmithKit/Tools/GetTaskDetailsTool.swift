@@ -72,7 +72,17 @@ struct GetTaskDetailsTool: AgentTool {
                 notFoundIDs.append(taskID)
                 continue
             }
-            sections.append(formatTask(task, children: await context.taskStore.childTasks(ofCoordinator: task.id)))
+            let coordinator: AgentTask?
+            if let coordinatorID = task.coordinatorTaskID {
+                coordinator = await context.taskStore.taskAnyDisposition(id: coordinatorID)
+            } else {
+                coordinator = nil
+            }
+            sections.append(formatTask(
+                task,
+                children: await context.taskStore.childTasks(ofCoordinator: task.id),
+                coordinator: coordinator
+            ))
         }
 
         var output: [String] = []
@@ -101,7 +111,7 @@ struct GetTaskDetailsTool: AgentTool {
     }
 
     /// Formats a single task's details. Each section is included only when present.
-    private func formatTask(_ task: AgentTask, children: [AgentTask]) -> String {
+    private func formatTask(_ task: AgentTask, children: [AgentTask], coordinator: AgentTask?) -> String {
         var parts: [String] = []
         parts.append("Task ID: \(task.id.uuidString)")
         parts.append("Title: \(task.title)")
@@ -130,7 +140,7 @@ struct GetTaskDetailsTool: AgentTool {
             parts.append("Required capabilities:\n\(capabilities)")
         }
         if let coordinatorID = task.coordinatorTaskID {
-            parts.append("coordinatorTaskID: \(coordinatorID.uuidString) (a child task; its outcome is reported to that task's worker)")
+            parts.append("coordinatorTaskID: \(coordinatorID.uuidString) (a child task; \(CoordinatorTaskBriefing.routingDescription(coordinator: coordinator)))")
         }
         if !children.isEmpty {
             parts.append("Child tasks:\n\(WaitForChildTasksTool.summary(of: children))")

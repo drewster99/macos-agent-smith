@@ -115,6 +115,11 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// (`CoordinatorTaskBriefing`) instead of to Smith, and a queued child is started by the runtime
     /// whatever the auto-run setting. Nil for every task a worker did not create.
     public var coordinatorTaskID: UUID?
+    /// How many child tasks this task's workers have created with `create_child_task`, ever —
+    /// the count the per-task child limit is checked against. Kept on the task rather than counted
+    /// from the children, because a child can be permanently deleted, promoted to a template, or
+    /// live in another store.
+    public var childTasksCreated: Int = 0
     /// The session this task ORIGINATED in (was created / instantiated in). IMMUTABLE once set — a
     /// task belongs to exactly one session's transcript for its whole life, which is what makes "a
     /// task's messages live in one session's log" hold (unarchiving keeps it; re-running in a different
@@ -692,7 +697,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// that every stored property has a case: a defaulted property with no case is silently never
     /// persisted, and a round-trip test stays green because it decodes back to the same default.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, coordinatorTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, requiredCapabilities, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, coordinatorTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, requiredCapabilities, childTasksCreated, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
     }
 
     public init(from decoder: Decoder) throws {
@@ -738,6 +743,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         isTemplate = try c.decodeIfPresent(Bool.self, forKey: .isTemplate) ?? false
         parentTaskID = try c.decodeIfPresent(UUID.self, forKey: .parentTaskID)
         coordinatorTaskID = try c.decodeIfPresent(UUID.self, forKey: .coordinatorTaskID)
+        childTasksCreated = try c.decodeIfPresent(Int.self, forKey: .childTasksCreated) ?? 0
         sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID)
         templateInputDefinitions = try c.decodeIfPresent([TemplateInputDefinition].self, forKey: .templateInputDefinitions) ?? []
         templateInstanceTitleTemplate = try c.decodeIfPresent(String.self, forKey: .templateInstanceTitleTemplate)
@@ -810,6 +816,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         if isTemplate { try c.encode(true, forKey: .isTemplate) }
         try c.encodeIfPresent(parentTaskID, forKey: .parentTaskID)
         try c.encodeIfPresent(coordinatorTaskID, forKey: .coordinatorTaskID)
+        if childTasksCreated > 0 { try c.encode(childTasksCreated, forKey: .childTasksCreated) }
         try c.encodeIfPresent(sessionID, forKey: .sessionID)
         if !templateInputDefinitions.isEmpty {
             try c.encode(templateInputDefinitions, forKey: .templateInputDefinitions)

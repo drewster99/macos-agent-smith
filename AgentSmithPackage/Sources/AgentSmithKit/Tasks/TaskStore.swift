@@ -581,6 +581,26 @@ public actor TaskStore {
         for record in task.pendingEffects { effectDurabilitySeq[record.id] = nil }
     }
 
+    /// Reports a child leaving the active list to its coordinator's runtime, when the coordinator is
+    /// still coordinating and the child either never finished or carries an outcome the coordinator
+    /// was not handed yet. Called next to every `.leftActive` / `.permanentlyDeleted` emit for a task
+    /// that was in `tasks`, with the task as it was before the move stripped its effects.
+    private func emitDepartureIfCoordinated(_ child: AgentTask, _ departure: CoordinatorChildDeparture.Departure) {
+        guard let coordinatorID = child.coordinatorTaskID,
+              tasks[coordinatorID]?.isCoordinatingChildren == true else { return }
+        let undelivered = child.pendingEffects.filter {
+            if case .coordinatorBriefing = $0.effect { return true }
+            return false
+        }
+        guard !child.status.isTerminal || !undelivered.isEmpty else { return }
+        emit(.childLeftCoordination(CoordinatorChildDeparture(
+            coordinatorTaskID: coordinatorID,
+            child: child,
+            departure: departure,
+            undeliveredOutcomes: undelivered
+        )))
+    }
+
     // MARK: - Persistence
 
     /// How a store's active tasks reach disk.
@@ -737,6 +757,25 @@ public actor TaskStore {
         tasks[id]
     }
 
+    /// Who wrote `task`'s text, for the Security Agent (`TaskIntentProvenance`). Walks the
+    /// `coordinatorTaskID` chain across every disposition — a coordinator may already be archived.
+    public func intentProvenance(of task: AgentTask) async -> TaskIntentProvenance {
+        guard var next = task.coordinatorTaskID else { return .requester }
+        var visited: Set<UUID> = [task.id]
+        while visited.insert(next).inserted {
+            guard let coordinator = await taskAnyDisposition(id: next) else { break }
+            guard let parent = coordinator.coordinatorTaskID else {
+                return .workerAuthored(originatingTask: TaskIntentProvenance.OriginatingTask(
+                    id: coordinator.id,
+                    title: coordinator.title,
+                    description: coordinator.renderedDescriptionWithTemplateInputs()
+                ))
+            }
+            next = parent
+        }
+        return .workerAuthored(originatingTask: nil)
+    }
+
     /// Looks up a task by ID across this session's active list and the global inactive store
     /// (archived + deleted). Used by tools that operate on a task regardless of disposition.
     public func taskAnyDisposition(id: UUID) async -> AgentTask? {
@@ -779,6 +818,7 @@ public actor TaskStore {
             guard !task.status.isInProgress else {
                 return "Task '\(task.title)' cannot be converted while it is \(task.status.rawValue). Stop or finish it first."
             }
+            if isTemplate, !task.isTemplate, let refusal = childPromotionRefusal(task) { return refusal }
             let wasTemplate = task.isTemplate
             task.isTemplate = isTemplate
             var normalization: TaskStatusTransition?
@@ -988,6 +1028,7 @@ public actor TaskStore {
             }
         }
 
+        if isTemplate, !task.isTemplate, let refusal = childPromotionRefusal(task) { return refusal }
         let wasTemplate = task.isTemplate
         task.isTemplate = isTemplate
         var normalization: TaskStatusTransition?
@@ -1016,6 +1057,15 @@ public actor TaskStore {
         }
         return refusal
         }
+    }
+
+    /// Why a child task can't become a template now: its coordinator's worker owns it while the
+    /// coordinating task is open, and a template is a launcher, never a piece of that work. Once the
+    /// coordinator closes it is an ordinary task and may be promoted.
+    private func childPromotionRefusal(_ task: AgentTask) -> String? {
+        guard let coordinatorID = task.coordinatorTaskID, let coordinator = tasks[coordinatorID],
+              coordinator.isCoordinatingChildren else { return nil }
+        return "Task '\(task.title)' is a child task of '\(coordinator.title)', which is still open; it can't become a template until that task finishes."
     }
 
     private func hasPriorRunState(_ task: AgentTask) -> Bool {
@@ -1054,8 +1104,8 @@ public actor TaskStore {
     /// chain link targets one session's task). Its `startTask` watches are cancelled — their firings
     /// too — and returned so the caller can release their targets' holds once the flip lands; holds
     /// ON the task are dropped (a template is never a chain target); undelivered effects are dropped
-    /// (they describe a run, and the template leaves this store). Notifying watches stay as
-    /// blueprints.
+    /// (they describe a run, and the template leaves this store); a child's coordinator link is
+    /// dropped. Notifying watches stay as blueprints.
     private func stripRunStateForTemplatePromotion(_ task: inout AgentTask) -> [UUID] {
         var cancelled: [UUID] = []
         let now = Date()
@@ -1070,6 +1120,8 @@ public actor TaskStore {
         task.startHolds.removeAll()
         forgetEffects(of: task)
         task.pendingEffects.removeAll()
+        // A template is nobody's child; a preserved copy of its prior run keeps the link as history.
+        task.coordinatorTaskID = nil
         return cancelled
     }
 
@@ -1383,17 +1435,22 @@ public actor TaskStore {
         case created(AgentTask)
         /// The coordinator already created `limit` child tasks.
         case limitReached(limit: Int)
+        /// The coordinator already has an unfinished child with this title — most likely the same
+        /// piece of work created twice.
+        case duplicateOfUnfinishedChild(AgentTask)
         /// The coordinator task is not in this session's active list.
         case coordinatorNotFound
     }
 
-    /// Creates a child task of `coordinatorTaskID` — the whole task, criteria and steps included, in
-    /// ONE write. A queued child is started by the runtime's drain whatever the auto-run setting, so
-    /// a child written in stages could start before its contract or plan landed.
+    /// Creates a child task of `coordinatorTaskID` — the whole task, criteria, steps and retrieved
+    /// context included, in ONE write. A queued child is started by the runtime's drain whatever the
+    /// auto-run setting, so a child written in stages could start before its contract, plan or
+    /// context landed.
     ///
-    /// Refused once the coordinator has created `limit` children, counting every child it ever
-    /// created (finished and archived ones too). The active-list count and the insert happen with no
-    /// suspension between them, so two concurrent calls can't both slip under the limit.
+    /// Refused once the coordinator has created `limit` children (`AgentTask.childTasksCreated`,
+    /// every child it ever created), and when one of its unfinished children already has this title.
+    /// The checks, the counter and the insert happen with no suspension between them, so two
+    /// concurrent calls can't both slip through.
     public func addChildTask(
         coordinatorTaskID: UUID,
         limit: Int,
@@ -1402,17 +1459,24 @@ public actor TaskStore {
         descriptionAttachments: [Attachment],
         acceptanceCriteria: [AcceptanceCriterion],
         steps: [TaskStep],
-        requiredCapabilities: [RequiredCapability]
+        requiredCapabilities: [RequiredCapability],
+        relevantContext: RelevantTaskContext
     ) async -> ChildTaskCreation {
         await autoArchiveStaleCompletedIfEnabled()
-        let archivedChildren = await allInactiveTasks().filter { $0.coordinatorTaskID == coordinatorTaskID }.count
-        guard tasks[coordinatorTaskID] != nil else { return .coordinatorNotFound }
-        let activeChildren = tasks.values.filter { $0.coordinatorTaskID == coordinatorTaskID }.count
-        guard archivedChildren + activeChildren < limit else { return .limitReached(limit: limit) }
+        guard var coordinator = tasks[coordinatorTaskID] else { return .coordinatorNotFound }
+        if let duplicate = tasks.values.first(where: {
+            $0.coordinatorTaskID == coordinatorTaskID && !$0.status.isTerminal
+                && $0.title.caseInsensitiveCompare(title) == .orderedSame
+        }) {
+            return .duplicateOfUnfinishedChild(duplicate)
+        }
+        guard coordinator.childTasksCreated < limit else { return .limitReached(limit: limit) }
         let task = AgentTask(
             title: title,
             description: description,
             status: .pending,
+            relevantMemories: relevantContext.memories.isEmpty ? nil : relevantContext.memories,
+            relevantPriorTasks: relevantContext.priorTasks.isEmpty ? nil : relevantContext.priorTasks,
             descriptionAttachments: descriptionAttachments,
             acceptanceCriteria: acceptanceCriteria,
             steps: steps,
@@ -1420,17 +1484,21 @@ public actor TaskStore {
             sessionID: sessionID,
             requiredCapabilities: requiredCapabilities
         )
+        coordinator.childTasksCreated += 1
+        tasks[coordinatorTaskID] = coordinator
         tasks[task.id] = task
         didMutate()
         return .created(task)
     }
 
-    /// The child tasks `coordinatorTaskID` created that are in this session's active list, oldest
-    /// first.
-    public func childTasks(ofCoordinator coordinatorTaskID: UUID) -> [AgentTask] {
-        tasks.values
-            .filter { $0.coordinatorTaskID == coordinatorTaskID }
-            .sorted(by: AgentTask.coordinationOrder)
+    /// Every child task `coordinatorTaskID` created that still exists — active, archived or deleted
+    /// — in `AgentTask.coordinationOrder`. The active list is read FIRST, with no suspension: a move
+    /// to the inactive store writes there before removing here, so a child moving between them is
+    /// read at least once.
+    public func childTasks(ofCoordinator coordinatorTaskID: UUID) async -> [AgentTask] {
+        let active = tasks.values.filter { $0.coordinatorTaskID == coordinatorTaskID }
+        let inactive = await inactiveStore?.childTasks(ofCoordinator: coordinatorTaskID) ?? []
+        return CoordinatorChildren.collect(active, inactive)
     }
 
     /// Promotes a `.scheduled` task to `.pending` so the queue (or `run_task`) can pick it up.
@@ -1460,7 +1528,10 @@ public actor TaskStore {
                 tasks[task.id] = moved
             }
             didMutate()
-            for task in stale { emit(.lifecycle(.leftActive(taskID: task.id, disposition: .archived))) }
+            for task in stale {
+                emit(.lifecycle(.leftActive(taskID: task.id, disposition: .archived)))
+                emitDepartureIfCoordinated(task, .leftActive(.archived))
+            }
             return
         }
         // Batch move with the same destination-durable-before-source-removal ordering as `move`,
@@ -1485,7 +1556,10 @@ public actor TaskStore {
             forgetEffects(of: task)
         }
         didMutate()
-        for task in stale { emit(.lifecycle(.leftActive(taskID: task.id, disposition: .archived))) }
+        for task in stale {
+            emit(.lifecycle(.leftActive(taskID: task.id, disposition: .archived)))
+            emitDepartureIfCoordinated(task, .leftActive(.archived))
+        }
     }
 
     /// Changes a task's status for `cause`. Returns whether the task is now in `status`: true when
@@ -1633,7 +1707,7 @@ public actor TaskStore {
         // reach disk together. A child task's outcome goes to its coordinator while the coordinator
         // is active, and the routine Smith notes it replaces are not written at all.
         let activeCoordinatorID = task.coordinatorTaskID.flatMap { id in
-            tasks[id].map { $0.disposition == .active && !$0.status.isTerminal } == true ? id : nil
+            tasks[id]?.isCoordinatingChildren == true ? id : nil
         }
         if let note = SmithTaskBriefing.note(for: transition, task: task),
            !(activeCoordinatorID != nil && CoordinatorTaskBriefing.replacesSmithBriefing(cause)) {
@@ -2952,6 +3026,7 @@ public actor TaskStore {
             guard let inactiveStore else {
                 setDisposition(id: id, disposition: .archived)
                 emit(.lifecycle(.leftActive(taskID: id, disposition: .archived)))
+                emitDepartureIfCoordinated(task, .leftActive(.archived))
                 return true
             }
             return await move(task, to: .archived, in: inactiveStore)
@@ -2985,6 +3060,7 @@ public actor TaskStore {
         forgetEffects(of: task)
         didMutate()
         emit(.lifecycle(.leftActive(taskID: task.id, disposition: disposition)))
+        emitDepartureIfCoordinated(task, .leftActive(disposition))
         return true
     }
 
@@ -3037,6 +3113,7 @@ public actor TaskStore {
             guard let inactiveStore else {
                 setDisposition(id: id, disposition: .recentlyDeleted)
                 emit(.lifecycle(.leftActive(taskID: id, disposition: .recentlyDeleted)))
+                emitDepartureIfCoordinated(task, .leftActive(.recentlyDeleted))
                 return true
             }
             return await move(task, to: .recentlyDeleted, in: inactiveStore)
@@ -3138,6 +3215,7 @@ public actor TaskStore {
             forgetEffects(of: task)
             didMutate()
             emit(.lifecycle(.permanentlyDeleted(taskID: id)))
+            emitDepartureIfCoordinated(task, .permanentlyDeleted)
             return true
         }
         // A library-resident template → gone from the library. Under the library edit lock so a concurrent

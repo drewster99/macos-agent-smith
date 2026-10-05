@@ -146,7 +146,8 @@ struct SecurityEvaluatorTurnCaptureTests {
             taskTitle: "Scope task",
             taskID: taskID.uuidString,
             taskDescription: "Check the time",
-            requiredCapabilities: []
+            requiredCapabilities: [],
+            intentProvenance: .requester
         )
 
         #expect(result.succeeded)

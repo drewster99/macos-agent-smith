@@ -103,3 +103,38 @@ struct ToolPolicyRecordingTests {
         #expect(policies == ["bash": .always])
     }
 }
+
+/// Scoping judges tools one by one and could approve `create_child_task` without
+/// `wait_for_child_tasks`, leaving a coordinator unable to wait for what it created.
+@Suite("Companion tools")
+struct ToolPolicyCompanionTests {
+    private let create = "create_child_task"
+    private let wait = "wait_for_child_tasks"
+    private var candidates: Set<String> { [create, wait, "bash"] }
+
+    private func resolve(base: Set<String>, global: [String: ToolPolicy] = [:], task: [String: Bool] = [:], candidates: Set<String>? = nil) -> Set<String> {
+        ToolPolicy.effectiveApprovedTools(base: base, candidates: candidates ?? self.candidates, globalPolicies: global, taskOverrides: task)
+    }
+
+    @Test("a principal from the verdict or a per-task On brings its companion")
+    func principalBringsCompanion() {
+        #expect(resolve(base: [create]).contains(wait))
+        #expect(resolve(base: [], task: [create: true]).contains(wait))
+        #expect(resolve(base: [], global: [create: .always]).contains(wait))
+    }
+
+    @Test("a companion's own Off or Never still withholds it; a withheld principal brings nothing")
+    func companionStillWithheld() {
+        #expect(!resolve(base: [create], task: [wait: false]).contains(wait))
+        #expect(!resolve(base: [create], global: [wait: .never]).contains(wait))
+        #expect(resolve(base: [create], global: [create: .never]).isDisjoint(with: [create, wait]))
+        #expect(!resolve(base: [create], candidates: [create]).contains(wait), "a companion the worker doesn't have")
+    }
+
+    @Test("scoping is shown only tools the policy can offer")
+    func scopingCandidatesDropWithheld() {
+        let tools: [any AgentTool] = [BashTool(), FileReadTool()]
+        let offered = ToolPolicy.scopingCandidates(tools, globalPolicies: ["bash": .never]).map(\.name)
+        #expect(offered == ["file_read"])
+    }
+}

@@ -29,6 +29,12 @@ public actor InactiveTaskStore {
         tasks[id]
     }
 
+    /// The inactive tasks `coordinatorTaskID` created with `create_child_task`. Filtered here, so a
+    /// caller never copies the whole (large) store to find a handful.
+    public func childTasks(ofCoordinator coordinatorTaskID: UUID) -> [AgentTask] {
+        tasks.values.filter { $0.coordinatorTaskID == coordinatorTaskID }
+    }
+
     /// IDs of recently-deleted tasks. Used to keep deleted tasks out of semantic search.
     public func deletedIDs() -> Set<UUID> {
         Set(tasks.values.lazy.filter { $0.disposition == .recentlyDeleted }.map(\.id))

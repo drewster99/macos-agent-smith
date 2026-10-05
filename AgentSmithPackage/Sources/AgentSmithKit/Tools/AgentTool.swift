@@ -380,6 +380,9 @@ public struct ToolContext: Sendable {
     /// The most child tasks one task may create (Settings "Max child tasks per task"). Nil when the
     /// runtime is gone: refuse rather than assume a limit.
     public let maxChildTasksPerTask: @Sendable () async -> Int?
+    /// The interrupted child tasks the runtime resumes on its own
+    /// (`OrchestrationRuntime.automaticallyResumingChildTaskIDs`). Nil when the runtime is gone.
+    public let automaticallyResumingChildTaskIDs: @Sendable () async -> Set<UUID>?
     /// Whether the Security Agent scopes a worker's tool set from its task (the resolved
     /// orchestration setting). Decides what adding a required capability will change.
     public let scopesToolSetOnTaskStart: @Sendable () async -> Bool
@@ -507,6 +510,7 @@ public struct ToolContext: Sendable {
         startChildTask: @escaping @Sendable (UUID) async -> Void = { _ in },
         setWaitingOnChildTasks: @escaping @Sendable (Bool) async -> Void = { _ in },
         maxChildTasksPerTask: @escaping @Sendable () async -> Int? = { nil },
+        automaticallyResumingChildTaskIDs: @escaping @Sendable () async -> Set<UUID>? = { nil },
         scopesToolSetOnTaskStart: @escaping @Sendable () async -> Bool = { OrchestrationSettings.builtIn.scopeToolSetOnTaskStart },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
@@ -577,6 +581,7 @@ public struct ToolContext: Sendable {
         self.startChildTask = startChildTask
         self.setWaitingOnChildTasks = setWaitingOnChildTasks
         self.maxChildTasksPerTask = maxChildTasksPerTask
+        self.automaticallyResumingChildTaskIDs = automaticallyResumingChildTaskIDs
         self.scopesToolSetOnTaskStart = scopesToolSetOnTaskStart
         self.currentResumingTaskID = currentResumingTaskID
         self.memoryStore = memoryStore

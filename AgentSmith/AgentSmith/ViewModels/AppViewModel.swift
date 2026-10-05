@@ -3002,11 +3002,13 @@ final class AppViewModel {
     /// active and archived buckets, in `AgentTask.coordinationOrder`.
     func coordinatedChildTasks(of coordinatorTaskID: UUID) -> [AgentTask] {
         // The buckets are mirrored by separate hops (this session's store, the global inactive store),
-        // so a task being archived can briefly sit in both; the active copy, listed first, wins.
-        var seen = Set<UUID>()
-        return [activeTaskList, shared.archivedTasks].joined()
-            .filter { $0.coordinatorTaskID == coordinatorTaskID && seen.insert($0.id).inserted }
-            .sorted(by: AgentTask.coordinationOrder)
+        // so a task being archived or deleted can briefly sit in two; `collect` keeps the newer copy.
+        let isChild: (AgentTask) -> Bool = { $0.coordinatorTaskID == coordinatorTaskID }
+        return CoordinatorChildren.collect(
+            activeTaskList.filter(isChild),
+            shared.archivedTasks.filter(isChild),
+            shared.deletedTasks.filter(isChild)
+        )
     }
 
     // MARK: - Library group operations (forward to the shared global library)

@@ -131,7 +131,7 @@ struct SettingsView: View {
                 Text("Max child tasks per task: \(shared.maxChildTasksPerTask)")
             }
 
-            Text("A worker coordinating other tasks can create at most this many child tasks for its task, counting ones that already finished. When every running worker is waiting on its child tasks, one child may start beyond Max simultaneous tasks so the work never stalls.")
+            Text("A worker coordinating other tasks can create at most this many child tasks for its task, counting ones that already finished. When every running worker is waiting on its child tasks, one more child may start beyond Max simultaneous tasks so the work never stalls; a child that itself waits on children can let one more start.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

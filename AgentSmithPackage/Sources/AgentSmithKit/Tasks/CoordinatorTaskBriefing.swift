@@ -19,10 +19,10 @@ public enum CoordinatorTaskBriefing {
     /// The longest result excerpt a note carries; the rest is one `get_task_details` call away.
     static let resultExcerptLimit = 4_000
 
-    /// The note for the coordinator, or nil when this transition is not an outcome it waits on.
-    /// Outcomes are the transitions INTO completed, failed, and awaiting review — the points where
-    /// the child stops working. A start is not one: waking a waiting coordinator to say "started"
-    /// buys nothing.
+    /// The note for the coordinator, or nil when this transition is not one it must react to:
+    /// the transitions INTO completed, failed and awaiting review (the child stopped working), and
+    /// into paused or interrupted when nobody will resume it on its own (`stallDescription`). A start
+    /// is not one: waking a waiting coordinator to say "started" buys nothing.
     public static func note(for transition: TaskStatusTransition, task: AgentTask) -> String? {
         let subject = "Child task \"\(task.title)\" (ID: \(task.id.uuidString))"
         let tail = "Call `wait_for_child_tasks` again if you are still waiting on other child tasks."
@@ -45,7 +45,44 @@ public enum CoordinatorTaskBriefing {
                 needs their sign-off, or a validator could not judge it). Nothing is needed from you; \
                 you are told again when it completes or fails. \(tail)]
                 """
-        case .pending, .starting, .running, .paused, .awaitingHelp, .interrupted, .scheduled, .validating:
+        case .paused, .interrupted:
+            guard let how = stallDescription(transition.cause) else { return nil }
+            return """
+                [System: \(subject) was \(how). It does not continue unless the user or Smith resumes \
+                it. Decide whether your task can still succeed without it: wait for it if you expect \
+                it to be resumed, do the work yourself, create a different child task, or report the \
+                blocker with `request_help`. \(tail)]
+                """
+        case .pending, .starting, .running, .awaitingHelp, .scheduled, .validating:
+            return nil
+        }
+    }
+
+    /// How a child came to stop, for a stop the coordinator must react to; nil for one that resumes
+    /// on its own or takes the coordinator's worker down with it. Exhaustive on purpose: a new cause
+    /// must be placed, not defaulted.
+    private static func stallDescription(_ cause: TaskTransitionCause) -> String? {
+        switch cause {
+        case .userPaused: return "PAUSED by the user"
+        case .userStopped: return "STOPPED by the user"
+        case .scheduledAction(.pause): return "PAUSED by a scheduled action"
+        case .scheduledAction(.interrupt): return "STOPPED by a scheduled action"
+        case .smithSetStatus: return "stopped by Smith"
+        case .smithTerminatedWorker: return "stopped — Smith ended its worker"
+        case .workerSelfTerminated: return "INTERRUPTED — its worker ended itself"
+        case .orphanRecovered: return "INTERRUPTED — its worker was lost"
+        // Resumes on its own (`capacityShed`), or every worker is going down with it.
+        case .capacityShed, .sessionShutdown, .sessionDeletion, .coldBootRecovery:
+            return nil
+        // Never moves a task to paused or interrupted.
+        case .scheduledAction(.run), .scheduledAction(.summarize), .startClaimed, .startAbandoned,
+             .spawnFailed, .spawnFailedAtRuntimeStart, .workerStarted, .workerStartedAtRuntimeStart,
+             .submittedForValidation, .validationPassed, .validationFailedNoProgress,
+             .validationEscalated, .userAcceptanceRequested, .signOffContractChanged,
+             .validationBlocked, .validationReleased, .rejectionsReturned, .helpRequested,
+             .helpProvided, .userAccepted, .userAcceptanceGranted, .userFailed, .userRevalidated,
+             .userSentBack, .scheduledTimeReached, .resetForRun, .reopenedForRun,
+             .templateLauncherNormalized, .coldBootSpawnAbandoned, .coldBootRevalidate:
             return nil
         }
     }
@@ -62,6 +99,42 @@ public enum CoordinatorTaskBriefing {
             // the coordinator should own it.
             return false
         }
+    }
+
+    /// The note for a coordinator whose UNFINISHED child left the active list: it will not continue,
+    /// and no outcome is coming.
+    public static func departureNote(_ departure: CoordinatorChildDeparture) -> String {
+        let child = departure.child
+        let how: String
+        switch departure.departure {
+        case .leftActive(.archived): how = "ARCHIVED"
+        case .leftActive(.recentlyDeleted): how = "DELETED"
+        case .leftActive(.active): how = "moved"
+        case .permanentlyDeleted: how = "PERMANENTLY DELETED"
+        }
+        return """
+            [System: Child task "\(child.title)" (ID: \(child.id.uuidString)) was \(how) while it was \
+            \(child.status.displayName.lowercased()), before it finished. It will not continue and no \
+            outcome is coming. Decide whether your task can still succeed without it: do the work \
+            yourself, create a different child task, or report the blocker with `request_help`. \
+            Call `wait_for_child_tasks` again if you are still waiting on other child tasks.]
+            """
+    }
+
+    /// Where a child's outcome goes NOW, for `get_task_details`: to its coordinator's worker while
+    /// the coordinating task is open (`AgentTask.isCoordinatingChildren`), else to Smith as for any
+    /// task. `coordinator` is nil when the coordinating task no longer exists.
+    public static func routingDescription(coordinator: AgentTask?) -> String {
+        guard let coordinator else {
+            return "its coordinating task no longer exists, so it is an ordinary task and its outcome goes to Smith"
+        }
+        if coordinator.isCoordinatingChildren {
+            return "while that task is open, its outcome is reported to that task's worker, not to Smith"
+        }
+        let state = coordinator.disposition == .active
+            ? coordinator.status.displayName.lowercased()
+            : (coordinator.disposition == .archived ? "archived" : "deleted")
+        return "its coordinating task is closed (\(state)), so it is an ordinary task now and its outcome goes to Smith"
     }
 
     private static func resultSection(_ task: AgentTask) -> String {

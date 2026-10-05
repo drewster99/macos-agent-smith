@@ -58,9 +58,30 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
         }
     }
 
+    /// Whether `tool` can never be offered (resolves to Never). The one definition the final strip
+    /// and scoping's candidate list share.
+    public static func isWithheld(_ tool: String, globalPolicies: [String: ToolPolicy]) -> Bool {
+        effective(for: tool, globalPolicies: globalPolicies) == .never
+    }
+
+    /// What the Security Agent scopes: the candidates minus withheld tools. A withheld tool shown to
+    /// scoping can be picked to cover a need and then stripped, leaving the need uncovered while an
+    /// offerable alternative went unpicked.
+    public static func scopingCandidates(_ tools: [any AgentTool], globalPolicies: [String: ToolPolicy]) -> [any AgentTool] {
+        tools.filter { !isWithheld($0.name, globalPolicies: globalPolicies) }
+    }
+
+    /// Tools offered whenever their principal is offered. Scoping judges tools one by one and can
+    /// approve `create_child_task` without `wait_for_child_tasks`, which would leave a coordinator
+    /// unable to wait for the children it created.
+    public static let companionTools: [String: Set<String>] = [
+        "create_child_task": ["wait_for_child_tasks"]
+    ]
+
     /// The tools a worker is offered: `base` (the automatic verdict) with the global policy and the
-    /// task's own overrides applied in the order documented on this type. Only `candidates` are
-    /// considered by the policy and overrides, so neither can add a tool the worker does not have.
+    /// task's own overrides applied in the order documented on this type, then each offered
+    /// principal's companions (`companionTools`). Only `candidates` are considered by the policy,
+    /// overrides and companions, so none can add a tool the worker does not have.
     public static func effectiveApprovedTools(
         base: Set<String>,
         candidates: Set<String>,
@@ -74,8 +95,17 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
         for (name, enabled) in taskOverrides where candidates.contains(name) {
             if enabled { result.insert(name) } else { result.remove(name) }
         }
-        for name in candidates where effective(for: name, globalPolicies: globalPolicies) == .never {
+        for name in candidates where isWithheld(name, globalPolicies: globalPolicies) {
             result.remove(name)
+        }
+        // After the Never strip, so a withheld principal brings nothing; a companion's own per-task
+        // Off or Never still withholds it.
+        for (principal, companions) in companionTools where result.contains(principal) {
+            for companion in companions
+            where candidates.contains(companion) && taskOverrides[companion] != false
+                && !isWithheld(companion, globalPolicies: globalPolicies) {
+                result.insert(companion)
+            }
         }
         return result
     }

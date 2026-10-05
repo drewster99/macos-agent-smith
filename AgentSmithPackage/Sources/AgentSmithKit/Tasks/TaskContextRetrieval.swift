@@ -23,31 +23,46 @@ public enum TaskContextRetrieval {
         taskStore: TaskStore
     ) async -> (memories: [RelevantMemory], priorTasks: [RelevantPriorTask]) {
         guard !results.isEmpty else { return ([], []) }
-
-        let memories = results.memories.map {
-            RelevantMemory(
-                content: $0.memory.content,
-                tags: $0.memory.tags,
-                similarity: $0.similarity,
-                createdAt: $0.memory.createdAt,
-                lastUpdatedAt: $0.memory.lastUpdatedAt,
-                memoryID: $0.memory.id
-            )
-        }
-        let priorTasks = results.taskSummaries.map {
-            RelevantPriorTask(
-                taskID: $0.summary.id,
-                title: $0.summary.title,
-                summary: $0.summary.summary,
-                similarity: $0.similarity,
-                latestDate: $0.summary.createdAt
-            )
-        }
+        let context = relevantContext(from: results)
         await taskStore.setRelevantContext(
             id: taskID,
-            memories: memories.isEmpty ? nil : memories,
-            priorTasks: priorTasks.isEmpty ? nil : priorTasks
+            memories: context.memories.isEmpty ? nil : context.memories,
+            priorTasks: context.priorTasks.isEmpty ? nil : context.priorTasks
         )
-        return (memories, priorTasks)
+        return (context.memories, context.priorTasks)
     }
+
+    /// The matches as a task stores them — the pure mapping, for a caller that writes the task and
+    /// its context in one step (`TaskStore.addChildTask`).
+    public static func relevantContext(from results: SemanticSearchResults) -> RelevantTaskContext {
+        RelevantTaskContext(
+            memories: results.memories.map {
+                RelevantMemory(
+                    content: $0.memory.content,
+                    tags: $0.memory.tags,
+                    similarity: $0.similarity,
+                    createdAt: $0.memory.createdAt,
+                    lastUpdatedAt: $0.memory.lastUpdatedAt,
+                    memoryID: $0.memory.id
+                )
+            },
+            priorTasks: results.taskSummaries.map {
+                RelevantPriorTask(
+                    taskID: $0.summary.id,
+                    title: $0.summary.title,
+                    summary: $0.summary.summary,
+                    similarity: $0.similarity,
+                    latestDate: $0.summary.createdAt
+                )
+            }
+        )
+    }
+}
+
+/// Memories and prior tasks retrieved for a task.
+public struct RelevantTaskContext: Sendable, Equatable {
+    public let memories: [RelevantMemory]
+    public let priorTasks: [RelevantPriorTask]
+
+    public static let none = RelevantTaskContext(memories: [], priorTasks: [])
 }

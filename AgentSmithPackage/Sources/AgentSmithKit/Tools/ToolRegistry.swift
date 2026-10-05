@@ -135,24 +135,28 @@ struct ToolRegistry: Sendable {
     /// alone — so a server that silently redefines a tool under the same name (a rug-pull)
     /// produces a different fingerprint and forces re-evaluation rather than riding a stale
     /// approval.
-    var candidateFingerprint: String {
+    var candidateFingerprint: String { Self.fingerprint(of: candidateTools) }
+
+    /// The fingerprint of any tool set, order-independent — so the set scoping actually judged
+    /// (candidates minus withheld tools) can be fingerprinted and compared like the full set.
+    static func fingerprint(of tools: [any AgentTool]) -> String {
         var hasher = SHA256()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        for entry in entries.sorted(by: { $0.name < $1.name }) {
-            hasher.update(data: Data(entry.tool.name.utf8))
+        for tool in tools.sorted(by: { $0.name < $1.name }) {
+            hasher.update(data: Data(tool.name.utf8))
             hasher.update(data: Data("\u{1F}".utf8))
-            hasher.update(data: Data(entry.tool.toolDescription.utf8))
+            hasher.update(data: Data(tool.toolDescription.utf8))
             hasher.update(data: Data("\u{1F}".utf8))
             // Identity salt (e.g. an MCP server's install UUID) so a tool whose provenance
             // changes forces a re-scope even when its name/description/schema are byte-identical
             // (a reinstalled same-named server). Built-ins contribute nothing here.
-            hasher.update(data: Data((entry.tool.identityToken ?? "").utf8))
+            hasher.update(data: Data((tool.identityToken ?? "").utf8))
             hasher.update(data: Data("\u{1F}".utf8))
             // Deterministic full schema serialization (sorted keys) so any change to the
             // parameter shape — including nested properties — alters the fingerprint. If a
             // schema somehow fails to encode, the name+description still contribute.
-            if let schema = try? encoder.encode(entry.tool.parameters) {
+            if let schema = try? encoder.encode(tool.parameters) {
                 hasher.update(data: schema)
             }
             hasher.update(data: Data("\u{1E}".utf8))

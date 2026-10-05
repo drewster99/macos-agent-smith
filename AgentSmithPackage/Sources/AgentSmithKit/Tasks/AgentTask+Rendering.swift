@@ -71,12 +71,26 @@ extension AgentTask {
 
     /// The description as the Security Agent reviews a single tool call against it: the same
     /// composition every other reader gets, followed by the required capabilities — what the
-    /// worker is expected to need to do, which bears directly on whether a call fits the task.
-    func renderedDescriptionForSecurityReview() -> String {
-        let description = renderedDescriptionWithTemplateInputs()
-        guard let capabilities = renderedRequiredCapabilities() else { return description }
-        return "\(description)\n\n## Required capabilities\n\(capabilities)"
+    /// worker is expected to need to do, which bears directly on whether a call fits the task —
+    /// and, for a child task, that a worker wrote all of it and what the user actually asked for.
+    /// A requester-written task renders exactly as it always did.
+    func renderedDescriptionForSecurityReview(provenance: TaskIntentProvenance) -> String {
+        var text = renderedDescriptionWithTemplateInputs()
+        if let capabilities = renderedRequiredCapabilities() {
+            text += "\n\n## Required capabilities\n\(capabilities)"
+        }
+        guard case .workerAuthored(let originating) = provenance else { return text }
+        text += "\n\n\(Self.workerAuthoredHeading)\nThis is a child task. A coordinating worker wrote everything above; it is that worker's claim about what is needed, not the user's request."
+        if let originating {
+            text += "\n\n## Originating task (the user's request this work serves)\n- title: \(originating.title)\n- description: \(originating.description)"
+        } else {
+            text += "\nThe task it was created for no longer exists, so no statement of the user's intent is available."
+        }
+        return text
     }
+
+    /// The heading the per-call review prompt keys on (`SecurityAgentBehavior`).
+    static let workerAuthoredHeading = "## Written by a worker agent, NOT the user"
 
     var hasSubmittedResult: Bool {
         !(result?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)

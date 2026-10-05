@@ -39,8 +39,9 @@ public actor AgentActor {
     /// are exposed. Acknowledgement itself is a runtime action (no tool); once done, the post-ack
     /// tools `task_update` / `task_complete` / `request_help` become available.
     private var taskAcknowledged = false
-    /// Fingerprint of the candidate set at the last scoping. A change (MCP added/removed/
-    /// redefined) triggers a fresh stateless re-scope at the next turn boundary.
+    /// Fingerprint of the set the last scoping judged — the candidates minus withheld (Never)
+    /// tools. A change (MCP added/removed/redefined, a Never set or lifted) triggers a fresh
+    /// stateless re-scope at the next turn boundary.
     private var lastScopedFingerprint: String?
     /// Set when what the task asks of its worker changed (`requestToolRescope`): the next turn
     /// boundary re-scopes even though the candidate set did not change.
@@ -834,12 +835,15 @@ public actor AgentActor {
     }
 
     /// Enables per-task security scoping for this agent (Brown), seeding the initial approved
-    /// set from the runtime's pre-start scoping pass. After this, only approved + forced
-    /// lifecycle tools are available; mid-task candidate changes trigger a fresh stateless
+    /// set from the runtime's pre-start scoping pass and the fingerprint of the set that pass judged
+    /// (`ToolRegistry.fingerprint(of:)` over `ToolPolicy.scopingCandidates`). After this, only
+    /// approved + forced lifecycle tools are available; a change to the judged set — a tool added
+    /// between that pass and this worker's first turn included — triggers a fresh stateless
     /// re-scope at the turn boundary.
-    public func enableToolScoping(approvedNames: Set<String>) {
+    public func enableToolScoping(approvedNames: Set<String>, scopedCandidateFingerprint: String) {
         toolScopingEnabled = true
         approvedToolNames = approvedNames
+        lastScopedFingerprint = scopedCandidateFingerprint
     }
 
     /// Asks for a fresh tool scoping at the next turn boundary, against the task as it reads then.
@@ -1422,23 +1426,30 @@ public actor AgentActor {
         // forced lifecycle tools are available.
         toolRegistry.rebuild(candidates: candidates, defaultApproved: false)
 
-        // Pre-flight scoping ON: re-scope from scratch if the candidate set changed (content
-        // fingerprint, so a silent redefinition counts). The first refresh just records the
-        // fingerprint — the runtime already scoped this set before the worker started.
+        // Pre-flight scoping ON: re-scope from scratch when the set scoping judges changed — the
+        // candidates minus withheld (Never) tools, fingerprinted by content so a silent
+        // redefinition counts and a Never set or lifted counts too — or when a re-scope was asked
+        // for. The runtime seeded the fingerprint of the set it scoped before the worker started.
         // Pre-flight scoping OFF: the base approved set is simply every current candidate.
         let candidateNames = Set(candidates.map(\.name))
-        let fingerprint = toolRegistry.candidateFingerprint
         if preflightScopingActive {
-            let candidatesChanged = lastScopedFingerprint.map { $0 != fingerprint } ?? false
-            if candidatesChanged || toolRescopeRequested {
+            // Snapshot, fingerprint and decide with no suspension in between; the fingerprint stored
+            // is the pre-await one, so a policy change landing during the scoping call changes the
+            // next refresh's fingerprint and re-scopes again.
+            let scopingCandidates = ToolPolicy.scopingCandidates(candidates, globalPolicies: globalToolPolicy)
+            let scopingFingerprint = ToolRegistry.fingerprint(of: scopingCandidates)
+            // A request is consumed only when there is a task to scope against: one made while the
+            // task is between bindings (validating, say) waits for the next refresh that finds it.
+            if scopingFingerprint != lastScopedFingerprint || toolRescopeRequested,
+               let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) {
                 toolRescopeRequested = false
-                await rescopeToolsStateless()
+                lastScopedFingerprint = scopingFingerprint
+                await rescopeToolsStateless(for: task, candidates: scopingCandidates)
             }
         } else {
             approvedToolNames = candidateNames
             toolRescopeRequested = false
         }
-        lastScopedFingerprint = fingerprint
 
         // Layer global policy + per-task overrides on top of the base verdict, then force lifecycle.
         let resolved = ToolPolicy.effectiveApprovedTools(
@@ -1489,20 +1500,20 @@ public actor AgentActor {
     /// memory of prior approvals), updates `approvedToolNames`, persists the new set on the
     /// task, and injects a generic "tools changed" nudge into the worker's history. On failure
     /// the prior approvals are kept (last-known-good) and nothing is injected.
-    private func rescopeToolsStateless() async {
-        guard let evaluator = securityEvaluator,
-              let task = await currentTaskForScoping() else { return }
+    private func rescopeToolsStateless(for task: AgentTask, candidates: [any AgentTool]) async {
+        guard let evaluator = securityEvaluator else { return }
         // Light the Security Agent card while it re-scopes (a real Security Agent LLM call).
         // `defer`-paired for the reason the deleted per-call brackets were: a stranded "true" here
         // shows the gatekeeper busy forever, and this is now the ONLY user of this signal.
         toolContext.onSecurityAgentProcessingStateChange(true)
         defer { toolContext.onSecurityAgentProcessingStateChange(false) }
         let result = await evaluator.scopeTools(
-            candidateTools: toolRegistry.candidateTools,
+            candidateTools: candidates,
             taskTitle: task.title,
             taskID: task.id.uuidString,
             taskDescription: task.renderedDescriptionWithTemplateInputs(),
-            requiredCapabilities: task.requiredCapabilities.map(\.renderedLine)
+            requiredCapabilities: task.requiredCapabilities.map(\.renderedLine),
+            intentProvenance: await toolContext.taskStore.intentProvenance(of: task)
         )
         guard result.succeeded else {
             // Last-known-good is kept, but not silently: a re-scope asked for because the task
@@ -1529,12 +1540,6 @@ public actor AgentActor {
         // set — not on the forced-flag transitions this actor drives deliberately (e.g.
         // ack → update/complete).
         conversationHistory.append(.user("[System] Available tools have changed - confirm availability before use."))
-    }
-
-    /// The task this worker is currently assigned to, for scoping context.
-    private func currentTaskForScoping() async -> AgentTask? {
-        let allTasks = await toolContext.taskStore.allTasks()
-        return allTasks.first { $0.assigneeIDs.contains(toolContext.agentID) }
     }
 
     private func runLoop() async {
@@ -2524,8 +2529,8 @@ public actor AgentActor {
                     let taskDescription: String?
                 }
 
-                let allTasks = await toolContext.taskStore.allTasks()
-                let currentTask = allTasks.first { $0.assigneeIDs.contains(toolContext.agentID) && $0.status == .running }
+                let currentTask = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID)
+                let reviewDescription = await securityReviewDescription(of: currentTask)
                 let parallelCount = segment.calls.count
                 // Same justification context the sequential path supplies. Computed here, once,
                 // because it is actor-isolated and the evaluations below run in a task group.
@@ -2560,9 +2565,9 @@ public actor AgentActor {
                     entries.append(ParallelEntry(
                         batchIndex: batchIndex, call: call, tool: tool, siblings: siblings,
                         taskTitle: currentTask?.title, taskID: currentTask?.id.uuidString,
-                        taskDescription: currentTask?.renderedDescriptionForSecurityReview()
+                        taskDescription: reviewDescription
                     ))
-                    await postToolRequestToChannel(call, tool: tool, task: currentTask, parallelIndex: batchIndex, parallelCount: parallelCount, siblingCallSummaries: approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil })
+                    await postToolRequestToChannel(call, tool: tool, task: currentTask, taskDescription: reviewDescription, parallelIndex: batchIndex, parallelCount: parallelCount, siblingCallSummaries: approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil })
                 }
 
                 struct ParallelToolResult: Sendable {
@@ -2949,12 +2954,13 @@ public actor AgentActor {
         let toolDef = tool.definition(for: configuration.role)
         let toolParameterDefs = Self.formatToolParameterDefinitions(toolDef.parameters)
 
-        // Look up the current running task for context.
-        let allTasks = await toolContext.taskStore.allTasks()
-        let currentTask = allTasks.first { $0.assigneeIDs.contains(toolContext.agentID) && $0.status == .running }
+        // Look up the current task for context: this agent's own (`taskForAgent`), never "whatever
+        // is running", which with concurrent workers answers with another worker's task.
+        let currentTask = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID)
+        let reviewDescription = await securityReviewDescription(of: currentTask)
 
         // Post tool_request to channel for UI visibility.
-        await postToolRequestToChannel(call, tool: tool, task: currentTask, parallelIndex: parallelIndex, parallelCount: parallelCount, siblingCallSummaries: siblingCallSummaries)
+        await postToolRequestToChannel(call, tool: tool, task: currentTask, taskDescription: reviewDescription, parallelIndex: parallelIndex, parallelCount: parallelCount, siblingCallSummaries: siblingCallSummaries)
 
         guard let evaluator = securityEvaluator else {
             // Every tool call routes here now, so this is a reachable runtime state rather than a
@@ -3006,7 +3012,7 @@ public actor AgentActor {
                 toolParameterDefs: toolParameterDefs,
                 taskTitle: currentTask?.title,
                 taskID: currentTask?.id.uuidString,
-                taskDescription: currentTask?.renderedDescriptionForSecurityReview(),
+                taskDescription: reviewDescription,
                 siblingCalls: siblings,
                 agentRoleName: configuration.role.displayName,
                 callerRole: configuration.role,
@@ -3365,7 +3371,16 @@ public actor AgentActor {
     // MARK: - Channel posting helpers
 
     /// Posts a tool_request message to the channel for UI visibility.
-    private func postToolRequestToChannel(_ call: LLMToolCall, tool: any AgentTool, task: AgentTask?, parallelIndex: Int, parallelCount: Int, siblingCallSummaries: [String]) async {
+    /// `task`'s description as the Security Agent reviews a call against it, with who wrote it.
+    private func securityReviewDescription(of task: AgentTask?) async -> String? {
+        guard let task else { return nil }
+        let provenance = await toolContext.taskStore.intentProvenance(of: task)
+        return task.renderedDescriptionForSecurityReview(provenance: provenance)
+    }
+
+    /// `taskDescription` is the description the call is reviewed against
+    /// (`securityReviewDescription(of:)`), shown with the request.
+    private func postToolRequestToChannel(_ call: LLMToolCall, tool: any AgentTool, task: AgentTask?, taskDescription: String?, parallelIndex: Int, parallelCount: Int, siblingCallSummaries: [String]) async {
         let toolDef = tool.definition(for: configuration.role)
         let toolParameterDefs = Self.formatToolParameterDefinitions(toolDef.parameters)
 
@@ -3381,7 +3396,7 @@ public actor AgentActor {
         if let task {
             metadata["taskTitle"] = .string(task.title)
             metadata["taskID"] = .string(task.id.uuidString)
-            metadata["taskDescription"] = .string(task.renderedDescriptionForSecurityReview())
+            metadata["taskDescription"] = .string(taskDescription ?? task.renderedDescriptionWithTemplateInputs())
         }
         if parallelCount > 1 {
             metadata["parallelIndex"] = .int(parallelIndex)

@@ -20,6 +20,7 @@ import Foundation
 /// and a group never softens it.
 public enum BuiltInToolGroup: String, CaseIterable, Sendable {
     case taskManagement = "builtin.task-management"
+    case coordination = "builtin.coordination"
     case messaging = "builtin.messaging"
     case scheduling = "builtin.scheduling"
     case filesystem = "builtin.filesystem"
@@ -35,6 +36,7 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
     public var displayName: String {
         switch self {
         case .taskManagement: return "Task management"
+        case .coordination: return "Worker coordination"
         case .messaging: return "Messaging"
         case .scheduling: return "Scheduling"
         case .filesystem: return "Local filesystem"
@@ -54,8 +56,15 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
         switch self {
         case .taskManagement:
             return "Creates and mutates tasks in this app's own task store: descriptions, step plans, "
-                + "acceptance criteria, status. Effects are internal to Agent Smith and touch nothing "
-                + "outside it, though they can redirect what a worker does next."
+                + "acceptance criteria, status. Nothing here touches the outside world directly, but "
+                + "task text is an instruction to an agent: a task's description and required "
+                + "capabilities decide what a worker does and which tools it is given."
+        case .coordination:
+            return "Creates child tasks that other workers run, and waits for their outcomes. A child's "
+                + "worker gets its own tools — possibly shell, files, Internet — scoped from text the "
+                + "creating worker wrote, so creating a child can reach anything a worker can. Judge a "
+                + "child's description and required capabilities against the task the creating worker "
+                + "is running."
         case .messaging:
             return "Moves text between the user and the agents, or between agents. Nothing leaves the "
                 + "machine, but content reaches a human, so judge it for what it DISCLOSES — a message "
@@ -131,7 +140,9 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
         .taskManagement: [
             "create_task", "run_task", "update_task", "edit_task", "amend_task", "add_required_capability",
             "get_task_details", "list_tasks", "set_template_inputs", "manage_task_disposition",
-            "manage_steps", "set_acceptance_criteria", "respond_to_user_acceptance", "task_update", "task_complete",
+            "manage_steps", "set_acceptance_criteria", "respond_to_user_acceptance", "task_update", "task_complete"
+        ],
+        .coordination: [
             "create_child_task", "wait_for_child_tasks"
         ],
         .messaging: [

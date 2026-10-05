@@ -2218,6 +2218,19 @@ private struct TaskDetailChildTaskLine: View {
             TaskDetailLinkedTaskButton(taskID: child.id, title: child.title, sessionID: sessionID)
             Text(child.status.displayName)
                 .foregroundStyle(TaskStatusBadge.color(for: child.status))
+            Text(child.disposition.childLineSuffix)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private extension AgentTask.TaskDisposition {
+    /// Where a child lives, when not in the active list.
+    var childLineSuffix: String {
+        switch self {
+        case .active: return ""
+        case .archived: return "— Archived"
+        case .recentlyDeleted: return "— Deleted"
         }
     }
 }

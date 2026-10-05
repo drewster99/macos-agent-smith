@@ -905,7 +905,8 @@ extension OrchestrationRuntime {
         if let evaluator = validationSecurityEvaluator {
             let gateTaskTitle = task.title
             let gateTaskID = task.id.uuidString
-            let gateTaskDescription = task.renderedDescriptionForSecurityReview()
+            let gateProvenance = await taskStore.intentProvenance(of: task)
+            let gateTaskDescription = task.renderedDescriptionForSecurityReview(provenance: gateProvenance)
             let gateChannel = channel
             securityGate = { (call: LLMToolCall, tool: any AgentTool) async -> Bool in
                 // Surface the validator's tool call in the transcript before it runs, so acceptance
@@ -1461,7 +1462,8 @@ extension OrchestrationRuntime {
                 metadata: [
                     "messageKind": .kind(.taskQueuedAtCapacity),
                     "taskID": .string(taskID.uuidString)
-                ]
+                ],
+                taskID: taskID
             ))
             return
         }

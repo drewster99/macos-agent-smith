@@ -70,7 +70,8 @@ struct CoordinatorTaskTests {
         let creation = await store.addChildTask(
             coordinatorTaskID: coordinator.id, limit: 2, title: "One", description: "d",
             descriptionAttachments: [], acceptanceCriteria: [criterion],
-            steps: [TaskStep(text: "Build", origin: .worker)], requiredCapabilities: []
+            steps: [TaskStep(text: "Build", origin: .worker)], requiredCapabilities: [],
+            relevantContext: .none
         )
         guard case .created(let first) = creation else {
             Issue.record("expected .created, got \(creation)")
@@ -84,16 +85,151 @@ struct CoordinatorTaskTests {
         _ = try await createChild(store, coordinator: coordinator.id, limit: 2)
         let third = await store.addChildTask(
             coordinatorTaskID: coordinator.id, limit: 2, title: "Three", description: "d",
-            descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: []
+            descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: [],
+            relevantContext: .none
         )
         #expect(third == .limitReached(limit: 2))
         #expect(await store.childTasks(ofCoordinator: coordinator.id).count == 2)
 
         let orphan = await store.addChildTask(
             coordinatorTaskID: UUID(), limit: 2, title: "Orphan", description: "d",
-            descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: []
+            descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: [],
+            relevantContext: .none
         )
         #expect(orphan == .coordinatorNotFound)
+    }
+
+    @Test("the limit counts every child ever created, a permanently deleted one included")
+    func limitCountsDeletedChildren() async throws {
+        let store = TaskStore()
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        let child = try await createChild(store, coordinator: coordinator.id, limit: 1)
+        #expect(await store.permanentlyDelete(id: child.id))
+        #expect(await store.task(id: coordinator.id)?.childTasksCreated == 1)
+        let next = await store.addChildTask(
+            coordinatorTaskID: coordinator.id, limit: 1, title: "Again", description: "d",
+            descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: [],
+            relevantContext: .none
+        )
+        #expect(next == .limitReached(limit: 1))
+    }
+
+    @Test("an unfinished child with the same title is refused as a duplicate; a finished one is not")
+    func duplicateTitleRefused() async throws {
+        let store = TaskStore()
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        func add(_ title: String) async -> TaskStore.ChildTaskCreation {
+            await store.addChildTask(
+                coordinatorTaskID: coordinator.id, limit: 10, title: title, description: "d",
+                descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: [],
+                relevantContext: .none
+            )
+        }
+        guard case .created(let first) = await add("Audit A") else {
+            Issue.record("first child not created")
+            return
+        }
+        #expect(await add("audit a") == .duplicateOfUnfinishedChild(first))
+        _ = await store.driveStatus(id: first.id, to: .completed)
+        guard case .created = await add("Audit A") else {
+            Issue.record("a finished child blocked a new one with its title")
+            return
+        }
+    }
+
+    @Test("the counter survives a round trip and is absent from a task that created no children")
+    func childCounterPersists() throws {
+        var task = AgentTask(title: "T", description: "d")
+        #expect(try !String(decoding: JSONEncoder().encode(task), as: UTF8.self).contains("childTasksCreated"))
+        task.childTasksCreated = 3
+        let decoded = try JSONDecoder().decode(AgentTask.self, from: JSONEncoder().encode(task))
+        #expect(decoded.childTasksCreated == 3)
+    }
+
+    @Test("a child can't become a template while its coordinator is open")
+    func childPromotionRefused() async throws {
+        let store = TaskStore()
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        let child = try await createChild(store, coordinator: coordinator.id)
+        #expect(await store.setTemplate(id: child.id, isTemplate: true) != nil)
+        _ = await store.driveStatus(id: coordinator.id, to: .completed)
+        #expect(await store.setTemplate(id: child.id, isTemplate: true) == nil)
+        let template = try #require(await store.taskOrLibraryTemplate(id: child.id))
+        #expect(template.coordinatorTaskID == nil, "a template is nobody's child")
+    }
+
+    // MARK: - Child progress
+
+    @Test("each child status classifies for its waiting coordinator")
+    func childProgressTable() {
+        func progress(_ status: AgentTask.Status, disposition: AgentTask.TaskDisposition = .active,
+                      holds: Bool = false, resumes: Bool = false) -> ChildTaskProgress {
+            var task = AgentTask(title: "C", description: "d", status: status, disposition: disposition)
+            if holds { task.startHolds = [TaskStartHold(watchedTaskID: UUID(), watchID: UUID())] }
+            return task.progressAsChildTask(resumesAutomatically: resumes)
+        }
+        #expect(progress(.completed) == .finished)
+        #expect(progress(.completed, disposition: .archived) == .finished, "an archived finished child is finished")
+        #expect(progress(.failed) == .finished)
+        #expect(progress(.running) == .progressing)
+        #expect(progress(.pending) == .progressing)
+        #expect(progress(.pending, holds: true) == .waitingOnOthers(.startHold))
+        #expect(progress(.awaitingHelp) == .waitingOnOthers(.smith))
+        #expect(progress(.awaitingReview) == .waitingOnOthers(.user))
+        #expect(progress(.paused) == .stalled(.paused))
+        #expect(progress(.interrupted) == .stalled(.interrupted))
+        #expect(progress(.interrupted, resumes: true) == .progressing)
+        #expect(progress(.pending, disposition: .archived) == .stalled(.leftActive(.archived)))
+    }
+
+    @Test("a stop the coordinator must react to is noted; one that resumes on its own is not")
+    func stallNotes() {
+        let child = AgentTask(title: "Child", description: "d", coordinatorTaskID: UUID())
+        func note(_ to: AgentTask.Status, _ cause: TaskTransitionCause) -> String? {
+            CoordinatorTaskBriefing.note(
+                for: TaskStatusTransition(taskID: child.id, statusRevision: 2, from: .running, to: to, at: Date(), cause: cause),
+                task: child
+            )
+        }
+        #expect(note(.paused, .userPaused)?.contains("PAUSED by the user") == true)
+        #expect(note(.interrupted, .userStopped)?.contains("STOPPED by the user") == true)
+        #expect(note(.interrupted, .orphanRecovered)?.contains("worker was lost") == true)
+        #expect(note(.interrupted, .capacityShed) == nil, "a capacity-shed child resumes on its own")
+        #expect(note(.interrupted, .sessionShutdown) == nil)
+    }
+
+    @Test("an unfinished child archived under an open coordinator is reported; a finished one with nothing owed is not")
+    func departureEmitted() async throws {
+        let store = TaskStore()
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        _ = await store.driveStatus(id: coordinator.id, to: .running)
+        let unfinished = try await createChild(store, coordinator: coordinator.id)
+        let finished = try await createChild(store, coordinator: coordinator.id)
+        _ = await store.driveStatus(id: finished.id, to: .failed)
+        for record in await store.task(id: finished.id)?.pendingEffects ?? [] {
+            await store.completeEffect(taskID: finished.id, recordID: record.id)
+        }
+        let events = StoreEventCollector()
+        await store.setEventObserver { events.append($0) }
+
+        #expect(await store.archive(id: unfinished.id))
+        #expect(await store.archive(id: finished.id))
+        let departures = events.values.compactMap { event -> CoordinatorChildDeparture? in
+            if case .childLeftCoordination(let departure) = event { return departure }
+            return nil
+        }
+        #expect(departures.map(\.child.id) == [unfinished.id])
+        #expect(departures.first?.departure == .leftActive(.archived))
+        #expect(departures.first.map(CoordinatorTaskBriefing.departureNote)?.contains("ARCHIVED") == true)
+    }
+
+    @Test("a child's routing line follows its coordinator")
+    func routingDescription() {
+        #expect(CoordinatorTaskBriefing.routingDescription(coordinator: nil).contains("no longer exists"))
+        let open = AgentTask(title: "C", description: "d", status: .running)
+        #expect(CoordinatorTaskBriefing.routingDescription(coordinator: open).contains("reported to that task's worker"))
+        let closed = AgentTask(title: "C", description: "d", status: .completed)
+        #expect(CoordinatorTaskBriefing.routingDescription(coordinator: closed).contains("closed (completed)"))
     }
 
     // MARK: - Parking
@@ -174,6 +310,12 @@ struct CoordinatorTaskTests {
         let finished = try await WaitForChildTasksTool().execute(arguments: [:], context: context)
         #expect(!finished.succeeded, "waited for an outcome that already happened")
         #expect(finished.output.contains("Completed"))
+
+        let paused = try await createChild(store, coordinator: coordinator.id)
+        _ = await store.driveStatus(id: paused.id, to: .paused)
+        let stalled = try await WaitForChildTasksTool().execute(arguments: [:], context: context)
+        #expect(!stalled.succeeded, "waited on a paused child nobody will resume")
+        #expect(stalled.output.contains("Not waiting"))
     }
 
     // MARK: - Runtime: one start above capacity
@@ -217,12 +359,80 @@ struct CoordinatorTaskTests {
         await runtime.stopAll()
     }
 
+    /// Capacity 2: the coordinator waits on its child, which is running. The user cuts capacity to
+    /// 1, which sheds the child (newest). The coordinator is now the only live worker, waiting on a
+    /// child that is capacity-deferred — nothing running can free a slot. The cut drains, and the
+    /// child resumes above the new limit (before the fix it waited forever: the drain neither ran on
+    /// a cut nor looked at the deferred queue above capacity).
+    @Test("a capacity cut under a waiting coordinator resumes its shed child above the limit")
+    func capacityCutResumesShedChild() async throws {
+        let gate = Gate()
+        let runtime = makeRuntime(brownProvider: CoordinatorOrChildProvider(gate: gate, coordinatorMarker: Self.coordinatorMarker))
+        await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(
+            autoRunNextTask: false,
+            autoRunInterruptedTasks: false,
+            enableTaskCompletionValidators: false,
+            scopeToolSetOnTaskStart: false
+        )))
+        await runtime.setWorkerCapacity(2)
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        let coordinator = await store.addTask(title: "Coordinator", description: Self.coordinatorMarker)
+        await runtime.restartForNewTask(taskID: coordinator.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let child = try await createChild(store, coordinator: coordinator.id)
+        await runtime.drainPendingTaskQueueForTesting()
+        await runtime.waitForPendingRestarts()
+        #expect(await waitUntil { await store.task(id: child.id)?.status == .running }, "the child never started below capacity")
+
+        await gate.open()   // the coordinator's worker now waits on its child
+        let firstChildWorker = await runtime.liveWorkerID(taskID: child.id)
+        await runtime.setWorkerCapacity(1)
+        await runtime.waitForPendingRestarts()
+        let resumed = await waitUntil {
+            guard await store.task(id: child.id)?.status == .running else { return false }
+            guard let worker = await runtime.liveWorkerID(taskID: child.id) else { return false }
+            return worker != firstChildWorker
+        }
+        #expect(resumed, "the shed child was never resumed although its coordinator waited on it")
+        #expect(await store.task(id: coordinator.id)?.status == .running)
+        await runtime.stopAll()
+    }
+
+    private static let coordinatorMarker = "COORDINATOR-MARKER-7f3a"
+
+    /// The coordinator's model waits on its children once the gate opens; a child's model thinks
+    /// forever (cancellably, so a shed worker stops cleanly).
+    private final class CoordinatorOrChildProvider: LLMProvider, @unchecked Sendable {
+        private let gate: Gate
+        private let coordinatorMarker: String
+        init(gate: Gate, coordinatorMarker: String) {
+            self.gate = gate
+            self.coordinatorMarker = coordinatorMarker
+        }
+
+        func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
+            let isCoordinator = messages.contains { message in
+                guard case .text(let text) = message.content else { return false }
+                return text.contains(coordinatorMarker)
+            }
+            guard isCoordinator else {
+                try await Task.sleep(for: .seconds(3600))
+                return LLMResponse(text: "unreachable")
+            }
+            await gate.wait()
+            return LLMResponse(toolCalls: [LLMToolCall(id: "c\(UUID().uuidString.prefix(8))", name: "wait_for_child_tasks", arguments: "{}")])
+        }
+    }
+
     // MARK: - Helpers
 
     private func createChild(_ store: TaskStore, coordinator: UUID, limit: Int = 10) async throws -> AgentTask {
         let creation = await store.addChildTask(
             coordinatorTaskID: coordinator, limit: limit, title: "Child \(UUID().uuidString.prefix(4))", description: "d",
-            descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: []
+            descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: [],
+            relevantContext: .none
         )
         guard case .created(let child) = creation else {
             throw CoordinatorTestError.childNotCreated
@@ -239,6 +449,13 @@ struct CoordinatorTaskTests {
               await store.updateStatus(id: id, status: .completed, cause: .validationPassed(validationWasRun: true)) else {
             throw CoordinatorTestError.statusNotReached
         }
+    }
+
+    private final class StoreEventCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var collected: [TaskStoreEvent] = []
+        var values: [TaskStoreEvent] { lock.withLock { collected } }
+        func append(_ event: TaskStoreEvent) { lock.withLock { collected.append(event) } }
     }
 
     private final class StartRecorder: @unchecked Sendable {
@@ -260,6 +477,7 @@ struct CoordinatorTaskTests {
             agentRoleForID: { _ in .brown },
             startChildTask: { started.record($0) },
             maxChildTasksPerTask: { childLimit },
+            automaticallyResumingChildTaskIDs: { [] },
             memoryStore: MemoryStore(engine: Self.sharedEngine),
             setToolExecutionStatus: { _, _ in },
             hasToolSucceeded: { _ in false },

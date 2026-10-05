@@ -1233,7 +1233,9 @@ actor SecurityEvaluator {
         taskDescription: String,
         /// `RequiredCapability.renderedLine` of each of the task's required capabilities. Its own
         /// field so the scoping prompt can single it out; empty when the task lists none.
-        requiredCapabilities: [String]
+        requiredCapabilities: [String],
+        /// Who wrote the task's text (`TaskStore.intentProvenance`): a child task's is a worker's.
+        intentProvenance: TaskIntentProvenance
     ) async -> ToolScopingResult {
         // One scoping pass, one model — unless the pass is sleeping on its provider when a swap
         // lands, in which case it retries on the new model (the prompt does not depend on it).
@@ -1245,13 +1247,23 @@ actor SecurityEvaluator {
             return ToolScopingResult(approvedNames: [], rawResponse: "(no candidate tools)", succeeded: true)
         }
 
-        var prompt = Self.buildScopingPrompt(
-            candidateTools: candidateTools,
-            taskTitle: taskTitle,
-            taskID: taskID,
-            taskDescription: taskDescription,
-            requiredCapabilities: requiredCapabilities
-        )
+        var prompt: String
+        do {
+            prompt = try Self.buildScopingPrompt(
+                candidateTools: candidateTools,
+                taskTitle: taskTitle,
+                taskID: taskID,
+                taskDescription: taskDescription,
+                requiredCapabilities: requiredCapabilities,
+                intentProvenance: intentProvenance
+            )
+        } catch {
+            return ToolScopingResult(
+                approvedNames: [],
+                rawResponse: "(could not encode the scoping request: \(error.localizedDescription))",
+                succeeded: false
+            )
+        }
         // Optional retrieved context (Orchestration `.securityScoping`; default off = a cheap no-op).
         if let block = await retrieveContext(.securityScoping, "\(taskTitle) \(taskDescription)").formattedForInjection() {
             prompt += "\n\n# Possibly relevant context (memories / prior tasks)\n\(block)"
@@ -1403,7 +1415,18 @@ actor SecurityEvaluator {
         let taskDescription: String
         /// Omitted from the JSON when the task lists none (nil encodes as an absent key).
         let requiredCapabilities: [String]?
+        /// Who wrote taskTitle / taskDescription / requiredCapabilities. Always present.
+        let taskAuthor: TaskAuthor
+        /// Only for a coordinatingWorker task whose originating task still exists (nil → absent key).
+        let originatingTask: OriginatingTask?
         let toolGroups: [ToolGroup]
+
+        enum TaskAuthor: String, Encodable { case requester, coordinatingWorker }
+
+        struct OriginatingTask: Encodable {
+            let taskTitle: String
+            let taskDescription: String
+        }
         let candidateTools: [CandidateTool]
 
         /// Tri-state capability flag. `unknown` = could not be determined (e.g. an MCP server
@@ -1524,14 +1547,16 @@ actor SecurityEvaluator {
     }
 
     /// Builds the scoping user message: the structured request serialized to pretty, sorted-key
-    /// JSON. Sorted keys keep it deterministic (prompt-cache friendly).
+    /// JSON. Sorted keys keep it deterministic (prompt-cache friendly). Throws when encoding fails,
+    /// rather than sending an empty request the model can only answer with garbage.
     private static func buildScopingPrompt(
         candidateTools: [any AgentTool],
         taskTitle: String,
         taskID: String,
         taskDescription: String,
-        requiredCapabilities: [String]
-    ) -> String {
+        requiredCapabilities: [String],
+        intentProvenance: TaskIntentProvenance
+    ) throws -> String {
         var groupsByID: [String: ToolSetScopingUserPrompt.ToolGroup] = [:]
         var candidates: [ToolSetScopingUserPrompt.CandidateTool] = []
         for tool in candidateTools {
@@ -1539,20 +1564,32 @@ actor SecurityEvaluator {
             groupsByID[group.toolGroupID] = group
             candidates.append(candidate)
         }
+        let taskAuthor: ToolSetScopingUserPrompt.TaskAuthor
+        let originatingTask: ToolSetScopingUserPrompt.OriginatingTask?
+        switch intentProvenance {
+        case .requester:
+            taskAuthor = .requester
+            originatingTask = nil
+        case .workerAuthored(let originating):
+            taskAuthor = .coordinatingWorker
+            originatingTask = originating.map {
+                ToolSetScopingUserPrompt.OriginatingTask(taskTitle: $0.title, taskDescription: $0.description)
+            }
+        }
         let payload = ToolSetScopingUserPrompt(
             taskID: taskID,
             taskTitle: taskTitle,
             taskDescription: taskDescription,
             requiredCapabilities: requiredCapabilities.isEmpty ? nil : requiredCapabilities,
+            taskAuthor: taskAuthor,
+            originatingTask: originatingTask,
             toolGroups: groupsByID.values.sorted { $0.toolGroupID < $1.toolGroupID },
             candidateTools: candidates
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(payload), let json = String(data: data, encoding: .utf8) else {
-            return "{}"
-        }
-        return json
+        // JSON is UTF-8 by definition, so decoding the bytes cannot fail.
+        return String(decoding: try encoder.encode(payload), as: UTF8.self)
     }
 
     /// Decodes the structured allow/block response into the set of approved (and real) tool names.
