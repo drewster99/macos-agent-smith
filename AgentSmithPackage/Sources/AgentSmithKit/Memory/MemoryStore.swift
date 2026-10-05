@@ -394,13 +394,17 @@ public actor MemoryStore {
 
     /// Composes the embedding source text from all available task fields.
     ///
-    /// Includes title, description, summary, result, commentary, and progress updates
+    /// Includes title, description, required capabilities, summary, result, commentary, and progress updates
     /// so the embedding captures the full topical signal of the task. No length caps —
     /// long results and update logs are embedded in full so they remain searchable.
     public static func composeEmbeddingText(task: AgentTask, summary: String) -> String {
         var parts: [String] = []
         parts.append(task.title)
         parts.append(task.description)
+        // What the work needed to be able to do is topical too ("compile the Xcode project").
+        if !task.requiredCapabilities.isEmpty {
+            parts.append(task.requiredCapabilities.map(\.text).joined(separator: " "))
+        }
         // The acceptance contract and the worker's plan describe what the task was
         // really about, often more concretely than the description — include their
         // texts. Verdicts/validation results are deliberately EXCLUDED (pass/fail

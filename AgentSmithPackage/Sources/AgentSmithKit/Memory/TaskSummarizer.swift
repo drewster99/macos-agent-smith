@@ -530,6 +530,9 @@ actor TaskSummarizer {
         sections.append("Task ID: \(task.id.uuidString)")
         sections.append("Title: \(task.title)")
         sections.append("Description: \(task.description)")
+        if let capabilities = task.renderedRequiredCapabilities() {
+            sections.append("Required capabilities:\n\(capabilities)")
+        }
         sections.append("Status: \(task.status.rawValue)")
 
         if let completedAt = task.completedAt {

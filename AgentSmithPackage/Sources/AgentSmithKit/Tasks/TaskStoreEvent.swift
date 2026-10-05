@@ -8,6 +8,9 @@ public enum TaskStoreEvent: Sendable, Equatable {
     case lifecycle(TaskLifecycleEvent)
     /// A write left released, undelivered effects (`TaskStore.readyEffects`).
     case effectsReady
+    /// A session task's required capabilities changed, so a worker running it must have its tools
+    /// re-scoped against the new list. Never emitted for a library template: no worker runs one.
+    case requiredCapabilitiesChanged(taskID: UUID)
 }
 
 /// A task entering or leaving this session's active store. Deliberately NOT a status transition:

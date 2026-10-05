@@ -101,6 +101,10 @@ enum AppColors {
     static let watchHoldBackground = Color.orange.opacity(0.10)
     /// An agent still calling a model other than the one assigned to its role.
     static let runningModelMismatch = Color.orange
+    /// A required capability added after the task was written — a need learned while it ran.
+    static let capabilityAddedLater = Color.orange
+    /// A tool the global policy sets to Never, shown in a task's per-task tool list.
+    static let toolBlockedByNeverPolicy = Color.orange
 
     // MARK: - Security-review dispositions
 

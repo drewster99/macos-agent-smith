@@ -1765,7 +1765,8 @@ final class AppViewModel {
         templateInstanceTitleTemplate: String?,
         acceptanceCriteria: [AcceptanceCriterion],
         steps: [TaskStep],
-        requiresUserAcceptance: Bool
+        requiresUserAcceptance: Bool,
+        requiredCapabilities: [RequiredCapability]
     ) async -> Bool {
         guard let taskStore else { return false }
         if isTemplate, let problem = TemplateInputValidation.validateDefinitions(templateInputDefinitions) {
@@ -1787,6 +1788,7 @@ final class AppViewModel {
                 description: description.trimmingCharacters(in: .whitespacesAndNewlines),
                 activeStepTexts: steps.filter(\.isActive).map(\.text),
                 criteria: acceptanceCriteria,
+                requiredCapabilityTexts: requiredCapabilities.map(\.text),
                 definedNames: Set(templateInputDefinitions.map(\.name))
             ) {
                 taskActionError = problem
@@ -1798,7 +1800,8 @@ final class AppViewModel {
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
             isTemplate: isTemplate,
             templateInputDefinitions: isTemplate ? templateInputDefinitions : [],
-            requiresUserAcceptance: requiresUserAcceptance
+            requiresUserAcceptance: requiresUserAcceptance,
+            requiredCapabilities: requiredCapabilities
         )
         if isTemplate, let problem = await taskStore.setTemplateInstanceTitleTemplate(id: task.id, titleTemplate: templateInstanceTitleTemplate) {
             // The title template was validated above, so this is unreachable in practice — but a
@@ -1978,6 +1981,21 @@ final class AppViewModel {
     /// holds full authority over the plan — unlike the worker, edits here may delete
     /// steps outright rather than tombstoning them.
     @discardableResult
+    /// Writes the user's edit of a task's required capabilities. On a task a worker is running,
+    /// the store's change event re-scopes that worker's tools.
+    func setTaskRequiredCapabilities(
+        id: UUID,
+        _ capabilities: [RequiredCapability],
+        editedFrom original: [RequiredCapability]
+    ) async -> Bool {
+        guard let taskStore else { return false }
+        if let problem = await taskStore.setRequiredCapabilities(id: id, capabilities, editedFrom: original) {
+            taskActionError = problem
+            return false
+        }
+        return true
+    }
+
     func setTaskSteps(id: UUID, steps: [TaskStep]) async -> Bool {
         guard let taskStore else { return false }
         guard let task = await taskStore.taskOrLibraryTemplate(id: id), task.status.isValidationContractEditable else {

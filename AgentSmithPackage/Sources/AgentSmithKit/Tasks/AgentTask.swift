@@ -128,6 +128,13 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// template instances should carry values; ordinary tasks and templates keep this empty.
     public var templateInputValues: [String: String]
 
+    /// What the worker must be able to do, as a list in its own field — what the Security Agent's
+    /// tool scoping pays special attention to, and where Smith records a running worker's unmet
+    /// need (a later addition, with its reason) instead of granting a tool. See `RequiredCapability`.
+    /// Mutated only through `TaskStore` (`addTask`, `addRequiredCapability`,
+    /// `setRequiredCapabilities`, template instantiation).
+    public var requiredCapabilities: [RequiredCapability]
+
     /// The most recent set of tool names the security agent approved for the worker on this
     /// task (per-task tool scoping). A **record**, not the gate — the live registry is the
     /// source of truth for enforcement. `nil` for legacy/unscoped tasks. Replaced wholesale
@@ -624,7 +631,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         sessionID: UUID? = nil,
         templateInputDefinitions: [TemplateInputDefinition] = [],
         templateInstanceTitleTemplate: String? = nil,
-        templateInputValues: [String: String] = [:]
+        templateInputValues: [String: String] = [:],
+        requiredCapabilities: [RequiredCapability] = []
     ) {
         self.id = id
         self.title = title
@@ -666,6 +674,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.templateInputDefinitions = templateInputDefinitions
         self.templateInstanceTitleTemplate = templateInstanceTitleTemplate
         self.templateInputValues = templateInputValues
+        self.requiredCapabilities = requiredCapabilities
     }
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
@@ -674,7 +683,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// that every stored property has a case: a defaulted property with no case is silently never
     /// persisted, and a round-trip test stays green because it decodes back to the same default.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, requiredCapabilities, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
     }
 
     public init(from decoder: Decoder) throws {
@@ -723,6 +732,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         templateInputDefinitions = try c.decodeIfPresent([TemplateInputDefinition].self, forKey: .templateInputDefinitions) ?? []
         templateInstanceTitleTemplate = try c.decodeIfPresent(String.self, forKey: .templateInstanceTitleTemplate)
         templateInputValues = try c.decodeIfPresent([String: String].self, forKey: .templateInputValues) ?? [:]
+        requiredCapabilities = try c.decodeIfPresent([RequiredCapability].self, forKey: .requiredCapabilities) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -796,6 +806,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(templateInstanceTitleTemplate, forKey: .templateInstanceTitleTemplate)
         if !templateInputValues.isEmpty {
             try c.encode(templateInputValues, forKey: .templateInputValues)
+        }
+        if !requiredCapabilities.isEmpty {
+            try c.encode(requiredCapabilities, forKey: .requiredCapabilities)
         }
     }
 }

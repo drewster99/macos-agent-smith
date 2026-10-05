@@ -298,7 +298,7 @@ struct RunTaskTool: AgentTool {
                     "taskID": .string(announced.id.uuidString),
                     "taskDescription": .string(announced.renderedDescriptionWithTemplateInputs()),
                     "clonedFromTemplate": .string(task.id.uuidString)
-                ]
+                ].merging(announced.taskCreatedBannerCapabilitiesMetadata()) { current, _ in current }
             ))
             startTaskID = instance.id
             templateInstanceNote = " Created template instance \(instance.id.uuidString)."

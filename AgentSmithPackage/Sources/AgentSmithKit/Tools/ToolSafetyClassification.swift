@@ -28,7 +28,7 @@ enum ToolSafetyClassification {
         "task_update", "task_complete", "request_help", "reply_to_user",
         "report_inbound_user_message",
         "message_user", "notify_brown", "provide_help", "respond_to_user_acceptance", "create_task", "run_task",
-        "update_task", "edit_task", "amend_task", "set_template_inputs", "schedule_task_action", "schedule_reminder", "reschedule_wake", "cancel_wake",
+        "update_task", "edit_task", "amend_task", "add_required_capability", "set_template_inputs", "schedule_task_action", "schedule_reminder", "reschedule_wake", "cancel_wake",
         "watch_task",
         // Destructive
         "file_write", "file_edit", "save_memory", "manage_task_disposition",

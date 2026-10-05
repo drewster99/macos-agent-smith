@@ -54,7 +54,7 @@ public struct CreateTaskTool: AgentTool {
                     "description": .string("""
 
                         Detailed description of what needs to be done, based closely on the directive(s) provided by the user. This communication must be clear, concise and complete. It is the one and only embodiment of the user's intent, and as such it must be embodied perfectly. Consider including the user's text verbatim. Make sure your final description doesn't miss or misrepresent any nuance in the user's request. Pay attention not only to the user's specific words and details, but also think about what the user MOST LIKELY MEANT. The worker agent won't see ANY of your conversations with the user. Everything it needs must be detailed here.
-                        Include a Capabilities Needed section at the bottom of your description, where you list bullet points of capabilities that the worker agent will likely need to complete the task. Never name a specific tool. For example, don't say "grep", say "Search for content in files". Don't say "bash", specify the specific things the agent will need to do with the shell, like "Find source code files", "Edit files", "Compile the Xcode project", etc..
+                        List what the worker will need to be able to do in `required_capabilities`, not here.
 
                         Use the `steps` parameter to include a clear step-by-step todo list of steps the worker agent should take to complete the task.
                         Use the `acceptance_criteria` parameter to spell out what 'done' and 'complete' look like, and how to verify/validate.
@@ -172,6 +172,13 @@ public struct CreateTaskTool: AgentTool {
                     "items": .dictionary(["type": .string("string")]),
                     "description": .string("""
                         Initial to-do list of steps for the worker, in order. PROVIDE THIS whenever the work has a natural sequence — it seeds the worker's plan and gives validators a record to check against. Note that these steps are guidance to the worker agent, not requirements. Once the task starts, the worker owns this to-do list and may edit, delete, re-order items as it wishes. Validators see only the *final* list.
+                        """)
+                ]),
+                "required_capabilities": .dictionary([
+                    "type": .string("array"),
+                    "items": .dictionary(["type": .string("string")]),
+                    "description": .string("""
+                        What the worker agent will need to be able to DO to complete the task, one capability per item. PROVIDE THIS for every task: the Security Agent chooses the worker's tools with special attention to this list, and a capability missing from it may leave the worker without a tool it needs. Never name a specific tool. For example, don't say "grep", say "Search for content in files". Don't say "bash"; say what the worker will do with the shell, like "Find source code files", "Edit files", "Compile the Xcode project". On a template, items may use {{input_name}} placeholders. If a running worker later turns out to lack something, add it with `add_required_capability` — never by editing the description.
                         """)
                 ]),
                 "requires_user_acceptance": .dictionary([
@@ -389,6 +396,18 @@ public struct CreateTaskTool: AgentTool {
             stepTexts = []
         }
 
+        // Duplicates (compared as `RequiredCapability.normalizedText` does) are dropped, keeping the
+        // first spelling: one need listed twice is still one need.
+        var capabilityKeys = Set<String>()
+        let requiredCapabilities = (ToolArguments.optionalArray(arguments, "required_capabilities") ?? [])
+            .compactMap { raw -> RequiredCapability? in
+                guard case .string(let text) = raw else { return nil }
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                let capability = RequiredCapability(text: trimmed, addedBy: .smith, origin: .asWritten)
+                return capabilityKeys.insert(capability.normalizedText).inserted ? capability : nil
+            }
+
         // Every authored field is checked BEFORE anything is stored, so a template written with a
         // mistyped `{{placeholder}}` leaves nothing behind to clean up. The store re-checks each
         // field on its own write; this pass exists because `addTask` has no way to refuse.
@@ -398,6 +417,7 @@ public struct CreateTaskTool: AgentTool {
                 description: description,
                 activeStepTexts: stepTexts,
                 criteria: seedCriteria,
+                requiredCapabilityTexts: requiredCapabilities.map(\.text),
                 definedNames: Set(templateInputDefinitions.map(\.name))
             ) {
                 return .failure("Task NOT created — \(problem)")
@@ -411,7 +431,8 @@ public struct CreateTaskTool: AgentTool {
             descriptionAttachments: resolvedAttachments,
             isTemplate: isTemplate,
             templateInputDefinitions: templateInputDefinitions,
-            requiresUserAcceptance: requiresUserAcceptance
+            requiresUserAcceptance: requiresUserAcceptance,
+            requiredCapabilities: requiredCapabilities
         )
         let gateNote: String
         if !requiresUserAcceptance {
@@ -477,7 +498,7 @@ public struct CreateTaskTool: AgentTool {
             "messageKind": .kind(.taskCreated),
             "taskID": .string(task.id.uuidString),
             "taskDescription": .string(description)
-        ]
+        ].merging(task.taskCreatedBannerCapabilitiesMetadata()) { current, _ in current }
         // Surface the scheduled run time so the New Task banner can render a chip on the
         // right ("Scheduled 9:15 AM"). Stored as Unix epoch seconds for stable round-tripping
         // through the existing AnyCodable JSON persistence path.

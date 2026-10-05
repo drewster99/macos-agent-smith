@@ -157,7 +157,7 @@ struct TaskToolOverrideEditor: View {
             if isBlockedByNeverPolicy(tool) {
                 Label("Never", systemImage: "nosign")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppColors.toolBlockedByNeverPolicy)
                     .help("Set to Never in Settings › Tools. It stays off for every task, whatever is chosen here.")
             }
             Spacer(minLength: 12)

@@ -7,6 +7,7 @@ struct GetTaskDetailsTool: AgentTool {
         Fetch the full details of one or more tasks by their IDs, including title, description, \
         scheduling/template metadata, template input definitions/values, acceptance criteria, \
         whether the user must sign off before it completes (and, while it awaits review, why), \
+        required capabilities (what the worker must be able to do; later additions marked), \
         steps, the worker's approved tool list (per-task tool scope) plus any user tool overrides, \
         commentary, progress updates, and result. Pass an array of task IDs (max 10) \
         to retrieve several tasks in a single call.
@@ -125,6 +126,9 @@ struct GetTaskDetailsTool: AgentTool {
             parts.append("parentTemplateID: \(parentTaskID.uuidString)")
         }
         parts.append("Description: \(task.description)")
+        if let capabilities = task.renderedRequiredCapabilities() {
+            parts.append("Required capabilities:\n\(capabilities)")
+        }
 
         if let definitions = task.renderedTemplateInputDefinitions() {
             parts.append("Template input definitions:\n\(definitions)")

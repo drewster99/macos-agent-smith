@@ -42,6 +42,10 @@ struct TaskPDFDocumentView: View {
         if options.description, !task.description.isEmpty {
             blocks.append(contentsOf: sectionBlocks(title: "Description", body: task.description))
         }
+        // Part of the task's definition, so it travels with the description option.
+        if options.description, let capabilities = task.renderedRequiredCapabilities() {
+            blocks.append(contentsOf: sectionBlocks(title: "Required Capabilities", body: capabilities))
+        }
         if options.summary, let summary = task.summary, !summary.isEmpty {
             blocks.append(contentsOf: sectionBlocks(title: "Summary", body: summary))
         }

@@ -13,6 +13,7 @@ private enum TaskDetailSectionKind: Hashable {
     case steps
     case updates
     case description
+    case capabilities
     case watches
     case relatedContext
 
@@ -25,6 +26,7 @@ private enum TaskDetailSectionKind: Hashable {
         case .steps:          return "Steps"
         case .updates:        return "Updates"
         case .description:    return "Description"
+        case .capabilities:   return "Capabilities"
         case .watches:        return "Watches"
         case .relatedContext: return "Context"
         }
@@ -39,6 +41,7 @@ private enum TaskDetailSectionKind: Hashable {
         case .steps:          return "list.bullet"
         case .updates:        return "clock.arrow.circlepath"
         case .description:    return "doc.text"
+        case .capabilities:   return "wrench.and.screwdriver"
         case .watches:        return "bell.badge"
         case .relatedContext: return "link"
         }
@@ -77,13 +80,13 @@ private func orderedSections(for status: AgentTask.Status) -> [TaskDetailSection
     // so they can be listed unconditionally.
     switch status {
     case .pending, .scheduled:
-        return [.description, .acceptance, .steps, .watches, .relatedContext]
+        return [.description, .capabilities, .acceptance, .steps, .watches, .relatedContext]
     case .starting, .running, .paused, .interrupted, .awaitingReview, .awaitingHelp, .validating:
-        return [.updates, .acceptance, .steps, .watches, .description, .relatedContext]
+        return [.updates, .capabilities, .acceptance, .steps, .watches, .description, .relatedContext]
     case .completed:
-        return [.summary, .result, .acceptance, .steps, .updates, .watches, .description, .relatedContext]
+        return [.summary, .result, .acceptance, .steps, .updates, .watches, .description, .capabilities, .relatedContext]
     case .failed:
-        return [.error, .summary, .result, .acceptance, .steps, .updates, .watches, .description, .relatedContext]
+        return [.error, .summary, .result, .acceptance, .steps, .updates, .watches, .description, .capabilities, .relatedContext]
     }
 }
 
@@ -100,6 +103,7 @@ private func presentSections(_ task: AgentTask) -> [TaskDetailSectionKind] {
     orderedSections(for: task.status).filter { kind in
         switch kind {
         case .description:    return true
+        case .capabilities:   return !task.requiredCapabilities.isEmpty
         // Always offered: it is where a watch is added.
         case .watches:        return true
         case .error:          return task.status == .failed && !(task.result ?? "").isEmpty
@@ -146,6 +150,8 @@ private func defaultMode(_ kind: TaskDetailSectionKind, for task: AgentTask) -> 
     case (.description, _):                       return .preview
 
     case (.relatedContext, _):                    return .preview
+
+    case (.capabilities, _):                      return .expanded
 
     case (.watches, _):                           return .expanded
 
@@ -637,24 +643,19 @@ private struct TaskDetailSectionView: View {
 
     var body: some View {
         switch kind {
-        case .error:
-            TaskDetailErrorSection(task: task)
-        case .summary:
-            TaskDetailSummarySection(task: task, mode: mode, onToggle: onToggle)
-        case .result:
-            TaskDetailResultSection(task: task, attachmentURLResolver: attachmentURLResolver)
-        case .acceptance:
-            TaskDetailAcceptanceSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
-        case .steps:
-            TaskDetailStepsSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
+        case .error:          TaskDetailErrorSection(task: task)
+        case .summary:        TaskDetailSummarySection(task: task, mode: mode, onToggle: onToggle)
+        case .result:         TaskDetailResultSection(task: task, attachmentURLResolver: attachmentURLResolver)
+        case .acceptance:     TaskDetailAcceptanceSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
+        case .steps:          TaskDetailStepsSection(task: task, mode: mode, viewModel: viewModel, onToggle: onToggle)
         case .updates:
             TaskDetailUpdatesSection(task: task, mode: mode, attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
         case .description:
-            TaskDetailDescriptionSection(task: task, mode: mode, viewModel: viewModel, attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
-        case .watches:
-            TaskWatchesSection(task: task, viewModel: viewModel)
-        case .relatedContext:
-            TaskDetailRelatedContextSection(task: task, viewModel: viewModel, sessionManager: sessionManager)
+            TaskDetailDescriptionSection(task: task, mode: mode, viewModel: viewModel,
+                                         attachmentURLResolver: attachmentURLResolver, onToggle: onToggle)
+        case .capabilities:   TaskDetailCapabilitiesSection(task: task)
+        case .watches:        TaskWatchesSection(task: task, viewModel: viewModel)
+        case .relatedContext: TaskDetailRelatedContextSection(task: task, viewModel: viewModel, sessionManager: sessionManager)
         }
     }
 }
@@ -1750,6 +1751,29 @@ private struct TaskDetailUpdatesSection: View {
             }
             return line
         }.joined(separator: "\n")
+    }
+}
+
+/// The task's required capabilities. Edited from the task editor (`TaskEditorSheet`); shown here so
+/// what the worker was scoped against — and what was learned and added while it ran — is visible.
+private struct TaskDetailCapabilitiesSection: View {
+    let task: AgentTask
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TaskDetailSectionTitleRow(title: "Required Capabilities", copyText: task.renderedRequiredCapabilities())
+            ForEach(task.requiredCapabilities) { capability in
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(capability.text, systemImage: "wrench.and.screwdriver")
+                        .textSelection(.enabled)
+                    if capability.origin == .addedLater {
+                        RequiredCapabilityProvenanceLabel(addedBy: capability.addedBy, addedAt: capability.addedAt, reason: capability.reason)
+                            .padding(.leading, 26)
+                    }
+                }
+            }
+        }
+        Divider()
     }
 }
 

@@ -35,11 +35,50 @@ struct SecurityEvaluatorScopingTests {
             candidateTools: [CurrentTimeTool()],
             taskTitle: "Test",
             taskID: UUID().uuidString,
-            taskDescription: "Check the time"
+            taskDescription: "Check the time",
+            requiredCapabilities: []
         )
 
         #expect(result.succeeded)
         #expect(provider.receivedToolNames == [[]])
+    }
+
+    /// The scoper is handed the required capabilities as their own field (decided 2026-10-05) and
+    /// told to pay special attention to them — without being told to look at nothing else.
+    @Test("required capabilities reach the scoping prompt as their own field, and only when present")
+    func requiredCapabilitiesField() async {
+        let prompt = SecurityAgentBehavior.toolScopingSystemPrompt
+        #expect(prompt.contains("pay special attention"))
+        #expect(prompt.contains("read the title and description as carefully as ever"))
+
+        func userMessage(capabilities: [String]) async -> String? {
+            let provider = MockLLMProvider(responses: [LLMResponse(text: json([("get_current_time", true)]))])
+            let evaluator = SecurityEvaluator(
+                provider: provider,
+                systemPrompt: "unused per-call prompt",
+                channel: MessageChannel(),
+                abort: { _, _ in },
+                hasToolSucceeded: { _ in false },
+                hasToolFailed: { _ in false }
+            )
+            _ = await evaluator.scopeTools(
+                candidateTools: [CurrentTimeTool()],
+                taskTitle: "Test",
+                taskID: UUID().uuidString,
+                taskDescription: "Check the time",
+                requiredCapabilities: capabilities
+            )
+            guard let user = provider.receivedMessages.first?.last, case .text(let text) = user.content else { return nil }
+            return text
+        }
+
+        let withList = await userMessage(capabilities: ["Read the current time", "Read the calendar [added later by Smith, 2026-10-05T12:00:00Z: worker could not]"])
+        #expect(withList?.contains("\"requiredCapabilities\"") == true)
+        #expect(withList?.contains("Read the calendar [added later by Smith") == true)
+
+        let without = await userMessage(capabilities: [])
+        #expect(without != nil)
+        #expect(without?.contains("requiredCapabilities") == false)
     }
 
     @Test("clean JSON parses to the allowed set")

@@ -42,6 +42,9 @@ public actor AgentActor {
     /// Fingerprint of the candidate set at the last scoping. A change (MCP added/removed/
     /// redefined) triggers a fresh stateless re-scope at the next turn boundary.
     private var lastScopedFingerprint: String?
+    /// Set when what the task asks of its worker changed (`requestToolRescope`): the next turn
+    /// boundary re-scopes even though the candidate set did not change.
+    private var toolRescopeRequested = false
     /// Global per-tool availability policy (user-set in Settings). Overrides the automatic scoping
     /// verdict: `.always` adds a tool, `.never` strips it absolutely. Empty = no global overrides.
     /// Resolution order: `ToolPolicy.effectiveApprovedTools`.
@@ -834,6 +837,14 @@ public actor AgentActor {
         approvedToolNames = approvedNames
     }
 
+    /// Asks for a fresh tool scoping at the next turn boundary, against the task as it reads then.
+    /// For a change to what the task needs (its required capabilities), which the candidate-set
+    /// fingerprint cannot see. Without pre-flight scoping every candidate is already offered, so
+    /// there is nothing to re-scope and the request is dropped at the boundary.
+    public func requestToolRescope() {
+        toolRescopeRequested = true
+    }
+
     /// Sets the global per-tool availability policy (user Settings). Takes effect next refresh.
     public func setGlobalToolPolicy(_ policy: [String: ToolPolicy]) {
         globalToolPolicy = policy
@@ -1413,11 +1424,14 @@ public actor AgentActor {
         let candidateNames = Set(candidates.map(\.name))
         let fingerprint = toolRegistry.candidateFingerprint
         if preflightScopingActive {
-            if let last = lastScopedFingerprint, last != fingerprint {
+            let candidatesChanged = lastScopedFingerprint.map { $0 != fingerprint } ?? false
+            if candidatesChanged || toolRescopeRequested {
+                toolRescopeRequested = false
                 await rescopeToolsStateless()
             }
         } else {
             approvedToolNames = candidateNames
+            toolRescopeRequested = false
         }
         lastScopedFingerprint = fingerprint
 
@@ -1483,9 +1497,22 @@ public actor AgentActor {
             candidateTools: toolRegistry.candidateTools,
             taskTitle: task.title,
             taskID: task.id.uuidString,
-            taskDescription: task.renderedDescriptionWithTemplateInputs()
+            taskDescription: task.renderedDescriptionWithTemplateInputs(),
+            requiredCapabilities: task.requiredCapabilities.map(\.renderedLine)
         )
-        guard result.succeeded else { return }
+        guard result.succeeded else {
+            // Last-known-good is kept, but not silently: a re-scope asked for because the task
+            // gained a required capability leaves that need unmet, and nobody else would say so.
+            if result.rawResponse != ToolScopingResult.cancelledSentinel {
+                await toolContext.post(ChannelMessage(
+                    sender: .system,
+                    content: "Re-scoping the worker's tools for task \"\(task.title)\" failed, so it keeps the tools it had. \(result.rawResponse)",
+                    metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)],
+                    taskID: task.id
+                ))
+            }
+            return
+        }
         // Only act when the *approved* set actually changed. A candidate-set change that
         // leaves Brown's usable tools identical (e.g. a new MCP tool that Security Agent blocks) must
         // not persist a redundant record or nag Brown.
@@ -2524,7 +2551,7 @@ public actor AgentActor {
                     entries.append(ParallelEntry(
                         batchIndex: batchIndex, call: call, tool: tool, siblings: siblings,
                         taskTitle: currentTask?.title, taskID: currentTask?.id.uuidString,
-                        taskDescription: currentTask?.renderedDescriptionWithTemplateInputs()
+                        taskDescription: currentTask?.renderedDescriptionForSecurityReview()
                     ))
                     await postToolRequestToChannel(call, tool: tool, task: currentTask, parallelIndex: batchIndex, parallelCount: parallelCount, siblingCallSummaries: approvalSummaries.enumerated().compactMap { $0.offset != batchIndex ? $0.element : nil })
                 }
@@ -2951,7 +2978,7 @@ public actor AgentActor {
                 toolParameterDefs: toolParameterDefs,
                 taskTitle: currentTask?.title,
                 taskID: currentTask?.id.uuidString,
-                taskDescription: currentTask?.renderedDescriptionWithTemplateInputs(),
+                taskDescription: currentTask?.renderedDescriptionForSecurityReview(),
                 siblingCalls: siblings,
                 agentRoleName: configuration.role.displayName,
                 callerRole: configuration.role,
@@ -3326,7 +3353,7 @@ public actor AgentActor {
         if let task {
             metadata["taskTitle"] = .string(task.title)
             metadata["taskID"] = .string(task.id.uuidString)
-            metadata["taskDescription"] = .string(task.renderedDescriptionWithTemplateInputs())
+            metadata["taskDescription"] = .string(task.renderedDescriptionForSecurityReview())
         }
         if parallelCount > 1 {
             metadata["parallelIndex"] = .int(parallelIndex)
@@ -3547,7 +3574,7 @@ public actor AgentActor {
     static let smithTaskActionTools: Set<String> = [
         "provide_help", "edit_task", "set_template_inputs",
         "set_acceptance_criteria", "manage_steps", "run_task", "update_task",
-        "amend_task", "manage_task_disposition", "schedule_task_action", "watch_task"
+        "amend_task", "add_required_capability", "manage_task_disposition", "schedule_task_action", "watch_task"
     ]
 
     /// The task a Smith turn should be billed to: the FIRST task its tool calls acted on, in

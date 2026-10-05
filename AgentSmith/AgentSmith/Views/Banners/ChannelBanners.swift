@@ -259,6 +259,8 @@ private struct TaskCreatedBannerFooter: View {
 struct TaskCreatedBanner: View {
     let title: String
     let description: String?
+    /// `AgentTask.renderedRequiredCapabilities()` as the task had it when the banner was posted.
+    let requiredCapabilities: String?
     let timestamp: Date
     let contextMemories: String?
     let contextPriorTasks: String?
@@ -276,7 +278,7 @@ struct TaskCreatedBanner: View {
     /// Semantic context was retrieved when the task was created.
     private var hasContext: Bool { memoryCount > 0 || priorTaskCount > 0 }
     /// Whether anything follows the title, which decides the title's bottom inset.
-    private var hasBodyBelowTitle: Bool { description != nil || hasRowsBelowDescription }
+    private var hasBodyBelowTitle: Bool { description != nil || requiredCapabilities != nil || hasRowsBelowDescription }
     /// Whether a scheduled chip or context row follows the description.
     private var hasRowsBelowDescription: Bool { hasContext || scheduledRunAt != nil }
 
@@ -286,10 +288,8 @@ struct TaskCreatedBanner: View {
             accentColor: accentColor, timestamp: timestamp
         ) {
             TaskBannerTitleLine(title: title, bottomPadding: hasBodyBelowTitle ? 2 : 6)
-            if let description {
-                TaskBannerDescriptionLine(description: description,
-                                          bottomPadding: hasRowsBelowDescription ? 2 : 6)
-            }
+            TaskCreatedBannerDefinitionLines(description: description, requiredCapabilities: requiredCapabilities,
+                                             hasRowsBelow: hasRowsBelowDescription)
             TaskCreatedBannerFooter(
                 scheduledRunAt: scheduledRunAt, hasContext: hasContext,
                 memoryCount: memoryCount, priorTaskCount: priorTaskCount,
@@ -299,6 +299,25 @@ struct TaskCreatedBanner: View {
         }
     }
 
+}
+
+/// The task's description and required capabilities under a New Task banner's title. The last
+/// line present gets the larger bottom inset when nothing follows it.
+private struct TaskCreatedBannerDefinitionLines: View {
+    let description: String?
+    let requiredCapabilities: String?
+    let hasRowsBelow: Bool
+
+    var body: some View {
+        if let description {
+            TaskBannerDescriptionLine(description: description,
+                                      bottomPadding: requiredCapabilities != nil || hasRowsBelow ? 2 : 6)
+        }
+        if let requiredCapabilities {
+            TaskBannerDescriptionLine(description: "Required capabilities:\n\(requiredCapabilities)",
+                                      bottomPadding: hasRowsBelow ? 2 : 6)
+        }
+    }
 }
 
 /// Splits a context metadata string into entries on the ASCII Record Separator (U+001E)

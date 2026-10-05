@@ -23,7 +23,7 @@ struct TaskPDFSaveSheet: View {
                 Toggle("Elapsed time", isOn: $options.elapsedTime)
                 Toggle("Tokens", isOn: $options.tokens)
                 Toggle("Cost estimate", isOn: $options.cost)
-                Toggle("Task description", isOn: $options.description)
+                Toggle("Task description and required capabilities", isOn: $options.description)
                 Toggle("Summary", isOn: $options.summary)
                 Toggle("Result", isOn: $options.result)
             }

@@ -844,6 +844,9 @@ extension OrchestrationRuntime {
             "workerActivity": await workerActivityDigest(for: task),
             "workerSteps": Self.renderSteps(task.steps)
         ]
+        if let capabilities = task.renderedRequiredCapabilities() {
+            fields["requiredCapabilities"] = capabilities
+        }
         // Optional retrieved context (Orchestration `.validatorReview`; default off = a cheap no-op).
         // Injecting these makes a verdict depend on the live memory corpus, which the validator audit
         // hash does NOT cover — hence off by default.
@@ -902,7 +905,7 @@ extension OrchestrationRuntime {
         if let evaluator = validationSecurityEvaluator {
             let gateTaskTitle = task.title
             let gateTaskID = task.id.uuidString
-            let gateTaskDescription = task.description
+            let gateTaskDescription = task.renderedDescriptionForSecurityReview()
             let gateChannel = channel
             securityGate = { (call: LLMToolCall, tool: any AgentTool) async -> Bool in
                 // Surface the validator's tool call in the transcript before it runs, so acceptance
@@ -1078,6 +1081,8 @@ extension OrchestrationRuntime {
             The user message is a single JSON object whose values are all strings:
             - `resultsToEvaluate` — the worker's submitted result. THIS is the primary thing you evaluate.
             - `taskTitle`, `taskDescription` — what the task asked for (context).
+            - `requiredCapabilities` — (when present) what the task said the worker would need to be able to do, \
+            including needs added while it ran (context; never a deliverable in itself).
             - `workerTools` — the worker's capabilities, which differ from yours (context).
             - `workerActivity` — the SYSTEM-OBSERVED tool-call log (calls + results); trust it over narrative claims. Each call/result is length-capped (an ellipsis marks a cut), and if whole entries were dropped to fit the budget, a leading `[⚠️ Activity log truncated …]` line says how many EARLIEST entries are missing — so the ABSENCE of an entry here is NOT proof the worker didn't do it.
             - `workerSteps` — the worker's plan with statuses and tombstones.

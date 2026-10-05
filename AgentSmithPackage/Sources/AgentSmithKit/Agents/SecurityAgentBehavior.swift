@@ -30,6 +30,7 @@ enum SecurityAgentBehavior {
             "taskID":          { "type": "string", "description": "Unique id of the task being scoped." },
             "taskTitle":       { "type": "string", "description": "Short title of the task." },
             "taskDescription": { "type": "string", "description": "Full description of what the worker must accomplish." },
+            "requiredCapabilities": { "type": "array", "items": { "type": "string" }, "description": "Present when the task lists them: what the worker must be able to DO for this task, stated as abilities rather than tool names. An item marked [added later by …] was added while the task was running, usually because the worker found it could not do something the task needs; its reason says what was missing." },
             "toolGroups": {
               "type": "array",
               "description": "Where the candidate tools come from.",
@@ -78,6 +79,16 @@ enum SecurityAgentBehavior {
         Honoring both the letter and the spirit of the user's intent is the highest consideration
         after the user's best interest, above.
                 
+        ## Required capabilities
+
+        When `requiredCapabilities` is present, pay special attention to it: it is the task author's
+        own statement of what the worker must be able to do, and every item on it should be covered
+        by the tools you approve unless doing so would harm the user. An item added later is a need
+        the worker actually ran into — weigh it seriously; the work stalled for want of it. It is not
+        the whole picture, though: read the title and description as carefully as ever, cover needs
+        they imply that the list leaves out, and do not approve a tool merely because a list item
+        names something it could do if the description shows the task does not need it.
+
         ## Wholistic Approach
         
         Take a wholistic approach to your evaluation, rather than strictly looking at each tool in
@@ -94,8 +105,8 @@ enum SecurityAgentBehavior {
 
         ## Step by step evaluation
         
-        1. Read through the task title and task description. Think about it to be sure you understand
-        what is being requested.
+        1. Read through the task title, task description and required capabilities (when present). Think
+        about them to be sure you understand what is being requested.
         
         2. For each step or item in the task, think about what types of actions will likely need to be
         taken, and what sorts of access might be required. Keep a running list of these as you go.

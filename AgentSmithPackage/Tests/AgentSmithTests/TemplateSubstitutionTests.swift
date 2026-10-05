@@ -483,13 +483,15 @@ struct TemplateSubstitutionTests {
             title: String = "Build {{app_name}}",
             description: String = "Build {{app_name}} for release",
             steps: [String] = ["cd {{app_name}}"],
-            criteria: [AcceptanceCriterion] = [clean]
+            criteria: [AcceptanceCriterion] = [clean],
+            capabilities: [String] = ["Build {{app_name}} with Xcode"]
         ) -> String? {
             TemplateInputValidation.firstProblem(
                 authoringTemplateWithTitle: title,
                 description: description,
                 activeStepTexts: steps,
                 criteria: criteria,
+                requiredCapabilityTexts: capabilities,
                 definedNames: defined
             )
         }
@@ -497,6 +499,7 @@ struct TemplateSubstitutionTests {
         #expect(problem(title: "Build {{app_nmae}}")?.hasPrefix("Template title:") == true)
         #expect(problem(description: "Build {{app_nmae}}")?.hasPrefix("Template description:") == true)
         #expect(problem(steps: ["cd {{app_name}}", "test {{app_nmae}}"])?.hasPrefix("Template step 2:") == true)
+        #expect(problem(capabilities: ["Edit files", "Open {{app_nmae}}"])?.hasPrefix("Template required capability 2:") == true)
 
         var badName = clean
         badName.name = "Ships {{app_nmae}}"

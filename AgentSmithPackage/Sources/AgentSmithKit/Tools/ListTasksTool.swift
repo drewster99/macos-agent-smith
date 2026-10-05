@@ -355,7 +355,8 @@ struct ListTasksTool: AgentTool {
             requiredTemplateInputCount: task.templateInputDefinitions.filter(\.required).count,
             missingRequiredTemplateInputNames: task.missingRequiredTemplateInputNames,
             hasTemplateInputValues: !task.templateInputValues.isEmpty,
-            templateInputValueNames: task.templateInputValues.keys.sorted()
+            templateInputValueNames: task.templateInputValues.keys.sorted(),
+            requiredCapabilities: task.requiredCapabilities.map(\.renderedLine)
         )
     }
 
@@ -419,6 +420,9 @@ struct ListTasksTool: AgentTool {
         let missingRequiredTemplateInputNames: [String]
         let hasTemplateInputValues: Bool
         let templateInputValueNames: [String]
+        /// Each required capability as `RequiredCapability.renderedLine` — short, and a later
+        /// addition is exactly what a reader scanning tasks needs to notice.
+        let requiredCapabilities: [String]
     }
 
     private struct AcceptanceCriterionSummary: Encodable {

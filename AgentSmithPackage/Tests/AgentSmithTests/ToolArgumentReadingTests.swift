@@ -297,7 +297,9 @@ struct ToolArgumentReadingGuardTests {
     /// that one is the real guard, and this budget is the coarse backstop behind it.
     /// Raised from 62 to 64 on 2026-09-25 for `watch_task`'s required `action` and `task_id`.
     /// Raised from 64 to 66 for `respond_to_user_acceptance`'s required `task_id` and `decision`.
-    private static let handUnwrapBudget = 66
+    /// Raised from 66 to 69 for `add_required_capability`'s required `task_id`, `capability` and
+    /// `reason`.
+    private static let handUnwrapBudget = 69
 
     /// Every `if case .string/.array(let x) = arguments["k"]` still in the tool sources.
     private static func handUnwrapSites(requiringPrefix prefix: String? = nil) throws -> [String] {

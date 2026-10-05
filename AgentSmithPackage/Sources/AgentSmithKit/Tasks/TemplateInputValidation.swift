@@ -93,7 +93,7 @@ public enum TemplateInputValidation {
     }
 
     /// The first placeholder problem anywhere in the authored text of a template — title,
-    /// description, every ACTIVE step, every criterion — checked in the field order
+    /// description, every ACTIVE step, every criterion, every required capability — checked in the field order
     /// `TaskStore.instantiateTemplate` substitutes them. One construction, so the callers that
     /// check a whole prospective template cannot drift from each other or from it.
     ///
@@ -117,6 +117,7 @@ public enum TemplateInputValidation {
         description: String,
         activeStepTexts: [String],
         criteria: [AcceptanceCriterion],
+        requiredCapabilityTexts: [String],
         definedNames: Set<String>
     ) -> String? {
         var fields: [(field: String, text: String)] = [("title", title), ("description", description)]
@@ -125,6 +126,9 @@ public enum TemplateInputValidation {
         }
         for criterion in criteria {
             fields += renderableTextFields(ofCriterion: criterion)
+        }
+        for (index, text) in requiredCapabilityTexts.enumerated() {
+            fields.append(("required capability \(index + 1)", text))
         }
         return firstProblem(in: fields, definedNames: definedNames)
     }
@@ -160,8 +164,9 @@ public enum TemplateInputValidation {
 
 /// The field LABELS shared by everything that reports a placeholder problem, so the same offending
 /// step reads the same way whether it was caught by the store, by `create_task`, or live in the
-/// task editor. Substitution covers `title`, `description`, each ACTIVE step, and each criterion's
-/// name / validation prompt / input enumerator prompt (`TaskStore.instantiateTemplate`); the two
+/// task editor. Substitution covers `title`, `description`, each ACTIVE step, each criterion's
+/// name / validation prompt / input enumerator prompt, and each required capability
+/// (`TaskStore.instantiateTemplate`); the two
 /// simple fields are labelled inline by their callers, and the two structured ones get a helper
 /// because they carry a position or a name.
 ///

@@ -145,7 +145,8 @@ struct SecurityEvaluatorTurnCaptureTests {
             candidateTools: [CurrentTimeTool()],
             taskTitle: "Scope task",
             taskID: taskID.uuidString,
-            taskDescription: "Check the time"
+            taskDescription: "Check the time",
+            requiredCapabilities: []
         )
 
         #expect(result.succeeded)

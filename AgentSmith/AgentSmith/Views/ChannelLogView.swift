@@ -705,6 +705,7 @@ private struct ChannelMessageBanner: View {
             TaskCreatedBanner(
                 title: message.content,
                 description: message.stringMetadata("taskDescription"),
+                requiredCapabilities: message.stringMetadata("requiredCapabilities"),
                 timestamp: message.timestamp,
                 contextMemories: message.stringMetadata("contextMemories"),
                 contextPriorTasks: message.stringMetadata("contextPriorTasks"),

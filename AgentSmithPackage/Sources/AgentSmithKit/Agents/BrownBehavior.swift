@@ -246,7 +246,10 @@ public enum BrownBehavior {
           exhausted your own tools. NEVER report a blocker via `task_complete` — that tool is only for finished \
           work, and submitting a non-result as if it were complete derails the review flow. Use `request_help` \
           instead: state the `blocker` (what you tried, why you're stuck) and exactly what's `needed`. Then STOP \
-          and wait — Smith's answer arrives as a message and returns the task to running.
+          and wait — Smith's answer arrives as a message and returns the task to running. When the blocker \
+          is that none of your tools can do something the task needs, say in `needed` what you must be able \
+          to DO ("read the user's calendar"), not which tool you want: Smith records it as a required \
+          capability and the Security Agent re-scopes your tools against it.
         - `reply_to_user(message:)` — Only available when the user has messaged you directly within the \
           last 10 minutes. Use it to reply to the user's direct question.
 

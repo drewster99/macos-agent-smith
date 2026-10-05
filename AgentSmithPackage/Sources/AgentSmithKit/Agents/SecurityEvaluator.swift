@@ -318,6 +318,7 @@ actor SecurityEvaluator {
                 "update_task",
                 "edit_task",
                 "amend_task",
+                "add_required_capability",
                 "get_task_details",
                 "list_tasks",
                 "set_template_inputs",
@@ -1226,7 +1227,10 @@ actor SecurityEvaluator {
         candidateTools: [any AgentTool],
         taskTitle: String,
         taskID: String,
-        taskDescription: String
+        taskDescription: String,
+        /// `RequiredCapability.renderedLine` of each of the task's required capabilities. Its own
+        /// field so the scoping prompt can single it out; empty when the task lists none.
+        requiredCapabilities: [String]
     ) async -> ToolScopingResult {
         // One scoping pass, one model — unless the pass is sleeping on its provider when a swap
         // lands, in which case it retries on the new model (the prompt does not depend on it).
@@ -1242,7 +1246,8 @@ actor SecurityEvaluator {
             candidateTools: candidateTools,
             taskTitle: taskTitle,
             taskID: taskID,
-            taskDescription: taskDescription
+            taskDescription: taskDescription,
+            requiredCapabilities: requiredCapabilities
         )
         // Optional retrieved context (Orchestration `.securityScoping`; default off = a cheap no-op).
         if let block = await retrieveContext(.securityScoping, "\(taskTitle) \(taskDescription)").formattedForInjection() {
@@ -1393,6 +1398,8 @@ actor SecurityEvaluator {
         let taskID: String
         let taskTitle: String
         let taskDescription: String
+        /// Omitted from the JSON when the task lists none (nil encodes as an absent key).
+        let requiredCapabilities: [String]?
         let toolGroups: [ToolGroup]
         let candidateTools: [CandidateTool]
 
@@ -1519,7 +1526,8 @@ actor SecurityEvaluator {
         candidateTools: [any AgentTool],
         taskTitle: String,
         taskID: String,
-        taskDescription: String
+        taskDescription: String,
+        requiredCapabilities: [String]
     ) -> String {
         var groupsByID: [String: ToolSetScopingUserPrompt.ToolGroup] = [:]
         var candidates: [ToolSetScopingUserPrompt.CandidateTool] = []
@@ -1532,6 +1540,7 @@ actor SecurityEvaluator {
             taskID: taskID,
             taskTitle: taskTitle,
             taskDescription: taskDescription,
+            requiredCapabilities: requiredCapabilities.isEmpty ? nil : requiredCapabilities,
             toolGroups: groupsByID.values.sorted { $0.toolGroupID < $1.toolGroupID },
             candidateTools: candidates
         )

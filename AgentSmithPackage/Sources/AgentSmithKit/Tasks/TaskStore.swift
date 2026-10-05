@@ -1305,7 +1305,18 @@ public actor TaskStore {
             parentTaskID: template.id,
             sessionID: sessionID,
             templateInputDefinitions: template.templateInputDefinitions,
-            templateInputValues: resolvedInputs.values
+            templateInputValues: resolvedInputs.values,
+            // Every item is part of the instance as written — it existed when the run was created —
+            // but keeps its author, date and reason, so why a template needs it is never lost.
+            requiredCapabilities: template.requiredCapabilities.map { capability in
+                RequiredCapability(
+                    text: substituted(capability.text),
+                    addedBy: capability.addedBy,
+                    addedAt: capability.addedAt,
+                    origin: .asWritten,
+                    reason: capability.reason
+                )
+            }
         )
         var withWatches = instance
         // A template's watches are blueprints: each run gets its own copy, with fresh identity and
@@ -1329,7 +1340,8 @@ public actor TaskStore {
         descriptionAttachments: [Attachment] = [],
         isTemplate: Bool = false,
         templateInputDefinitions: [TemplateInputDefinition] = [],
-        requiresUserAcceptance: Bool = false
+        requiresUserAcceptance: Bool = false,
+        requiredCapabilities: [RequiredCapability] = []
     ) async -> AgentTask {
         await autoArchiveStaleCompletedIfEnabled()
         let definitions = isTemplate ? templateInputDefinitions : []
@@ -1346,7 +1358,8 @@ public actor TaskStore {
             requiresUserAcceptance: requiresUserAcceptance,
             isTemplate: isTemplate,
             sessionID: sessionID,
-            templateInputDefinitions: definitions
+            templateInputDefinitions: definitions,
+            requiredCapabilities: requiredCapabilities
         )
         // A new template belongs in the GLOBAL library (when one is wired AND persistable); everything
         // else is per-session. The returned id is the same either way, so the caller's follow-up setters
@@ -1887,6 +1900,114 @@ public actor TaskStore {
             task.updatedAt = Date()
             return nil
         }
+    }
+
+    /// Adds one item to a task's required capabilities, after the task was created — typically the
+    /// unmet need of a running worker, which Smith records here instead of granting a tool. Marked
+    /// `.addedLater` with its author and reason, and noted in the task's update history.
+    ///
+    /// Refused on a completed task (its contract is history; a follow-up is a successor task) and,
+    /// on a template, for a `{{placeholder}}` naming no defined input. On an instance the run's
+    /// input values are substituted, as `amendDescription` does. An item already listed (compared
+    /// case- and whitespace-insensitively, after substitution) is not added twice.
+    public func addRequiredCapability(
+        id: UUID,
+        text: String,
+        addedBy author: TaskAuthorship,
+        reason: String?
+    ) async -> RequiredCapabilityAddition {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return .refused("The capability text is empty.") }
+        let trimmedReason = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = (trimmedReason?.isEmpty ?? true) ? nil : trimmedReason
+        var outcome = RequiredCapabilityAddition.refused("Task not found: \(id.uuidString)")
+        let problem = await mutateTaskOrTemplate(id: id, { task in     // see setSteps for the locking rationale
+            guard task.status != .completed else {
+                return "Task \"\(task.title)\" is completed; its definition is history. Create a successor task for follow-up work."
+            }
+            if task.isTemplate,
+               let problem = TemplateInputValidation.placeholderProblem(
+                   in: trimmedText,
+                   field: "required capability",
+                   definedNames: Set(task.templateInputDefinitions.map(\.name))
+               ) {
+                return problem
+            }
+            var capabilityText = trimmedText
+            if !task.isTemplate, !task.templateInputValues.isEmpty {
+                capabilityText = TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
+                    capabilityText,
+                    values: task.templateInputValues,
+                    definedNames: Set(task.templateInputValues.keys),
+                    layout: .preserved
+                )
+            }
+            let capability = RequiredCapability(
+                text: capabilityText,
+                addedBy: author,
+                origin: .addedLater,
+                reason: reason
+            )
+            if let existing = task.requiredCapabilities.first(where: { $0.normalizedText == capability.normalizedText }) {
+                outcome = .alreadyListed(existing)
+                return nil
+            }
+            task.requiredCapabilities.append(capability)
+            let because = reason.map { " — reason: \($0)" } ?? ""
+            task.updates.append(AgentTask.TaskUpdate(
+                message: "Required capability added by \(author.displayName): \(capability.text)\(because)"
+            ))
+            task.updatedAt = Date()
+            outcome = .added(capability)
+            return nil
+        }, afterLocalCommit: {
+            if case .added = outcome { emit(.requiredCapabilitiesChanged(taskID: id)) }
+        })
+        if let problem { return .refused(problem) }
+        return outcome
+    }
+
+    /// Replaces a task's required capabilities with an edited list — the user's task editor, which
+    /// carries every row's id, author and origin, so an edited row keeps its provenance and a row it
+    /// adds arrives already marked. `original` is the list the edit started from: an item on the
+    /// task now that it did not contain was added while the editor was open (Smith, on a running
+    /// task) and is kept, appended after the edit, rather than silently erased by a stale save.
+    /// Refused on a completed task and, on a template, for a placeholder naming no defined input
+    /// (only the capability text is checked: it is the only text written).
+    public func setRequiredCapabilities(
+        id: UUID,
+        _ edited: [RequiredCapability],
+        editedFrom original: [RequiredCapability]
+    ) async -> String? {
+        var changed = false
+        return await mutateTaskOrTemplate(id: id, { task in     // see setSteps for the locking rationale
+            let originalIDs = Set(original.map(\.id))
+            let editedIDs = Set(edited.map(\.id))
+            let addedMeanwhile = task.requiredCapabilities.filter { !originalIDs.contains($0.id) && !editedIDs.contains($0.id) }
+            let capabilities = edited + addedMeanwhile
+            guard task.status != .completed else {
+                return "Task \"\(task.title)\" is completed; its definition is history."
+            }
+            if task.isTemplate {
+                let definedNames = Set(task.templateInputDefinitions.map(\.name))
+                for (index, capability) in capabilities.enumerated() {
+                    if let problem = TemplateInputValidation.placeholderProblem(
+                        in: capability.text,
+                        field: "required capability \(index + 1)",
+                        definedNames: definedNames
+                    ) {
+                        return problem
+                    }
+                }
+            }
+            guard capabilities != task.requiredCapabilities else { return nil }
+            task.requiredCapabilities = capabilities
+            task.updatedAt = Date()
+            changed = true
+            return nil
+        }, afterLocalCommit: {
+            if changed { emit(.requiredCapabilitiesChanged(taskID: id)) }
+        })
     }
 
     /// Records a help-request escalation from Brown and parks the task in `.awaitingHelp`, its own

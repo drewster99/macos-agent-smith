@@ -1476,6 +1476,12 @@ public actor OrchestrationRuntime {
         case .effectsReady:
             await deliverReadyTaskEffects()
 
+        case .requiredCapabilitiesChanged(let taskID):
+            // The worker re-scopes at its next turn boundary, against the task as it then reads —
+            // the same stateless pass a changed candidate set triggers. A task with no live worker
+            // needs nothing: its next spawn scopes against the new list.
+            await supervisor.workerHandle(taskID: taskID)?.agent.requestToolRescope()
+
         case .lifecycle(let lifecycle):
             switch lifecycle {
             case .leftActive, .permanentlyDeleted:
@@ -1812,6 +1818,15 @@ public actor OrchestrationRuntime {
         // Prior Progress / Last Working State sections below can both be empty if it died early.
         if task.acknowledgmentCount > 0 {
             parts.append("You are RESUMING this task — a prior attempt was interrupted or sent back for revision. Continue from where you left off using the context below; do not restart from scratch.")
+        }
+        if let capabilities = task.renderedRequiredCapabilities() {
+            parts.append("""
+                ## Required capabilities
+                What this task needs you to be able to do. Your tools were chosen against this list and \
+                the description. If you find you cannot do something the task needs, use `request_help` \
+                and say what you need to be able to do — not which tool you want.
+                \(capabilities)
+                """)
         }
         if !task.descriptionAttachments.isEmpty {
             var lines: [String] = []
@@ -2833,7 +2848,7 @@ public actor OrchestrationRuntime {
                 "taskID": .string(announced.id.uuidString),
                 "taskDescription": .string(announced.renderedDescriptionWithTemplateInputs()),
                 "clonedFromTemplate": .string(taskID.uuidString)
-            ]
+            ].merging(announced.taskCreatedBannerCapabilitiesMetadata()) { current, _ in current }
         ))
         return instance.id
     }
@@ -4525,7 +4540,8 @@ public actor OrchestrationRuntime {
                     candidateTools: builtIns + mcpTools,
                     taskTitle: task.title,
                     taskID: task.id.uuidString,
-                    taskDescription: task.renderedDescriptionWithTemplateInputs()
+                    taskDescription: task.renderedDescriptionWithTemplateInputs(),
+                    requiredCapabilities: task.requiredCapabilities.map(\.renderedLine)
                 )
                 await notifyProcessingStateChange(role: .securityAgent, isProcessing: false)
                 guard scoping.succeeded else {

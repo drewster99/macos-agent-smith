@@ -41,6 +41,7 @@ struct TaskEditorSheet: View {
     @State private var inputs: [InputRow]
     @State private var criteria: [CriterionRow]
     @State private var steps: [StepRow]
+    @State private var capabilities: [CapabilityRow]
     /// Seeded like every other field here; see `TaskEditorPresentation` for why seeding is correct.
     @State private var requiresUserAcceptance: Bool
     /// Tombstoned steps carried through untouched. They are not shown here — this sheet authors
@@ -90,6 +91,43 @@ struct TaskEditorSheet: View {
     /// the rest of the step so `save()` can write it back untouched — rebuilding steps from
     /// text alone silently reset every status to `.pending`, dropped skip notes, and rewrote
     /// Brown's and Smith's authorship to `.user`.
+    /// A required capability being edited. Carries the item's provenance so an edited row keeps
+    /// its author, date, origin and reason; only the text is editable here.
+    struct CapabilityRow: Identifiable {
+        let id: UUID
+        var text: String
+        let addedBy: TaskAuthorship
+        let addedAt: Date
+        let origin: RequiredCapability.Origin
+        let reason: String?
+
+        /// A row the user adds: part of the task as written when the task is being created, a later
+        /// addition when it already exists.
+        init(origin: RequiredCapability.Origin) {
+            self.id = UUID()
+            self.text = ""
+            self.addedBy = .user
+            self.addedAt = Date()
+            self.origin = origin
+            self.reason = nil
+        }
+
+        init(capability: RequiredCapability) {
+            self.id = capability.id
+            self.text = capability.text
+            self.addedBy = capability.addedBy
+            self.addedAt = capability.addedAt
+            self.origin = capability.origin
+            self.reason = capability.reason
+        }
+
+        func built() -> RequiredCapability? {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return RequiredCapability(id: id, text: trimmed, addedBy: addedBy, addedAt: addedAt, origin: origin, reason: reason)
+        }
+    }
+
     struct StepRow: Identifiable {
         let id: UUID
         var text: String
@@ -129,6 +167,7 @@ struct TaskEditorSheet: View {
             _inputs = State(initialValue: [])
             _criteria = State(initialValue: [])
             _steps = State(initialValue: [])
+            _capabilities = State(initialValue: [])
             _requiresUserAcceptance = State(initialValue: false)
             _preservedTombstones = State(initialValue: [])
         case .edit(let task):
@@ -149,6 +188,7 @@ struct TaskEditorSheet: View {
                 )
             })
             _steps = State(initialValue: task.steps.filter(\.isActive).map(StepRow.init(step:)))
+            _capabilities = State(initialValue: task.requiredCapabilities.map(CapabilityRow.init(capability:)))
             _requiresUserAcceptance = State(initialValue: task.requiresUserAcceptance)
             _preservedTombstones = State(initialValue: task.steps.filter { !$0.isActive })
         }
@@ -160,6 +200,8 @@ struct TaskEditorSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     definitionSection()
+                    TaskEditorCapabilitiesSection(capabilities: $capabilities, isCreate: isCreate,
+                                                  isEditable: canEditCapabilities)
                     templateSection()
                     criteriaSection()
                     stepsSection()
@@ -401,6 +443,17 @@ struct TaskEditorSheet: View {
         }
     }
 
+    /// A completed task's definition is history (`TaskStore.setRequiredCapabilities` refuses it).
+    /// Every other status may change: on a running task the change re-scopes its worker's tools.
+    private var canEditCapabilities: Bool {
+        switch mode {
+        case .create:
+            return true
+        case .edit(let task):
+            return task.status != .completed
+        }
+    }
+
     private var canEditValidationContract: Bool {
         switch mode {
         case .create:
@@ -434,6 +487,7 @@ struct TaskEditorSheet: View {
             description: description,
             activeStepTexts: builtActiveSteps.map(\.text),
             criteria: builtCriteria,
+            requiredCapabilityTexts: builtCapabilities.map(\.text),
             definedNames: definedNames
         )
     }
@@ -477,8 +531,15 @@ struct TaskEditorSheet: View {
         steps.compactMap { $0.built() }
     }
 
+    /// The required capabilities this form would save, in order, empty rows dropped — shared with
+    /// the live placeholder warning so both number the same items.
+    private var builtCapabilities: [RequiredCapability] {
+        capabilities.compactMap { $0.built() }
+    }
+
     private func save() {
         let inputDefinitions = builtInputs
+        let capabilitiesToSave = builtCapabilities
         let criteriaToSave = builtCriteria
         // Tombstones go back on the end, matching the ordering convention `applyStepAction`'s
         // reorder/move use: active steps in plan order, then the removal record.
@@ -505,7 +566,8 @@ struct TaskEditorSheet: View {
                     templateInstanceTitleTemplate: instanceTitleTemplate,
                     acceptanceCriteria: criteriaToSave,
                     steps: builtSteps,
-                    requiresUserAcceptance: requiresUserAcceptance
+                    requiresUserAcceptance: requiresUserAcceptance,
+                    requiredCapabilities: capabilitiesToSave
                 )
             case .edit(let task):
                 saved = await viewModel.updateTaskDefinition(
@@ -526,6 +588,10 @@ struct TaskEditorSheet: View {
                     let stepsSaved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
                     saved = contractSaved && stepsSaved
                 }
+                if saved && canEditCapabilities && capabilitiesToSave != task.requiredCapabilities {
+                    saved = await viewModel.setTaskRequiredCapabilities(
+                        id: task.id, capabilitiesToSave, editedFrom: task.requiredCapabilities)
+                }
             }
             if saved {
                 onDone()
@@ -537,6 +603,60 @@ struct TaskEditorSheet: View {
                 localError = viewModel.taskActionError
                     ?? "The task could not be saved. Check the fields and try again."
                 viewModel.taskActionError = nil
+            }
+        }
+    }
+}
+
+/// The editor's required-capabilities list. A row added while creating is part of the task as
+/// written; one added to an existing task is a later addition.
+private struct TaskEditorCapabilitiesSection: View {
+    @Binding var capabilities: [TaskEditorSheet.CapabilityRow]
+    let isCreate: Bool
+    let isEditable: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Required Capabilities").font(.headline)
+                Spacer()
+                Button(action: {
+                    capabilities.append(TaskEditorSheet.CapabilityRow(origin: isCreate ? .asWritten : .addedLater))
+                }, label: {
+                    Label("Add Capability", systemImage: "plus.circle")
+                })
+                .buttonStyle(.plain)
+            }
+            Text("What the worker must be able to do — abilities, not tool names. The security agent pays special attention to this list when it chooses the worker's tools.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach($capabilities) { $row in
+                CapabilityEditorRow(row: $row, onRemove: { capabilities.removeAll { $0.id == row.id } })
+            }
+        }
+        .disabled(!isEditable)
+    }
+}
+
+/// One editable required capability. A later addition says who added it and why, so editing the
+/// wording never hides that the item was learned while the task ran.
+private struct CapabilityEditorRow: View {
+    @Binding var row: TaskEditorSheet.CapabilityRow
+    let onRemove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                TextField("e.g. Compile the Xcode project", text: $row.text)
+                    .textFieldStyle(.roundedBorder)
+                Button(action: onRemove, label: {
+                    Image(systemName: "minus.circle")
+                })
+                .buttonStyle(.plain)
+            }
+            if row.origin == .addedLater {
+                RequiredCapabilityProvenanceLabel(addedBy: row.addedBy, addedAt: row.addedAt, reason: row.reason)
             }
         }
     }

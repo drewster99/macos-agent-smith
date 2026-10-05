@@ -42,6 +42,32 @@ extension AgentTask {
         return "\(section)\n\n\(description)"
     }
 
+    /// The required capabilities as a bullet list, ONE rendering for every agent-facing reader
+    /// (worker briefing, `get_task_details`, tool scoping, per-call security review, validators)
+    /// and the PDF export. A later addition is marked with who added it, when, and why, so a
+    /// reader can tell the task as written from what was learned while running it. Nil when the
+    /// task lists none.
+    public func renderedRequiredCapabilities() -> String? {
+        guard !requiredCapabilities.isEmpty else { return nil }
+        return requiredCapabilities.map { "- \($0.renderedLine)" }.joined(separator: "\n")
+    }
+
+    /// The `requiredCapabilities` entry every `.taskCreated` banner carries, so the user sees what
+    /// the worker was asked to be able to do where the task first appears. Empty when none.
+    func taskCreatedBannerCapabilitiesMetadata() -> [String: AnyCodable] {
+        guard let capabilities = renderedRequiredCapabilities() else { return [:] }
+        return ["requiredCapabilities": .string(capabilities)]
+    }
+
+    /// The description as the Security Agent reviews a single tool call against it: the same
+    /// composition every other reader gets, followed by the required capabilities — what the
+    /// worker is expected to need to do, which bears directly on whether a call fits the task.
+    func renderedDescriptionForSecurityReview() -> String {
+        let description = renderedDescriptionWithTemplateInputs()
+        guard let capabilities = renderedRequiredCapabilities() else { return description }
+        return "\(description)\n\n## Required capabilities\n\(capabilities)"
+    }
+
     var hasSubmittedResult: Bool {
         !(result?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
