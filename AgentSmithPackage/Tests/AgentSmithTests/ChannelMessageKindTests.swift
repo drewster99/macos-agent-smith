@@ -75,6 +75,7 @@ struct ChannelMessageKindTests {
         (.rateLimit, "rate_limit"),
         (.statusUpdate, "status_update"),
         (.advisory, "advisory"),
+        (.modelSwitched, "model_switched"),
         (.agentOnline, "agent_online"),
         (.validationWaitNotice, "validation_wait_notice"),
         (.validationOverride, "validation_override"),

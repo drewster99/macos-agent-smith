@@ -153,6 +153,12 @@ public actor CostBoard {
         }
     }
 
+    /// Both per-key rollups, built in one fold over the store.
+    private struct UsageRollup: Sendable {
+        var byTask: [UUID: TaskUsage] = [:]
+        var byRunRole: [RunRoleKey: TaskUsage] = [:]
+    }
+
     // MARK: - Init
 
     public init(
@@ -393,40 +399,51 @@ public actor CostBoard {
     ///
     /// The pending handle is already released by the time we get here (see
     /// `runScheduledTaskUsageRecompute`), so a record landing while this pass is in flight
-    /// — after the fetch below has taken its snapshot — schedules the next pass instead of
+    /// — after the fold below has run — schedules the next pass instead of
     /// being absorbed into this one and lost.
     func recomputeTaskUsage() async {
-        let records = await usageStore.allRecords()
-        var totals: [UUID: TaskUsage] = [:]
-        var runRoleTotals: [RunRoleKey: TaskUsage] = [:]
-        for record in records {
-            let cost = costOf(record)
+        let pricingLookup = self.pricingLookup
+        // Folded inside the store rather than over an exported copy of its records: an export shares
+        // the store's buffer, so an append landing while this pass iterates would copy the entire
+        // usage history (~150 MB at 65k records).
+        let rollup = await usageStore.reduceRecords(into: UsageRollup()) { rollup, record in
+            let cost = Self.cost(of: record, pricingLookup: pricingLookup)
             if let taskID = record.taskID {
-                totals[taskID, default: TaskUsage()].add(record, cost: cost)
+                rollup.byTask[taskID, default: TaskUsage()].add(record, cost: cost)
             }
             if let sessionID = record.sessionID {
-                runRoleTotals[RunRoleKey(sessionID: sessionID, role: record.agentRole), default: TaskUsage()]
+                rollup.byRunRole[RunRoleKey(sessionID: sessionID, role: record.agentRole), default: TaskUsage()]
                     .add(record, cost: cost)
             }
         }
         // Republish only on an actual change, since every publish invalidates every view
         // observing the map.
-        if totals != taskUsage {
-            taskUsage = totals
-            await onTaskUsageUpdate?(totals)
+        if rollup.byTask != taskUsage {
+            taskUsage = rollup.byTask
+            await onTaskUsageUpdate?(rollup.byTask)
         }
-        if runRoleTotals != runRoleUsage {
-            runRoleUsage = runRoleTotals
-            await onRunRoleUsageUpdate?(runRoleTotals)
+        if rollup.byRunRole != runRoleUsage {
+            runRoleUsage = rollup.byRunRole
+            await onRunRoleUsageUpdate?(rollup.byRunRole)
         }
     }
 
     // MARK: - Cost math
 
+    /// Cost of one record, priced by this board's lookup. Synchronous, which `recordInserted`'s
+    /// non-suspending critical section relies on.
+    private func costOf(_ record: UsageRecord) -> Double {
+        Self.cost(of: record, pricingLookup: pricingLookup)
+    }
+
     /// Same per-record cost formula `UsageAggregator.summarize` uses, distilled
     /// to a single Double. Cache-aware: cached input is subtracted from the
-    /// billable input bucket before applying the uncached rate.
-    private func costOf(_ record: UsageRecord) -> Double {
+    /// billable input bucket before applying the uncached rate. Static so a fold running on
+    /// `UsageStore`'s executor can apply it without reaching back into this actor.
+    private static func cost(
+        of record: UsageRecord,
+        pricingLookup: @Sendable (String?, String) -> ModelPricing?
+    ) -> Double {
         guard let pricing = pricingLookup(record.providerID, record.modelID) else { return 0 }
         let rates = pricing.effectiveRates(totalInputTokens: record.inputTokens)
         let uncachedInput = max(0, record.inputTokens - record.cacheReadTokens - record.cacheWriteTokens)
@@ -437,15 +454,16 @@ public actor CostBoard {
         return i + o + cr + cw
     }
 
-    /// Aggregates cost across all records inside `interval`. Used at bootstrap
-    /// and on boundary rollover only — never on per-render reads.
+    /// Aggregates cost across all records inside `interval` (inclusive at both ends, like
+    /// `DateInterval.contains`, which `recordInserted` classifies with). Used at bootstrap and on
+    /// boundary rollover only — never on per-render reads. Folded in the store for the same reason
+    /// as `recomputeTaskUsage`: the year windows would otherwise copy nearly the whole history.
     private func sumCost(in interval: DateInterval) async -> Double {
-        let records = await usageStore.records(from: interval.start, to: interval.end)
-        var total: Double = 0
-        for r in records {
-            total += costOf(r)
+        let pricingLookup = self.pricingLookup
+        return await usageStore.reduceRecords(into: 0.0) { total, record in
+            guard record.timestamp >= interval.start, record.timestamp <= interval.end else { return }
+            total += Self.cost(of: record, pricingLookup: pricingLookup)
         }
-        return total
     }
 
     // MARK: - Calendar boundary helpers

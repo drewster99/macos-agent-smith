@@ -156,6 +156,11 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// the ABORT banner, app-side lines posted with no runtime. Prefer a real kind when a
     /// message belongs to a family readers might key on.
     case advisory = "advisory"
+    /// A live agent's model was switched (`AgentActor.applyPendingModelChange`). Transcript-only:
+    /// every agent drops it at ingest, because a Settings edit asks nothing of any agent — posted as
+    /// a public `agentLifecycle` line it woke Smith and every live worker for an LLM turn each. The
+    /// switched agent is told through its own context instead.
+    case modelSwitched = "model_switched"
 
     // MARK: Retired
     //

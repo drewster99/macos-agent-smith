@@ -243,6 +243,28 @@ struct UsageLogJSONLTests {
         print("real usage log: \(original.count) records; migrate+load \(migrateSeconds)s; reload \(reloadSeconds)s")
     }
 
+    @Test("reduceRecords visits every record once, in store order, after backfills")
+    func reduceRecordsVisitsStoreOrder() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = UUID()
+        let task = UUID()
+        let store = UsageStore(persistence: PersistenceManager(testingRoot: root))
+        for input in 1...5 { await store.append(record(sessionID: session, input: input)) }
+        await store.backfillTaskID(task, forSession: session)
+        await store.append(record(input: 6))
+        // Flushed before the deferred cleanup, so a late append can't recreate the temp root.
+        await store.flush()
+
+        let visited = await store.reduceRecords(into: [UsageRecord]()) { visited, record in
+            visited.append(record)
+        }
+        #expect(visited == (await store.allRecords()))
+        #expect(visited.map(\.inputTokens) == Array(1...6))
+        #expect(visited.prefix(5).allSatisfy { $0.taskID == task })
+        #expect(visited.last?.taskID == nil)
+    }
+
     @Test("writer lines land in call order across many synchronous enqueues")
     func writerOrder() async throws {
         let sink = OrderSink()

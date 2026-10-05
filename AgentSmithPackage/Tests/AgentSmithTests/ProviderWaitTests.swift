@@ -140,71 +140,188 @@ struct ProviderWaitTests {
 
     // MARK: - History portability
 
-    @Test("a switch across API families drops continuation and remaps tool-call ids consistently")
-    func historyAcrossFamilies() {
-        let continuation = ProviderContinuation(
-            anthropicThinkingBlocks: [AnthropicThinkingBlock(thinking: "t", signature: "s")],
-            codexReasoningItems: nil
-        )
-        var assistant = LLMMessage.assistant(from: LLMResponse(
-            text: "checking",
-            toolCalls: [LLMToolCall(id: "call_I6qZkxz57E4TroyICp9Zd1y9", name: "bash", arguments: "{}")]
+    private static let everyInput = ModelSwitchHistory.Destination(supportsVision: true, supportsDocuments: true)
+
+    private static func toolCallTurn(_ ids: [String], text: String? = nil) -> LLMMessage {
+        .assistant(from: LLMResponse(
+            text: text,
+            toolCalls: ids.map { LLMToolCall(id: $0, name: "bash", arguments: "{}") }
         ))
-        assistant.continuation = continuation
+    }
+
+    /// The tool-call ids of an assistant turn, or nil when the message is not one.
+    private static func callIDs(of message: LLMMessage) -> [String]? {
+        switch message.content {
+        case .toolCalls(let calls), .mixed(_, let calls): return calls.map(\.id)
+        case .text, .toolResult: return nil
+        }
+    }
+
+    private static func resultID(of message: LLMMessage) -> String? {
+        guard case .toolResult(let toolCallID, _) = message.content else { return nil }
+        return toolCallID
+    }
+
+    private static func isCanonicalToolCallID(_ id: String) -> Bool {
+        id.count == 9 && id.first == "c" && id.dropFirst().allSatisfy(\.isASCII) && id.dropFirst().allSatisfy(\.isNumber)
+    }
+
+    @Test("a switch drops all continuation and pairs each result with its call")
+    func historyDropsContinuation() {
+        var assistant = Self.toolCallTurn(["call_I6qZkxz57E4TroyICp9Zd1y9"], text: "checking")
+        assistant.continuation = ProviderContinuation(
+            anthropicThinkingBlocks: [AnthropicThinkingBlock(thinking: "t", signature: "s")],
+            codexReasoningItems: [CodexReasoningItem(id: "r", encryptedContent: "e", summary: [])]
+        )
         let history: [LLMMessage] = [
             .system("s"),
             .user("u"),
             assistant,
             .toolResult("done", callID: "call_I6qZkxz57E4TroyICp9Zd1y9")
         ]
-        let adapted = ModelSwitchHistory.adapt(history, for: .init(
-            previousAPIType: .codexChatGPT, apiType: .anthropic, supportsVision: true, supportsDocuments: true))
+        let adapted = ModelSwitchHistory.adapt(history, for: Self.everyInput)
 
         #expect(adapted.allSatisfy { $0.continuation == nil })
-        guard case .mixed(_, let calls) = adapted[2].content,
-              case .toolResult(let resultID, _) = adapted[3].content else {
-            Issue.record("unexpected content shapes: \(adapted.map(\.content))")
-            return
-        }
-        #expect(calls.first?.id == resultID, "a call and its result no longer pair")
-        #expect(resultID == "c00000001")
-        #expect(resultID.count == 9 && resultID.allSatisfy { $0.isLetter || $0.isNumber })
+        #expect(adapted[2].content.textValue == "checking")
+        #expect(Self.callIDs(of: adapted[2]) == ["c00000001"])
+        #expect(Self.resultID(of: adapted[3]) == "c00000001")
     }
 
-    @Test("a switch within one API family keeps Anthropic thinking and the ids")
-    func historyWithinFamily() {
-        var assistant = LLMMessage.assistant(from: LLMResponse(
-            text: nil,
-            toolCalls: [LLMToolCall(id: "toolu_01", name: "bash", arguments: "{}")]
-        ))
+    /// Thinking blocks are not kept even between two Anthropic models: the id rewrite edits the
+    /// messages before them, which Anthropic's preserved-thinking prefix check rejects, whereas a
+    /// history with no thinking blocks is always accepted.
+    @Test("Anthropic thinking is dropped even between two Anthropic models; reasoning text is kept")
+    func historyDropsAnthropicThinking() {
+        var assistant = Self.toolCallTurn(["toolu_01"])
         assistant.continuation = ProviderContinuation(
-            anthropicThinkingBlocks: [AnthropicThinkingBlock(thinking: "t", signature: "s")],
-            codexReasoningItems: [CodexReasoningItem(id: "r", encryptedContent: "e", summary: [])]
+            anthropicThinkingBlocks: [AnthropicThinkingBlock(thinking: "t", signature: "s")]
         )
-        let adapted = ModelSwitchHistory.adapt([assistant], for: .init(
-            previousAPIType: .anthropic, apiType: .anthropic, supportsVision: true, supportsDocuments: true))
-        #expect(adapted[0].continuation?.anthropicThinkingBlocks?.count == 1)
-        #expect(adapted[0].continuation?.codexReasoningItems == nil)
-        guard case .toolCalls(let calls) = adapted[0].content else {
-            Issue.record("unexpected content shape")
-            return
-        }
-        #expect(calls.first?.id == "toolu_01")
+        assistant.reasoning = "visible reasoning"
+        let adapted = ModelSwitchHistory.adapt(
+            [assistant, .toolResult("ok", callID: "toolu_01")],
+            for: Self.everyInput
+        )
+        #expect(adapted[0].continuation == nil)
+        #expect(adapted[0].reasoning == "visible reasoning")
+        #expect(Self.callIDs(of: adapted[0]) == ["c00000001"])
+        #expect(Self.resultID(of: adapted[1]) == "c00000001")
+    }
+
+    /// Servers that number calls per response reuse `call_0` every turn. One canonical id per
+    /// distinct old id would give every turn's call the same id — Anthropic rejects duplicate
+    /// `tool_use` ids with a permanent 400.
+    @Test("an id reused across turns becomes a distinct id per call, each result paired with its own call")
+    func historyReusedIDsAcrossTurns() {
+        let history: [LLMMessage] = [
+            .user("u"),
+            Self.toolCallTurn(["call_0"]),
+            .toolResult("first", callID: "call_0"),
+            Self.toolCallTurn(["call_0"], text: "again"),
+            .toolResult("second", callID: "call_0"),
+            .assistant(from: LLMResponse(text: "done"))
+        ]
+        let adapted = ModelSwitchHistory.adapt(history, for: Self.everyInput)
+
+        #expect(Self.callIDs(of: adapted[1]) == ["c00000001"])
+        #expect(Self.resultID(of: adapted[2]) == "c00000001")
+        #expect(Self.callIDs(of: adapted[3]) == ["c00000002"])
+        #expect(Self.resultID(of: adapted[4]) == "c00000002")
+        #expect(adapted[5].content == .text("done"))
+    }
+
+    @Test("parallel results answered out of order and duplicate ids within one turn pair by position")
+    func historyParallelAndDuplicateIDs() {
+        let history: [LLMMessage] = [
+            Self.toolCallTurn(["a", "b"]),
+            .toolResult("for b", callID: "b"),
+            .toolResult("for a", callID: "a"),
+            Self.toolCallTurn(["x", "x"]),
+            .toolResult("first x", callID: "x"),
+            .toolResult("second x", callID: "x")
+        ]
+        let adapted = ModelSwitchHistory.adapt(history, for: Self.everyInput)
+
+        #expect(Self.callIDs(of: adapted[0]) == ["c00000001", "c00000002"])
+        #expect(Self.resultID(of: adapted[1]) == "c00000002")
+        #expect(Self.resultID(of: adapted[2]) == "c00000001")
+        #expect(Self.callIDs(of: adapted[3]) == ["c00000003", "c00000004"])
+        #expect(Self.resultID(of: adapted[4]) == "c00000003")
+        #expect(Self.resultID(of: adapted[5]) == "c00000004")
+    }
+
+    @Test("a result with no unanswered call keeps a unique id of its own")
+    func historyOrphanResults() {
+        let history: [LLMMessage] = [
+            .toolResult("orphan", callID: "gone"),
+            Self.toolCallTurn(["a"]),
+            .toolResult("answer", callID: "a"),
+            .toolResult("second answer to the same call", callID: "a"),
+            Self.toolCallTurn(["b"]),
+            .toolResult("answers an earlier turn", callID: "a"),
+            .toolResult("answer", callID: "b")
+        ]
+        let adapted = ModelSwitchHistory.adapt(history, for: Self.everyInput)
+
+        #expect(Self.resultID(of: adapted[0]) == "c00000001")
+        #expect(Self.callIDs(of: adapted[1]) == ["c00000002"])
+        #expect(Self.resultID(of: adapted[2]) == "c00000002")
+        #expect(Self.resultID(of: adapted[3]) == "c00000003")
+        #expect(Self.callIDs(of: adapted[4]) == ["c00000004"])
+        #expect(Self.resultID(of: adapted[5]) == "c00000005")
+        #expect(Self.resultID(of: adapted[6]) == "c00000004")
+    }
+
+    @Test("a result after an intervening assistant text message still pairs with its call")
+    func historyResultAfterAssistantText() {
+        let history: [LLMMessage] = [
+            Self.toolCallTurn(["a"]),
+            .assistant(from: LLMResponse(text: "narration")),
+            .toolResult("late", callID: "a")
+        ]
+        let adapted = ModelSwitchHistory.adapt(history, for: Self.everyInput)
+        #expect(Self.callIDs(of: adapted[0]) == ["c00000001"])
+        #expect(Self.resultID(of: adapted[2]) == "c00000001")
+    }
+
+    @Test("adapting is deterministic and a second switch reissues the same ids")
+    func historySecondSwitchIsStable() {
+        let history: [LLMMessage] = [
+            .toolResult("orphan", callID: "gone"),
+            Self.toolCallTurn(["call_0", "call_0"]),
+            .toolResult("1", callID: "call_0"),
+            .toolResult("2", callID: "call_0"),
+            Self.toolCallTurn(["call_0"], text: "t"),
+            .toolResult("3", callID: "call_0")
+        ]
+        let once = ModelSwitchHistory.adapt(history, for: Self.everyInput)
+        #expect(ModelSwitchHistory.adapt(history, for: Self.everyInput) == once)
+        #expect(ModelSwitchHistory.adapt(once, for: Self.everyInput) == once)
+
+        let allIDs = once.flatMap { Self.callIDs(of: $0) ?? [] } + once.compactMap { Self.resultID(of: $0) }
+        #expect(allIDs.allSatisfy(Self.isCanonicalToolCallID))
+        let callIDs = once.flatMap { Self.callIDs(of: $0) ?? [] }
+        #expect(Set(callIDs).count == callIDs.count, "tool-call ids must be unique")
+        let resultIDs = once.compactMap { Self.resultID(of: $0) }
+        #expect(Set(resultIDs).count == resultIDs.count, "tool-result ids must be unique")
     }
 
     @Test("media the new model cannot take is removed, with a note left in its place")
     func mediaRemoval() {
         let image = LLMImageContent(data: Data([1, 2, 3]), mimeType: "image/png")
-        let history: [LLMMessage] = [.user("look at this", images: [image], documents: [])]
-        let adapted = ModelSwitchHistory.adapt(history, for: .init(
-            previousAPIType: .anthropic, apiType: .openAICompatible, supportsVision: false, supportsDocuments: false))
+        let document = LLMDocumentContent(data: Data([4, 5]), mimeType: "application/pdf", filename: "spec.pdf")
+        let history: [LLMMessage] = [.user("look at this", images: [image], documents: [document])]
+
+        let adapted = ModelSwitchHistory.adapt(history, for: .init(supportsVision: false, supportsDocuments: false))
         #expect(adapted[0].images == nil)
+        #expect(adapted[0].documents == nil)
         #expect(adapted[0].content.textValue?.contains("1 image(s) removed") == true)
+        #expect(adapted[0].content.textValue?.contains("1 document(s) removed") == true)
         #expect(adapted[0].content.textValue?.hasPrefix("look at this") == true)
 
-        let kept = ModelSwitchHistory.adapt(history, for: .init(
-            previousAPIType: .anthropic, apiType: .openAICompatible, supportsVision: true, supportsDocuments: false))
+        let kept = ModelSwitchHistory.adapt(history, for: .init(supportsVision: true, supportsDocuments: false))
         #expect(kept[0].images?.count == 1)
+        #expect(kept[0].documents == nil)
+        #expect(kept[0].content.textValue?.contains("image(s) removed") == false)
     }
 
     // MARK: - Holders

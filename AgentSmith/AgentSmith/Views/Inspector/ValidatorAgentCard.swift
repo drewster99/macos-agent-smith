@@ -67,6 +67,8 @@ struct ValidatorAgentCard: View {
 
     private func header() -> some View {
         let hasModel = assignedConfig != nil
+        // Criterion judgments sleeping on the validator's provider, soonest resumption first.
+        let providerWaits = viewModel.inspectorLive.providerWaitsByRole[.validator] ?? []
         return HStack(spacing: 8) {
             HStack(spacing: 8) {
                 Circle()
@@ -79,9 +81,13 @@ struct ValidatorAgentCard: View {
 
                 Spacer()
 
-                Text(hasModel ? "Per-criterion" : "No model")
-                    .font(AppFonts.inspectorLabel)
-                    .foregroundStyle(.tertiary)
+                if let wait = providerWaits.first {
+                    ProviderWaitStatusLabel(wait: wait, waitingCount: providerWaits.count, font: AppFonts.inspectorLabel)
+                } else {
+                    Text(hasModel ? "Per-criterion" : "No model")
+                        .font(AppFonts.inspectorLabel)
+                        .foregroundStyle(.tertiary)
+                }
             }
 
             Button(action: openInspector, label: {

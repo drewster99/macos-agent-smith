@@ -6,6 +6,7 @@ import os
 private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
 private let retrievalLogger = Logger(subsystem: "com.agentsmith", category: "Retrieval")
 private let providerWaitLogger = Logger(subsystem: "com.agentsmith", category: "ProviderWait")
+private let providerConfigurationLogger = Logger(subsystem: "com.agentsmith", category: "Providers")
 
 /// Cached date formatters for status/digest lines. `DateFormatter` is expensive to
 /// construct, so we build these once instead of per status fire. Safe to share: each is
@@ -2274,15 +2275,38 @@ public actor OrchestrationRuntime {
     ///   once the new model has reached its holder, so a caller waiting out a provider's limit
     ///   retries on the new model at once instead of finishing a wait that no longer applies.
     ///
+    /// - A provider is accepted only together with the API type it was built for. A provider that
+    ///   arrives without one is a caller bug: that role is refused (it keeps its previous provider,
+    ///   configuration and type, as on a failed build) and the refusal is posted as an error.
+    ///
     /// An in-flight call always keeps the provider it started with. Providers are `Sendable` value
     /// types, so a call already suspended holds its own copy and a swap cannot reach it.
     public func setProviders(
-        providers: [AgentRole: any LLMProvider],
+        providers suppliedProviders: [AgentRole: any LLMProvider],
         configurations: [AgentRole: ModelConfiguration],
         apiTypes: [AgentRole: ProviderAPIType],
         supportsVisionByRole: [AgentRole: Bool] = [:],
         supportsDocumentsByRole: [AgentRole: Bool] = [:]
     ) async {
+        // A provider is accepted only with the API type it was built for. The caller derives both
+        // from the same `ModelProvider`, so one without the other is a bug — and guessing the type
+        // (the old provider's, or a default) would mislabel every call's provenance and tell
+        // `ModelSwitchHistory` the API family is unchanged when it may not be. Refused roles keep
+        // their previous coherent provider/config/type, exactly like a failed build.
+        var builds: [AgentRole: (provider: any LLMProvider, apiType: ProviderAPIType)] = [:]
+        var rolesRefusedForMissingAPIType: [AgentRole] = []
+        for (role, provider) in suppliedProviders {
+            guard let apiType = apiTypes[role] else {
+                rolesRefusedForMissingAPIType.append(role)
+                continue
+            }
+            builds[role] = (provider: provider, apiType: apiType)
+        }
+        if !rolesRefusedForMissingAPIType.isEmpty {
+            let names = rolesRefusedForMissingAPIType.map(\.rawValue).sorted().joined(separator: ", ")
+            providerConfigurationLogger.fault("setProviders refused a provider without its API type for: \(names, privacy: .public)")
+        }
+        let providers = builds.mapValues { $0.provider }
         // Decide what changed before the merge overwrites the configs being compared against.
         // The non-agent holders (Security Agent evaluators, the task summarizer) are switched only
         // if the resolved configuration actually changed, for the same cache-locality reason as the
@@ -2314,11 +2338,11 @@ public actor OrchestrationRuntime {
         for (role, newConfig) in configurations {
             guard let currentConfig = llmConfigs[role],
                   currentConfig != newConfig,
-                  let newProvider = providers[role] else { continue }
+                  let newBuild = builds[role] else { continue }
             modelChanges[role] = AgentActor.ModelChange(
-                provider: newProvider,
+                provider: newBuild.provider,
                 llmConfig: newConfig,
-                providerAPIType: apiTypes[role] ?? providerAPITypes[role] ?? .openAICompatible,
+                providerAPIType: newBuild.apiType,
                 supportsVision: supportsVisionByRole[role],
                 supportsDocuments: supportsDocumentsByRole[role]
             )
@@ -2370,6 +2394,16 @@ public actor OrchestrationRuntime {
             if woken > 0 {
                 providerWaitLogger.notice("Woke \(woken, privacy: .public) provider wait(s) for \(role.rawValue, privacy: .public) after its model changed")
             }
+        }
+        // Posted last so this suspension cannot reorder the merge and pushes above against an
+        // overlapping call.
+        if !rolesRefusedForMissingAPIType.isEmpty {
+            let names = rolesRefusedForMissingAPIType.map(\.displayName).sorted().joined(separator: ", ")
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "Not switched to the newly assigned model: \(names). The rebuilt provider arrived without its API type (an internal error), so it was refused rather than paired with a guessed one; each role keeps the model it had before.",
+                metadata: ["messageKind": .kind(.advisory), "severity": .severity(.error)]
+            ))
         }
     }
 

@@ -818,7 +818,7 @@ struct TaskValidationCoordinatorTests {
         await runtime.setProviders(
             providers: [.validator: MockLLMProvider(responses: [LLMResponse(text: "ACCEPT")])],
             configurations: [.validator: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")],
-            apiTypes: [:]
+            apiTypes: [.validator: .openAICompatible]
         )
         let released = await waitForStatusChange(on: runtime, taskID: task.id, away: .awaitingReview)
         #expect(released == .completed, "the parked task resumes validating on its own once configured")

@@ -576,11 +576,15 @@ public actor AgentActor {
     /// cap still resolves correctly, because the call site clamps with `min(configured, learned)`.
     /// On a switch it is cleared — it described the old model — and so is the failure streak: the
     /// new model's retry budget starts fresh.
-    private func applyPendingModelChange() {
+    ///
+    /// A switch's announcement is AWAITED, as the last statement: an unstructured post had no
+    /// ordering against this agent's next-turn posts, so the new model's output could land above the
+    /// line saying the model changed. Every mutation is committed before that one suspension, so a
+    /// reentrant call (another `scheduleModelChange`, `/clear`, an injection) sees it fully applied.
+    private func applyPendingModelChange() async {
         guard let change = pendingModelChange else { return }
         pendingModelChange = nil
         let previousConfig = configuration.llmConfig
-        let previousAPIType = configuration.providerAPIType
         let switchesModel = change.llmConfig.providerID != previousConfig.providerID
             || change.llmConfig.modelID != previousConfig.modelID
         provider = change.provider
@@ -600,25 +604,46 @@ public actor AgentActor {
             return
         }
         conversationHistory = ModelSwitchHistory.adapt(conversationHistory, for: .init(
-            previousAPIType: previousAPIType,
-            apiType: change.providerAPIType,
             supportsVision: configuration.supportsVision,
             supportsDocuments: configuration.supportsDocuments
         ))
+        appendModelSwitchNote(from: previousConfig.model, to: change.llmConfig.model)
         learnedMaxOutputCeiling = nil
         consecutiveErrors = 0
         retryWindowStartedAt = nil
         consecutiveContextOverflows = 0
         consecutiveServerMemoryExhaustions = 0
         Self.agentLogger.notice("Agent \(roleName, privacy: .public): switched model from \(previousConfig.providerID, privacy: .public)/\(previousConfig.modelID, privacy: .public) to \(change.llmConfig.providerID, privacy: .public)/\(change.llmConfig.modelID, privacy: .public)")
-        let announcement = ChannelMessage(
+        onContextChanged?(conversationHistory)
+        // Transcript-only (`.modelSwitched` is dropped at ingest by every agent): a Settings edit
+        // asks nothing of any agent, and as a public `agentLifecycle` line it woke them all.
+        await toolContext.post(ChannelMessage(
             sender: .system,
             content: "Agent \(configuration.role.displayName) switched from \(previousConfig.model) to \(change.llmConfig.model) and continues its conversation on the new model.",
-            metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.info), "agentRole": .string(roleName)]
-        )
-        let context = toolContext
-        Task { await context.post(announcement) }
-        onContextChanged?(conversationHistory)
+            metadata: ["messageKind": .kind(.modelSwitched), "severity": .severity(.info), "agentRole": .string(roleName)]
+        ))
+    }
+
+    /// Tells the agent, in its own context, that a different model now continues the conversation,
+    /// so the new model doesn't read the old one's turns as its own. Written straight into the
+    /// history rather than queued through `pendingInjectedMessages`: this runs on the run loop at its
+    /// turn boundary, so it IS the history's single writer, and that queue's drain sets
+    /// `hasUnprocessedInput` — buying an idle agent, or a worker parked for review, an LLM turn for a
+    /// note that asks nothing of it. Folded into a trailing user text turn (a retrying agent's
+    /// history ends in one) to keep turns alternating, as `drainPendingMessages` does.
+    private func appendModelSwitchNote(from previousModel: String, to newModel: String) {
+        guard !lastTurnAwaitsToolResults else {
+            Self.agentLogger.warning("Agent \(self.configuration.role.rawValue, privacy: .public): model-switch note not written — history ends in an unanswered tool call")
+            return
+        }
+        let note = "[System] This conversation is now continued by \(newModel). Earlier assistant turns were written by \(previousModel)."
+        if let lastIndex = conversationHistory.indices.last,
+           conversationHistory[lastIndex].role == .user,
+           case .text(let existingText) = conversationHistory[lastIndex].content {
+            conversationHistory[lastIndex].content = .text(existingText + "\n\n" + note)
+        } else {
+            conversationHistory.append(.user(note))
+        }
     }
 
     /// Injects the board every retry sleep of this agent is published on and woken through.
@@ -1240,7 +1265,7 @@ public actor AgentActor {
         // Drop UI-only notification messages that no agent needs to process.
         if let kind = message.kind {
             switch kind {
-            case .taskCreated, .memorySaved, .memorySearched:
+            case .taskCreated, .memorySaved, .memorySearched, .modelSwitched:
                 return false
             default:
                 break
@@ -1491,7 +1516,7 @@ public actor AgentActor {
             // A Settings edit that retuned or switched this agent's model lands here, at the
             // boundary where the previous turn is complete — so no turn ever spans two
             // configurations, and the prune below already budgets against the new context window.
-            applyPendingModelChange()
+            await applyPendingModelChange()
 
             // Re-inject deferred messages (e.g. task_complete held back from a previous batch)
             // so they get their own focused LLM turn.

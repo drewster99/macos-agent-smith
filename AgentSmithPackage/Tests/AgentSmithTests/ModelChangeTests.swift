@@ -37,13 +37,14 @@ struct ModelChangeTests {
 
     private static func makeAgent(
         provider: any LLMProvider,
-        llmConfig: ModelConfiguration
+        llmConfig: ModelConfiguration,
+        channel: MessageChannel = MessageChannel()
     ) -> AgentActor {
         let agentID = UUID()
         let context = ToolContext(
             agentID: agentID,
             agentRole: .brown,
-            channel: MessageChannel(),
+            channel: channel,
             taskStore: TaskStore(),
             currentConfiguration: llmConfig,
             currentProviderType: ProviderAPIType.openAICompatible.rawValue,
@@ -203,6 +204,78 @@ struct ModelChangeTests {
         #expect(sent.contains { $0.content.textValue?.contains("say ok") == true }, "the conversation did not survive the switch")
     }
 
+    @Test("A model switch is announced to the transcript without waking any agent")
+    func modelSwitchAnnouncementWakesNoAgent() async throws {
+        let channel = MessageChannel()
+        let before = MockLLMProvider(responses: [LLMResponse(text: "ok")])
+        let after = MockLLMProvider(responses: [LLMResponse(text: "ok")])
+        let agent = Self.makeAgent(provider: before, llmConfig: Self.config(temperature: 0.2), channel: channel)
+        // Subscribed the way the runtime subscribes Smith and every worker, so the agent would
+        // receive its own announcement if agents ingested it.
+        let subscriptionID = await channel.subscribe { [weak agent] message in
+            guard let agent else { return }
+            Task { await agent.receiveChannelMessage(message) }
+        }
+        await agent.scheduleModelChange(AgentActor.ModelChange(
+            provider: after,
+            llmConfig: Self.config(temperature: 0.2, modelID: "a-different-model"),
+            providerAPIType: .openAICompatible,
+            supportsVision: nil,
+            supportsDocuments: nil
+        ))
+        await agent.start()
+        let deadline = Date().addingTimeInterval(3.0)
+        while await channel.allMessages().contains(where: { $0.kind == .modelSwitched }) == false, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(await channel.allMessages().filter { $0.kind == .modelSwitched }.count == 1, "the switch was not announced exactly once")
+        // Several poll intervals: long enough for a delivered announcement to have woken the agent.
+        try await Task.sleep(for: .milliseconds(600))
+        await agent.stop()
+        await channel.unsubscribe(subscriptionID)
+        #expect(after.callCount == 0, "the announcement woke the agent for an LLM turn")
+        let history = await agent.contextSnapshot()
+        #expect(history.contains { $0.content.textValue?.contains("a-different-model") == true }, "the agent was not told its model changed")
+    }
+
+    /// Snapshots the channel at its first call: what had been posted before the new model ran.
+    private final class ChannelSnapshotProvider: LLMProvider, @unchecked Sendable {
+        private let channel: MessageChannel
+        private let lock = NSLock()
+        private var _messagesAtFirstCall: [ChannelMessage]?
+        init(channel: MessageChannel) { self.channel = channel }
+        var messagesAtFirstCall: [ChannelMessage]? { lock.withLock { _messagesAtFirstCall } }
+        func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
+            let posted = await channel.allMessages()
+            lock.withLock { if _messagesAtFirstCall == nil { _messagesAtFirstCall = posted } }
+            return LLMResponse(text: "ok")
+        }
+    }
+
+    @Test("A model switch is in the transcript before the new model's first call")
+    func modelSwitchAnnouncementPrecedesTheNewModel() async throws {
+        let channel = MessageChannel()
+        let before = MockLLMProvider(responses: [LLMResponse(text: "ok")])
+        let after = ChannelSnapshotProvider(channel: channel)
+        let agent = Self.makeAgent(provider: before, llmConfig: Self.config(temperature: 0.2), channel: channel)
+        await agent.scheduleModelChange(AgentActor.ModelChange(
+            provider: after,
+            llmConfig: Self.config(temperature: 0.2, modelID: "a-different-model"),
+            providerAPIType: .openAICompatible,
+            supportsVision: nil,
+            supportsDocuments: nil
+        ))
+        await agent.appendUserMessage("say ok")
+        await agent.start()
+        let deadline = Date().addingTimeInterval(3.0)
+        while after.messagesAtFirstCall == nil, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        await agent.stop()
+        let posted = try #require(after.messagesAtFirstCall, "the new model was never called")
+        #expect(posted.filter { $0.kind == .modelSwitched }.count == 1, "the new model ran before its switch was announced")
+    }
+
     @Test("A model change wakes an agent sleeping out a provider wait, and it retries on the new model")
     func modelChangeWakesAProviderWait() async throws {
         let board = ProviderWaitBoard()
@@ -296,7 +369,7 @@ struct ModelChangeTests {
         await runtime.setProviders(
             providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
             configurations: [.smith: Self.config(temperature: 0.9)],
-            apiTypes: [:]
+            apiTypes: [.smith: .openAICompatible]
         )
 
         #expect(await smithTemperature(runtime) == 0.9, "a retune never reached the live Smith")
@@ -312,7 +385,7 @@ struct ModelChangeTests {
         await runtime.setProviders(
             providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
             configurations: [.smith: Self.config(temperature: 0.9, modelID: "a-different-model")],
-            apiTypes: [:]
+            apiTypes: [.smith: .openAICompatible]
         )
 
         #expect(await smithTemperature(runtime) == 0.9, "a model switch never reached the live Smith")
@@ -323,5 +396,31 @@ struct ModelChangeTests {
         }
         #expect(smithID == smithIDBefore, "Smith was restarted rather than switched in place")
         #expect(await smith.configuration.llmConfig.modelID == "a-different-model")
+    }
+
+    @Test("A provider that arrives without its API type is refused and reported, never paired with a guessed type")
+    func providerWithoutAPITypeIsRefused() async {
+        let runtime = makeRuntime()
+        await runtime.start()
+        defer { Task { await runtime.stopAll() } }
+        let advisoryErrorsBefore = await runtime.channel.allMessages()
+            .filter { $0.kind == .advisory && $0.severity == .error }.count
+
+        await runtime.setProviders(
+            providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
+            configurations: [.smith: Self.config(temperature: 0.9, modelID: "a-different-model")],
+            apiTypes: [:]
+        )
+
+        #expect(await runtime.llmConfigs[.smith]?.modelID == "test-model", "a refused role keeps its previous configuration")
+        #expect(await runtime.providerAPITypes[.smith] == nil, "no API type may be invented for the refused role")
+        let advisoryErrorsAfter = await runtime.channel.allMessages()
+            .filter { $0.kind == .advisory && $0.severity == .error }.count
+        #expect(advisoryErrorsAfter == advisoryErrorsBefore + 1, "the refusal must be surfaced in the transcript")
+        // Give Smith's loop (0.5 s poll) time to apply a change, had one been staged.
+        try? await Task.sleep(for: .seconds(1))
+        if let smithID = await runtime.agentIDForRole(.smith), let smith = await runtime.liveAgent(id: smithID) {
+            #expect(await smith.configuration.llmConfig.modelID == "test-model")
+        }
     }
 }

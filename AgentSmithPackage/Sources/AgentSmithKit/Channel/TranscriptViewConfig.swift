@@ -70,7 +70,7 @@ public enum TranscriptKindGroup: String, CaseIterable, Codable, Sendable, Identi
         case .system:
             return [.inboundUserMessage, .contextManagement, .timerActivity, .mcpStatus,
                     .restartChrome, .preparing, .agentOnline,
-                    .agentLifecycle, .agentRecovery, .rateLimit, .statusUpdate, .advisory]
+                    .agentLifecycle, .agentRecovery, .rateLimit, .statusUpdate, .advisory, .modelSwitched]
         }
     }
 

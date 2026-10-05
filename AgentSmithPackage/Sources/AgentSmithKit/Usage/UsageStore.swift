@@ -94,9 +94,29 @@ public actor UsageStore {
         }
     }
 
-    /// All records, for aggregation queries.
+    /// All records, for one-shot, user-triggered reads.
+    ///
+    /// The returned array SHARES this store's buffer (copy-on-write). While any caller still holds
+    /// it, the store's next `append` or `backfillTaskID` copies every record ever made (~150 MB at
+    /// 65k records) — and an append can land on this actor's executor while the caller is still
+    /// iterating. Recurring aggregation folds with `reduceRecords(into:_:)` instead, and nothing
+    /// should keep this result in long-lived state.
     public func allRecords() -> [UsageRecord] {
         records
+    }
+
+    /// Folds every record, in store order, without exporting the array (see `allRecords()` for why
+    /// exporting is expensive). The fold runs on this actor, so `append` and `backfillTaskID` wait
+    /// for it to return: keep `update` cheap.
+    public func reduceRecords<Result: Sendable>(
+        into initial: Result,
+        _ update: @Sendable (inout Result, UsageRecord) -> Void
+    ) -> Result {
+        var result = initial
+        for record in records {
+            update(&result, record)
+        }
+        return result
     }
 
     /// Records for a specific task.

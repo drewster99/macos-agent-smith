@@ -126,7 +126,7 @@ struct NonAgentModelRefreshTests {
         await runtime.setProviders(
             providers: [.securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")])],
             configurations: [.securityAgent: changed],
-            apiTypes: [:]
+            apiTypes: [.securityAgent: .openAICompatible]
         )
         let after = await runtime.nonAgentModelConfigurations().security
         #expect(after.count == before.count)
@@ -143,7 +143,7 @@ struct NonAgentModelRefreshTests {
         await runtime.setProviders(
             providers: [.summarizer: MockLLMProvider(responses: [LLMResponse(text: "s")])],
             configurations: [.summarizer: changed],
-            apiTypes: [:]
+            apiTypes: [.summarizer: .openAICompatible]
         )
         #expect(await runtime.nonAgentModelConfigurations().summarizer?.modelID == "summary-2")
         #expect(await runtime.nonAgentModelConfigurations().security.allSatisfy { $0?.modelID == "test-model" },
@@ -173,7 +173,7 @@ struct NonAgentModelRefreshTests {
         await runtime.setProviders(
             providers: [.securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")])],
             configurations: [.securityAgent: changed],
-            apiTypes: [:]
+            apiTypes: [.securityAgent: .openAICompatible]
         )
         #expect(await runtime.nonAgentModelConfigurations().security.allSatisfy { $0?.modelID == "security-2" })
         await runtime.stopAll()
@@ -213,7 +213,7 @@ struct NonAgentModelRefreshTests {
         await runtime.setProviders(
             providers: [.summarizer: MockLLMProvider(responses: [LLMResponse(text: "s")])],
             configurations: [.summarizer: summarizerConfig],
-            apiTypes: [:]
+            apiTypes: [.summarizer: .openAICompatible]
         )
         #expect(await runtime.nonAgentModelConfigurations().summarizer?.modelID == "summary-1")
         await runtime.stopAll()
