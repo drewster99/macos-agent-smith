@@ -5191,8 +5191,12 @@ public actor OrchestrationRuntime {
             currentConfiguration: llmConfigs[role],
             currentProviderType: providerAPITypes[role]?.rawValue,
             spawnBrown: { [weak self] task in
-                guard let self else { return nil }
-                return await self.spawnBrown(for: task)
+                guard let self, let workerID = await self.spawnBrown(for: task) else { return nil }
+                // Same as every start path: the worker acknowledges the task on its first turn,
+                // which is what makes task_update / task_complete / request_help available to a
+                // SCOPED worker. Without it a respawned worker could neither finish nor escalate.
+                await self.supervisor.agent(id: workerID)?.setAcknowledgesTaskOnFirstTurn()
+                return workerID
             },
             terminateAgent: { [weak self] id, callerID in
                 guard let self else { return false }

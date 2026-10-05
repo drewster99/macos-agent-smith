@@ -531,6 +531,16 @@ struct TaskEditorSheet: View {
         steps.compactMap { $0.built() }
     }
 
+    /// Whether the criteria differ in anything the user edits here. `origin` is not compared: this
+    /// form rebuilds every row as `.user`, so comparing it would call every save a change.
+    private static func criteriaChanged(_ edited: [AcceptanceCriterion], from stored: [AcceptanceCriterion]) -> Bool {
+        guard edited.count == stored.count else { return true }
+        return zip(edited, stored).contains { lhs, rhs in
+            lhs.id != rhs.id || lhs.name != rhs.name || lhs.validationPrompt != rhs.validationPrompt
+                || lhs.inputEnumeratorPrompt != rhs.inputEnumeratorPrompt || lhs.waivable != rhs.waivable
+        }
+    }
+
     /// The required capabilities this form would save, in order, empty rows dropped — shared with
     /// the live placeholder warning so both number the same items.
     private var builtCapabilities: [RequiredCapability] {
@@ -594,10 +604,16 @@ struct TaskEditorSheet: View {
                     // sheet opened with means a gate Smith changed while the sheet was open is not
                     // silently reverted by a Save that never touched the checkbox.
                     let gateChange: Bool? = requiresUserAcceptance == task.requiresUserAcceptance ? nil : requiresUserAcceptance
-                    let contractSaved = await viewModel.editTaskAcceptanceContract(
-                        id: task.id, criteria: criteriaToSave, requiresUserAcceptance: gateChange)
-                    let stepsSaved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
-                    saved = contractSaved && stepsSaved
+                    // Like the definition above, each part is written only when it changed: the
+                    // contract and steps are refused once the task is running, and an unchanged part
+                    // must not block a change that is allowed (a capability edit).
+                    if gateChange != nil || Self.criteriaChanged(criteriaToSave, from: task.acceptanceCriteria) {
+                        saved = await viewModel.editTaskAcceptanceContract(
+                            id: task.id, criteria: criteriaToSave, requiresUserAcceptance: gateChange)
+                    }
+                    if saved && builtSteps != task.steps {
+                        saved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
+                    }
                 }
                 if saved && canEditCapabilities && capabilitiesToSave != task.requiredCapabilities {
                     saved = await viewModel.setTaskRequiredCapabilities(

@@ -284,7 +284,8 @@ public struct ToolContext: Sendable {
     /// agent's current configuration. Not derivable from ModelConfiguration alone.
     public var currentProviderType: String?
     /// Spawns a worker FOR `task` — scoped, with the user's tool policy and the task's overrides,
-    /// exactly like a normal start — and returns its ID. Never task-less: a task-less worker skips
+    /// set to acknowledge the task on its first turn, exactly like a normal start — and returns its
+    /// ID. The caller delivers the briefing. Never task-less: a task-less worker skips
     /// scoping and every tool policy, so a Never tool would be offered to it.
     public let spawnBrown: @Sendable (AgentTask) async -> UUID?
     /// Callback to terminate an agent by ID. Second parameter is the caller's agent ID.
