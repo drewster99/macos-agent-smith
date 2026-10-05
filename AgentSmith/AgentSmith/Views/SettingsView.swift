@@ -127,6 +127,14 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Stepper(value: $shared.maxChildTasksPerTask, in: 1...OrchestrationRuntime.maxChildTasksPerTaskCeiling) {
+                Text("Max child tasks per task: \(shared.maxChildTasksPerTask)")
+            }
+
+            Text("A worker coordinating other tasks can create at most this many child tasks for its task, counting ones that already finished. When every running worker is waiting on its child tasks, one child may start beyond Max simultaneous tasks so the work never stalls.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Toggle("Auto-archive completed tasks", isOn: $shared.autoArchiveCompletedEnabled)
 
             Stepper(value: $shared.autoArchiveCutoffHours, in: 1...168) {

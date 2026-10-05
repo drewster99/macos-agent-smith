@@ -41,6 +41,124 @@ public struct CreateTaskTool: AgentTool {
         entire folder, include the path of the file/folder in your `description` parameter text.
         """
 
+    /// The `acceptance_criteria` parameter schema, shared with `create_child_task`.
+    static let acceptanceCriteriaSchema: AnyCodable = .dictionary(
+            [
+                "type": .string("array"),
+                "items": .dictionary(
+                    [
+                        "type": .string("object"),
+                        "properties": .dictionary(
+                            [
+                                "name": .dictionary(
+                                    [
+                                        "type": .string("string"),
+                                        "description": .string("""
+                                            Short display-only name. This is how the user will see this deliverable in the user interface, so this text should be meaningful to the user.
+
+                                            Example 1: "Verifying JSON downloaded"
+
+                                            Example 2: "Checking provided word is allowed"
+                                            """)
+                                    ]
+                                ),
+                                "validation_prompt": .dictionary(
+                                    [
+                                        "type": .string(
+                                            "string"
+                                        ),
+                                        "description": .string(
+                                            """
+                                            Detailed instructions for the validator - what to check, how to check it, what kind \
+                                            of evidence is acceptable, what is considered a failure/rejection. This \
+                                            prompt will typically be interpreted very literally, so be sure it is clear, \
+                                            concise and complete.
+
+                                            The validator sees ONLY this one criterion — never the others — so the prompt must be \
+                                            self-contained and scoped to this single deliverable. Never reference other criteria \
+                                            ("as required above", "matching the other checks") and never ask it to judge overall \
+                                            completeness ("confirm all work is done") — overall completeness is the union of the \
+                                            criteria, not a criterion itself.
+
+                                            Example 1: "Confirm that the worker agent ran a web search and fetched the JSON file from the website. Also confirm the JSON file exists - the agent must either have attached it or given a path to the file. If they gave a path, confirm you can read the path. If all true, ACCEPT this item. Else REJECT."
+
+                                            Example 2 might be used when an enumerator is provided: "Look at the provided enumeration input and confirm that the term provided exists in list of words found in the file /tmp/allowed_words.txt.  If the word is found, ACCEPT this item. If not, REJECT."
+
+                                            Example 3: "If the user mentioned buffalos, ACCEPT.  If the user mentioned horses, REJECT. If the user didn't mention either buffalos or horses, WAIVE this item."
+                                            """
+                                        )
+                                    ]
+                                ),
+                                "input_enumerator_prompt": .dictionary(
+                                    [
+                                        "type": .string(
+                                            "string"
+                                        ),
+                                        "description": .string(
+                                            """
+                                            Optional: Instructions for an LLM that MUST return a JSON array of strings. Each string is checked *independently* with the `validation_prompt`. Every item must pass for this acceptance criterion to be accepted. If any are rejected, this entire criterion is rejected.
+
+                                            Example 1 enumerates Java files in a particular directory/folder. The `validation_prompt` will then be applied to each file returned: "Do a directory listing of the /tmp/foo folder and return a JSON array of strings, one for each '.java' file in that folder. For each file returned, include the full path."
+
+                                            Example 2 instructs the LLM to return a hardcoded list: "Respond with these items in a JSON array, and nothing else - no other text, commentary, etc.: Flour, Sugar, Ham"
+                                            """
+                                        )
+                                    ]
+                                ),
+                                "waivable": .dictionary(
+                                    [
+                                        "type": .string(
+                                            "boolean"
+                                        ),
+                                        "description": .string(
+                                            "Whether WAIVE is permitted. Default false. Waivable items may be skipped at the discretion of the validator."
+                                        )
+                                    ]
+                                )
+                            ]
+                        ),
+                        "required": .array([.string("name"), .string("validation_prompt")])
+                    ]
+                ),
+                "description": .string("""
+                    Acceptance / validation criteria -- the list of deliverables -- for this task. ALL items must either \
+                    pass (be accepted) or be waived for the task to be considered successful.
+
+                    Criteria must be ORTHOGONAL and SELF-CONTAINED. Each criterion is judged independently by a \
+                    validator that sees ONLY that one criterion — never the rest of the list — so scope each \
+                    criterion to exactly ONE deliverable, never restate a fact another criterion already asserts, \
+                    and never write umbrella criteria like "all work is complete" or "final commit of ALL work". \
+                    When criteria overlap, one unresolved defect rejects several criteria at once, every rejection \
+                    round re-litigates that same defect once per overlapping criterion, and the task burns its \
+                    no-progress failure budget several times faster.
+
+                    Put all validation instructions and list acceptable evidence into `validation_prompt`.
+
+                    If the `validation_prompt` should be run on an arbitrary number of items, use the optional `input_enumerator_prompt`. The `input_enumerator_prompt` must instruct the LLM to return a JSON array of strings; each string will be validated with the `validation_prompt` independently, and every subcheck must pass. If any fail, the given criterion is rejected.
+
+                    Write prompts so correct work passes, including edge cases and explicit alternatives. Encode user-declared MUST-FAIL gates as non-waivable criteria with no escape hatch.
+                    """)
+            ]
+        )
+
+    /// The `steps` parameter schema, shared with `create_child_task`.
+    static let stepsSchema: AnyCodable = .dictionary([
+            "type": .string("array"),
+            "items": .dictionary(["type": .string("string")]),
+            "description": .string("""
+                Initial to-do list of steps for the worker, in order. PROVIDE THIS whenever the work has a natural sequence — it seeds the worker's plan and gives validators a record to check against. Note that these steps are guidance to the worker agent, not requirements. Once the task starts, the worker owns this to-do list and may edit, delete, re-order items as it wishes. Validators see only the *final* list.
+                """)
+        ])
+
+    /// The `required_capabilities` parameter schema, shared with `create_child_task`.
+    static let requiredCapabilitiesSchema: AnyCodable = .dictionary([
+            "type": .string("array"),
+            "items": .dictionary(["type": .string("string")]),
+            "description": .string("""
+                What the worker agent will need to be able to DO to complete the task, one capability per item. PROVIDE THIS for every task: the Security Agent chooses the worker's tools with special attention to this list, and a capability missing from it may leave the worker without a tool it needs. Never name a specific tool. For example, don't say "grep", say "Search for content in files". Don't say "bash"; say what the worker will do with the shell, like "Find source code files", "Edit files", "Compile the Xcode project". On a template, items may use {{input_name}} placeholders. If a running worker later turns out to lack something, add it with `add_required_capability` — never by editing the description.
+                """)
+        ])
+
     public let parameters: [String: AnyCodable] = [
         "type": .string("object"),
         "properties": .dictionary(
@@ -69,118 +187,9 @@ public struct CreateTaskTool: AgentTool {
                     "items": .dictionary(["type": .string("string")]),
                     "description": .string("UUID strings of attachments to include with this task. Use when the user attached an image, PDF, or file the worker will need. The IDs are surfaced in the user's incoming message as `[filename](file://…) … id=<UUID>` markdown links. Forward the EXACT id values verbatim. Brown will see image attachments as image content and any non-image attachments as text references with file paths.")
                 ]),
-                "acceptance_criteria": .dictionary(
-                    [
-                        "type": .string("array"),
-                        "items": .dictionary(
-                            [
-                                "type": .string("object"),
-                                "properties": .dictionary(
-                                    [
-                                        "name": .dictionary(
-                                            [
-                                                "type": .string("string"),
-                                                "description": .string("""
-                                                    Short display-only name. This is how the user will see this deliverable in the user interface, so this text should be meaningful to the user.
-
-                                                    Example 1: "Verifying JSON downloaded"
-
-                                                    Example 2: "Checking provided word is allowed"
-                                                    """)
-                                            ]
-                                        ),
-                                        "validation_prompt": .dictionary(
-                                            [
-                                                "type": .string(
-                                                    "string"
-                                                ),
-                                                "description": .string(
-                                                    """
-                                                    Detailed instructions for the validator - what to check, how to check it, what kind \
-                                                    of evidence is acceptable, what is considered a failure/rejection. This \
-                                                    prompt will typically be interpreted very literally, so be sure it is clear, \
-                                                    concise and complete.
-
-                                                    The validator sees ONLY this one criterion — never the others — so the prompt must be \
-                                                    self-contained and scoped to this single deliverable. Never reference other criteria \
-                                                    ("as required above", "matching the other checks") and never ask it to judge overall \
-                                                    completeness ("confirm all work is done") — overall completeness is the union of the \
-                                                    criteria, not a criterion itself.
-
-                                                    Example 1: "Confirm that the worker agent ran a web search and fetched the JSON file from the website. Also confirm the JSON file exists - the agent must either have attached it or given a path to the file. If they gave a path, confirm you can read the path. If all true, ACCEPT this item. Else REJECT."
-
-                                                    Example 2 might be used when an enumerator is provided: "Look at the provided enumeration input and confirm that the term provided exists in list of words found in the file /tmp/allowed_words.txt.  If the word is found, ACCEPT this item. If not, REJECT."
-
-                                                    Example 3: "If the user mentioned buffalos, ACCEPT.  If the user mentioned horses, REJECT. If the user didn't mention either buffalos or horses, WAIVE this item."
-                                                    """
-                                                )
-                                            ]
-                                        ),
-                                        "input_enumerator_prompt": .dictionary(
-                                            [
-                                                "type": .string(
-                                                    "string"
-                                                ),
-                                                "description": .string(
-                                                    """
-                                                    Optional: Instructions for an LLM that MUST return a JSON array of strings. Each string is checked *independently* with the `validation_prompt`. Every item must pass for this acceptance criterion to be accepted. If any are rejected, this entire criterion is rejected.
-
-                                                    Example 1 enumerates Java files in a particular directory/folder. The `validation_prompt` will then be applied to each file returned: "Do a directory listing of the /tmp/foo folder and return a JSON array of strings, one for each '.java' file in that folder. For each file returned, include the full path."
-
-                                                    Example 2 instructs the LLM to return a hardcoded list: "Respond with these items in a JSON array, and nothing else - no other text, commentary, etc.: Flour, Sugar, Ham"
-                                                    """
-                                                )
-                                            ]
-                                        ),
-                                        "waivable": .dictionary(
-                                            [
-                                                "type": .string(
-                                                    "boolean"
-                                                ),
-                                                "description": .string(
-                                                    "Whether WAIVE is permitted. Default false. Waivable items may be skipped at the discretion of the validator."
-                                                )
-                                            ]
-                                        )
-                                    ]
-                                ),
-                                "required": .array([.string("name"), .string("validation_prompt")])
-                            ]
-                        ),
-                        "description": .string("""
-                            Acceptance / validation criteria -- the list of deliverables -- for this task. ALL items must either \
-                            pass (be accepted) or be waived for the task to be considered successful.
-
-                            Criteria must be ORTHOGONAL and SELF-CONTAINED. Each criterion is judged independently by a \
-                            validator that sees ONLY that one criterion — never the rest of the list — so scope each \
-                            criterion to exactly ONE deliverable, never restate a fact another criterion already asserts, \
-                            and never write umbrella criteria like "all work is complete" or "final commit of ALL work". \
-                            When criteria overlap, one unresolved defect rejects several criteria at once, every rejection \
-                            round re-litigates that same defect once per overlapping criterion, and the task burns its \
-                            no-progress failure budget several times faster.
-
-                            Put all validation instructions and list acceptable evidence into `validation_prompt`.
-
-                            If the `validation_prompt` should be run on an arbitrary number of items, use the optional `input_enumerator_prompt`. The `input_enumerator_prompt` must instruct the LLM to return a JSON array of strings; each string will be validated with the `validation_prompt` independently, and every subcheck must pass. If any fail, the given criterion is rejected.
-
-                            Write prompts so correct work passes, including edge cases and explicit alternatives. Encode user-declared MUST-FAIL gates as non-waivable criteria with no escape hatch.
-                            """)
-                    ]
-                ),
-                "steps": .dictionary([
-                    "type": .string("array"),
-                    "items": .dictionary(["type": .string("string")]),
-                    "description": .string("""
-                        Initial to-do list of steps for the worker, in order. PROVIDE THIS whenever the work has a natural sequence — it seeds the worker's plan and gives validators a record to check against. Note that these steps are guidance to the worker agent, not requirements. Once the task starts, the worker owns this to-do list and may edit, delete, re-order items as it wishes. Validators see only the *final* list.
-                        """)
-                ]),
-                "required_capabilities": .dictionary([
-                    "type": .string("array"),
-                    "items": .dictionary(["type": .string("string")]),
-                    "description": .string("""
-                        What the worker agent will need to be able to DO to complete the task, one capability per item. PROVIDE THIS for every task: the Security Agent chooses the worker's tools with special attention to this list, and a capability missing from it may leave the worker without a tool it needs. Never name a specific tool. For example, don't say "grep", say "Search for content in files". Don't say "bash"; say what the worker will do with the shell, like "Find source code files", "Edit files", "Compile the Xcode project". On a template, items may use {{input_name}} placeholders. If a running worker later turns out to lack something, add it with `add_required_capability` — never by editing the description.
-                        """)
-                ]),
+                "acceptance_criteria": Self.acceptanceCriteriaSchema,
+                "steps": Self.stepsSchema,
+                "required_capabilities": Self.requiredCapabilitiesSchema,
                 "requires_user_acceptance": .dictionary([
                     "type": .string("boolean"),
                     "description": .string("Optional, default false. When true, once every acceptance criterion settles (ACCEPT/WAIVE) the task does NOT complete on its own — it parks awaiting the user's explicit sign-off (accept, or reject with feedback, including by just replying in chat). Set it whenever the user said they want to review or approve the result themselves. Set it HERE rather than afterwards: a new task usually starts immediately, and once it is running the gate can no longer be changed. On a template it carries to every instance the template starts. When creating a successor or re-run of a task that had it, carry it over unless the user said otherwise.")
@@ -385,28 +394,8 @@ public struct CreateTaskTool: AgentTool {
             templateInstanceTitleTemplate = nil
         }
 
-        let stepTexts: [String]
-        if let rawSteps = ToolArguments.optionalArray(arguments, "steps") {
-            stepTexts = rawSteps.compactMap { raw -> String? in
-                guard case .string(let s) = raw else { return nil }
-                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : trimmed
-            }
-        } else {
-            stepTexts = []
-        }
-
-        // Duplicates (compared as `RequiredCapability.normalizedText` does) are dropped, keeping the
-        // first spelling: one need listed twice is still one need.
-        var capabilityKeys = Set<String>()
-        let requiredCapabilities = (ToolArguments.optionalArray(arguments, "required_capabilities") ?? [])
-            .compactMap { raw -> RequiredCapability? in
-                guard case .string(let text) = raw else { return nil }
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { return nil }
-                let capability = RequiredCapability(text: trimmed, addedBy: .smith, origin: .asWritten)
-                return capabilityKeys.insert(capability.normalizedText).inserted ? capability : nil
-            }
+        let stepTexts = TaskCreationSupport.stepTexts(from: arguments)
+        let requiredCapabilities = TaskCreationSupport.requiredCapabilities(from: arguments, addedBy: .smith)
 
         // Every authored field is checked BEFORE anything is stored, so a template written with a
         // mistyped `{{placeholder}}` leaves nothing behind to clean up. The store re-checks each
@@ -473,68 +462,19 @@ public struct CreateTaskTool: AgentTool {
         // template: templates don't run themselves — each INSTANCE gets its own relevant context at
         // start time (resolveStartTarget) — so retrieving here is a wasted embedding + corpus scan,
         // and `setRelevantContext` is per-session so it couldn't attach to a library-resident template.
-        var contextNote = ""
-        if !isTemplate {
-            let retrieved = await context.retrieveContext(.newTask, title + " " + description)
-            let attached = await TaskContextRetrieval.attachRelevantContext(
-                taskID: task.id,
-                results: retrieved,
-                taskStore: context.taskStore
-            )
-            var noteParts: [String] = []
-            if !attached.memories.isEmpty {
-                noteParts.append("\(attached.memories.count) relevant memor\(attached.memories.count == 1 ? "y" : "ies")")
-            }
-            if !attached.priorTasks.isEmpty {
-                noteParts.append("\(attached.priorTasks.count) relevant prior task\(attached.priorTasks.count == 1 ? "" : "s")")
-            }
-            if !noteParts.isEmpty {
-                contextNote = " Attached: \(noteParts.joined(separator: ", "))."
-            }
+        let contextNote: String
+        if isTemplate {
+            contextNote = ""
+        } else {
+            contextNote = await TaskCreationSupport.attachRelevantContext(to: task, context: context)
         }
-
-        // Build metadata for the task_created channel message, including any retrieved context.
-        var meta: [String: AnyCodable] = [
-            "messageKind": .kind(.taskCreated),
-            "taskID": .string(task.id.uuidString),
-            "taskDescription": .string(description)
-        ].merging(task.taskCreatedBannerCapabilitiesMetadata()) { current, _ in current }
-        // Surface the scheduled run time so the New Task banner can render a chip on the
-        // right ("Scheduled 9:15 AM"). Stored as Unix epoch seconds for stable round-tripping
-        // through the existing AnyCodable JSON persistence path.
-        if let scheduledRunAt {
-            meta["scheduledRunAt"] = .double(scheduledRunAt.timeIntervalSince1970)
-        }
-        if let task = await context.taskStore.taskOrLibraryTemplate(id: task.id) {
-            if let memories = task.relevantMemories, !memories.isEmpty {
-                meta["contextMemoryCount"] = .int(memories.count)
-                // Each entry: "85% — content [tags]". Entries separated by ASCII Record
-                // Separator (U+001E) so multi-line content can't accidentally split entries
-                // when the UI parses the metadata string.
-                meta["contextMemories"] = .string(memories.map { m in
-                    let pct = String(format: "%.0f%%", m.similarity * 100)
-                    let tags = m.tags.isEmpty ? "" : " [\(m.tags.joined(separator: ", "))]"
-                    return "\(pct) — \(m.content)\(tags)"
-                }.joined(separator: "\u{1E}"))
-            }
-            if let priorTasks = task.relevantPriorTasks, !priorTasks.isEmpty {
-                meta["contextPriorTaskCount"] = .int(priorTasks.count)
-                // Each entry: header line ("85% — Title (id: UUID)") + newline + summary body.
-                // Entries separated by ASCII Record Separator (U+001E) so summary bodies that
-                // contain their own newlines (numbered lists, etc.) don't bleed between tasks
-                // when the UI parses the metadata string.
-                meta["contextPriorTasks"] = .string(priorTasks.map { p in
-                    let pct = String(format: "%.0f%%", p.similarity * 100)
-                    return "\(pct) — \(p.title) (id: \(p.taskID.uuidString))\n\(p.summary)"
-                }.joined(separator: "\u{1E}"))
-            }
-        }
-
-        await context.post(ChannelMessage(
-            sender: .system,
-            content: title,
-            metadata: meta
-        ))
+        await TaskCreationSupport.announceCreated(
+            taskID: task.id,
+            title: title,
+            description: description,
+            scheduledRunAt: scheduledRunAt,
+            context: context
+        )
 
         // If the caller asked for a scheduled run, register the matching wake immediately so
         // the user-visible chain is one tool call → one timer + one task.

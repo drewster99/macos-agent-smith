@@ -22,14 +22,14 @@ enum ToolSafetyClassification {
         "file_read", "attach_file", "glob", "directory_tree", "directory_listing",
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
         "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
-        "list_task_watches",
+        "list_task_watches", "wait_for_child_tasks",
         "web_search", "instant_answer", "web_fetch",
         // Low-risk side-effecting (lifecycle / orchestration)
         "task_update", "task_complete", "request_help", "reply_to_user",
         "report_inbound_user_message",
         "message_user", "notify_brown", "provide_help", "respond_to_user_acceptance", "create_task", "run_task",
         "update_task", "edit_task", "amend_task", "add_required_capability", "set_template_inputs", "schedule_task_action", "schedule_reminder", "reschedule_wake", "cancel_wake",
-        "watch_task",
+        "watch_task", "create_child_task",
         // Destructive
         "file_write", "file_edit", "save_memory", "manage_task_disposition",
         "terminate_agent", "abort", "bash", "gh", "run_applescript"
@@ -56,7 +56,7 @@ enum ToolSafetyClassification {
         "file_read", "attach_file", "glob", "directory_tree", "directory_listing",
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
         "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
-        "list_task_watches",
+        "list_task_watches", "wait_for_child_tasks",
         "web_search", "instant_answer", "web_fetch"
     ]
 

@@ -29,6 +29,11 @@ public enum BrownBehavior {
             SaveMemoryTool(),
             SearchMemoryTool(),
             GetTaskDetailsTool(),
+            // Coordination: offered like every candidate, granted only when scoping (or the
+            // user's policy) gives them — normally because the task lists coordinating other
+            // tasks among its required capabilities.
+            CreateChildTaskTool(),
+            WaitForChildTasksTool(),
             ListScriptableAppsTool(),
             GetAppScriptingSchemaTool(),
             RunAppleScriptTool(),
@@ -250,6 +255,12 @@ public enum BrownBehavior {
           is that none of your tools can do something the task needs, say in `needed` what you must be able \
           to DO ("read the user's calendar"), not which tool you want: Smith records it as a required \
           capability and the Security Agent re-scopes your tools against it.
+        - `create_child_task(title:, description:, …)` and `wait_for_child_tasks()` — Only when your \
+          task is to coordinate work split across other tasks. A child task is run by another worker \
+          and judged on its own criteria; its outcome is delivered to you. Create the children, do \
+          whatever you can meanwhile, then `wait_for_child_tasks` — you pause until a child finishes \
+          and wake with its outcome. Your task stays running while you wait. Submit your own work with \
+          `task_complete` only once the children you depend on have finished.
         - `reply_to_user(message:)` — Only available when the user has messaged you directly within the \
           last 10 minutes. Use it to reply to the user's direct question.
 

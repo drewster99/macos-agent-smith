@@ -71,14 +71,14 @@ struct ParkedWorkerResumeTests {
             recipientID: agentID,
             kind: .validationBlockedWorkerNotice
         )
-        #expect(!AgentActor.resumesParkedWorker(notice, agentID: agentID))
+        #expect(!AgentActor.resumesParkedWorker(notice, agentID: agentID, park: .awaitingHandoff))
     }
 
     @Test("A validator punch list resumes the worker")
     func changesRequestedResumes() {
         let agentID = UUID()
         let punchList = Self.message(recipientID: agentID, kind: .changesRequested)
-        #expect(AgentActor.resumesParkedWorker(punchList, agentID: agentID))
+        #expect(AgentActor.resumesParkedWorker(punchList, agentID: agentID, park: .awaitingHandoff))
     }
 
     @Test("A private message with no messageKind resumes the worker")
@@ -88,21 +88,21 @@ struct ParkedWorkerResumeTests {
         // while a missed ALLOWLIST entry would strand the worker parked forever.
         let agentID = UUID()
         let direct = Self.message(recipientID: agentID, kind: nil)
-        #expect(AgentActor.resumesParkedWorker(direct, agentID: agentID))
+        #expect(AgentActor.resumesParkedWorker(direct, agentID: agentID, park: .awaitingHandoff))
     }
 
     @Test("A message addressed to a different agent never resumes this one")
     func otherRecipientDoesNotResume() {
         let agentID = UUID()
         let forSomeoneElse = Self.message(recipientID: UUID(), kind: .changesRequested)
-        #expect(!AgentActor.resumesParkedWorker(forSomeoneElse, agentID: agentID))
+        #expect(!AgentActor.resumesParkedWorker(forSomeoneElse, agentID: agentID, park: .awaitingHandoff))
     }
 
     @Test("A public broadcast never resumes a parked worker")
     func publicMessageDoesNotResume() {
         let agentID = UUID()
         let banner = Self.message(recipientID: nil, kind: .validationBlocked)
-        #expect(!AgentActor.resumesParkedWorker(banner, agentID: agentID))
+        #expect(!AgentActor.resumesParkedWorker(banner, agentID: agentID, park: .awaitingHandoff))
     }
 
     @Test("Every exempted kind is a real string the exemption reader can match")

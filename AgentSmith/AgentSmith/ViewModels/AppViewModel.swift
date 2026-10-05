@@ -995,6 +995,7 @@ final class AppViewModel {
         // Worker-pool capacity ("Max simultaneous tasks" in Settings): applied at start
         // and pushed live on change.
         await newRuntime.setWorkerCapacity(shared.maxSimultaneousTasks)
+        await newRuntime.setMaxChildTasksPerTask(shared.maxChildTasksPerTask)
         // Compaction-diff debug capture (Debug menu toggle): applied at start, pushed live on change.
         await newRuntime.setCompactionDiffCapture(enabled: shared.captureCompactionDiffs)
         // Apply later Settings changes to this session immediately (no restart). Re-registering on
@@ -1002,10 +1003,14 @@ final class AppViewModel {
         shared.registerToolSecurityObserver(session.id) { [weak self] in
             self?.pushToolSecurity()
         }
-        shared.registerWorkerCapacityObserver(session.id) { [weak self] in
+        shared.registerTaskLimitsObserver(session.id) { [weak self] in
             guard let self else { return }
             let capacity = self.shared.maxSimultaneousTasks
-            Task { await self.runtime?.setWorkerCapacity(capacity) }
+            let childLimit = self.shared.maxChildTasksPerTask
+            Task {
+                await self.runtime?.setWorkerCapacity(capacity)
+                await self.runtime?.setMaxChildTasksPerTask(childLimit)
+            }
         }
         shared.registerCompactionDiffCaptureObserver(session.id) { [weak self] in
             guard let self else { return }
@@ -2985,6 +2990,14 @@ final class AppViewModel {
     func childTasks(of taskID: UUID) -> [AgentTask] {
         activeTaskList.filter { $0.parentTaskID == taskID }
             + shared.archivedTasks.filter { $0.parentTaskID == taskID }
+    }
+
+    /// The child tasks a coordinator task's worker created (`create_child_task`), oldest first,
+    /// across the active and archived buckets.
+    func coordinatedChildTasks(of coordinatorTaskID: UUID) -> [AgentTask] {
+        (activeTaskList.filter { $0.coordinatorTaskID == coordinatorTaskID }
+            + shared.archivedTasks.filter { $0.coordinatorTaskID == coordinatorTaskID })
+            .sorted { $0.createdAt < $1.createdAt }
     }
 
     // MARK: - Library group operations (forward to the shared global library)

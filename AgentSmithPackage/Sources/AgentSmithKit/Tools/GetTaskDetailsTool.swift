@@ -72,7 +72,7 @@ struct GetTaskDetailsTool: AgentTool {
                 notFoundIDs.append(taskID)
                 continue
             }
-            sections.append(formatTask(task))
+            sections.append(formatTask(task, children: await context.taskStore.childTasks(ofCoordinator: task.id)))
         }
 
         var output: [String] = []
@@ -101,7 +101,7 @@ struct GetTaskDetailsTool: AgentTool {
     }
 
     /// Formats a single task's details. Each section is included only when present.
-    private func formatTask(_ task: AgentTask) -> String {
+    private func formatTask(_ task: AgentTask, children: [AgentTask]) -> String {
         var parts: [String] = []
         parts.append("Task ID: \(task.id.uuidString)")
         parts.append("Title: \(task.title)")
@@ -128,6 +128,12 @@ struct GetTaskDetailsTool: AgentTool {
         parts.append("Description: \(task.description)")
         if let capabilities = task.renderedRequiredCapabilities() {
             parts.append("Required capabilities:\n\(capabilities)")
+        }
+        if let coordinatorID = task.coordinatorTaskID {
+            parts.append("coordinatorTaskID: \(coordinatorID.uuidString) (a child task; its outcome is reported to that task's worker)")
+        }
+        if !children.isEmpty {
+            parts.append("Child tasks:\n\(WaitForChildTasksTool.summary(of: children))")
         }
 
         if let definitions = task.renderedTemplateInputDefinitions() {

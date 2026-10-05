@@ -71,6 +71,11 @@ public enum ToolEffect: Sendable, Hashable, CaseIterable {
     /// The tool caused the runtime to restart this agent with a fresh context. The run loop must
     /// stop immediately rather than race the restart and trigger it a second time.
     case triggeredRuntimeRestart
+
+    /// The worker is now waiting on child tasks it created (`wait_for_child_tasks`). Its run loop
+    /// parks — no turns, no nudges — until a child's outcome (or any other message addressed to
+    /// it) arrives. Its task stays running and keeps its worker slot.
+    case waitsForChildTasks
 }
 
 /// A tool that an agent can invoke via LLM tool calling.
@@ -362,6 +367,15 @@ public struct ToolContext: Sendable {
     /// cloned instance, never the reusable template itself (pass nil for a non-template, whose
     /// amendment is applied in place by the caller before the restart).
     public let restartForNewTask: @Sendable (UUID, String?) async -> Void
+    /// Starts a child task the calling worker created (`create_child_task`), with origin
+    /// `.coordinatorTool`. Never stops the caller: a child start never takes the cold path, and the
+    /// capacity gate queues it (or, when every live worker is a coordinator waiting on its children,
+    /// lets one start above capacity).
+    public let startChildTask: @Sendable (UUID) async -> Void
+    /// Reports that the calling worker started (true) or stopped (false) waiting on its child tasks.
+    public let setWaitingOnChildTasks: @Sendable (Bool) async -> Void
+    /// The most child tasks one task may create (Settings "Max child tasks per task").
+    public let maxChildTasksPerTask: @Sendable () async -> Int
     /// The task ID that the current session was started/restarted for, if any.
     /// Used by `run_task` to prevent restart loops when Smith re-invokes it on the same task.
     public let currentResumingTaskID: UUID?
@@ -483,6 +497,9 @@ public struct ToolContext: Sendable {
         reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .failure("Inbound message reporting is not configured.") },
         respondToUserAcceptance: @escaping @Sendable (UUID, Bool, String?) async -> ToolExecutionResult = { _, _, _ in .failure("User-acceptance resolution is not configured.") },
         restartForNewTask: @escaping @Sendable (UUID, String?) async -> Void = { _, _ in },
+        startChildTask: @escaping @Sendable (UUID) async -> Void = { _ in },
+        setWaitingOnChildTasks: @escaping @Sendable (Bool) async -> Void = { _ in },
+        maxChildTasksPerTask: @escaping @Sendable () async -> Int = { OrchestrationRuntime.defaultMaxChildTasksPerTask },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
         summarizeCompletedTask: @escaping @Sendable (UUID) async -> Void = { _ in },
@@ -549,6 +566,9 @@ public struct ToolContext: Sendable {
         self.reportInboundUserMessage = reportInboundUserMessage
         self.respondToUserAcceptance = respondToUserAcceptance
         self.restartForNewTask = restartForNewTask
+        self.startChildTask = startChildTask
+        self.setWaitingOnChildTasks = setWaitingOnChildTasks
+        self.maxChildTasksPerTask = maxChildTasksPerTask
         self.currentResumingTaskID = currentResumingTaskID
         self.memoryStore = memoryStore
         self.summarizeCompletedTask = summarizeCompletedTask

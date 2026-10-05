@@ -2023,6 +2023,7 @@ private struct TaskDetailMetadataGrid: View {
             TaskDetailTimingRows(task: task, viewModel: viewModel)
             TaskDetailSpendRows(task: task, viewModel: viewModel)
             TaskDetailScopeRows(task: task, viewModel: viewModel)
+            TaskDetailCoordinationRows(task: task, viewModel: viewModel)
         }
         .font(.callout)
     }
@@ -2068,6 +2069,33 @@ private struct TaskDetailIdentityRows: View {
         if let parentTaskID = task.parentTaskID {
             TaskDetailMetadataRow(label: "Parent") {
                 TaskDetailCopyablePath(text: parentTaskID.uuidString, compact: true)
+            }
+        }
+    }
+}
+
+/// Coordination: the task whose worker created this one, and the child tasks this one created.
+private struct TaskDetailCoordinationRows: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
+        if let coordinatorID = task.coordinatorTaskID {
+            TaskDetailMetadataRow(label: "Created by", alignment: .firstTextBaseline) {
+                Text(viewModel.anyTask(id: coordinatorID)?.title ?? coordinatorID.uuidString)
+                    .textSelection(.enabled)
+            }
+        }
+        let children = viewModel.coordinatedChildTasks(of: task.id)
+        if !children.isEmpty {
+            TaskDetailMetadataRow(label: "Child tasks", alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(children, id: \.id) { child in
+                        Text("\(child.title) — \(child.status.displayName)")
+                            .foregroundStyle(TaskStatusBadge.color(for: child.status))
+                            .textSelection(.enabled)
+                    }
+                }
             }
         }
     }

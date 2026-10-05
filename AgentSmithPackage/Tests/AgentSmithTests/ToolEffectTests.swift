@@ -81,7 +81,7 @@ struct ToolEffectTests {
         // replaced only counted `task_update` and `task_complete` as task communications, and
         // this change is about removing the dependence on output wording, not about altering
         // which calls re-arm the silence nudge. It is moot in practice — the nudge is gated on
-        // `!awaitingTaskReview` and request_help parks — but the equivalence is worth pinning so
+        // `!isParked` and request_help parks — but the equivalence is worth pinning so
         // the refactor can be shown to be behaviour-preserving.
         #expect(!RequestHelpTool().successEffects.contains(.reportedTaskProgress))
         #expect(AgentActor.handoffLifecycleTools.contains(RequestHelpTool().name))

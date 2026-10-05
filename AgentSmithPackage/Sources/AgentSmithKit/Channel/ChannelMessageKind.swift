@@ -84,6 +84,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// Deliberately NOT in `parkedWorkerInformationalMessageKinds` — an amendment is work
     /// handed back, so like `orchestratorMessage` it resumes a parked worker.
     case taskAmendment = "task_amendment"
+    /// How a child task turned out, delivered privately to the worker of the coordinator task that
+    /// created it (`CoordinatorTaskBriefing`). Resumes a coordinator parked in
+    /// `wait_for_child_tasks` — the outcome is exactly what it is waiting for.
+    case childTaskOutcome = "child_task_outcome"
     /// The user acted on a task from the app UI (pause, stop, delete, Retry, Run Again); addressed
     /// to Smith so its picture of the task matches reality. Posted by the SYSTEM, never as the
     /// user — the user clicked a control, they did not write the notice. The typed action rides in
@@ -112,7 +116,7 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     ///
     /// Load-bearing for control flow: `AgentActor.resumesParkedWorker` exempts this kind, and it
     /// is the only private-to-worker message that must NOT pull a worker out of
-    /// `awaitingTaskReview`. Everything else addressed to a worker means "here is work back".
+    /// `AgentActor.park`. Everything else addressed to a worker means "here is work back".
     case validationBlockedWorkerNotice = "validation_blocked_worker_notice"
 
     /// A direct message from Smith to a task's worker (`notify_brown`).

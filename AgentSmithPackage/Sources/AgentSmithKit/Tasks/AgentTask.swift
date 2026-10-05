@@ -109,6 +109,12 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// ordinary tasks and for templates themselves. Lets future UI group instances
     /// under their template; for now it's just a recorded lineage.
     public var parentTaskID: UUID?
+    /// For a CHILD task, the task whose worker created it with `create_child_task` and is
+    /// coordinating it. Distinct from `parentTaskID`, which is template lineage only. While that
+    /// coordinator is active, the child's outcome is reported to the coordinator's worker
+    /// (`CoordinatorTaskBriefing`) instead of to Smith, and a queued child is started by the runtime
+    /// whatever the auto-run setting. Nil for every task a worker did not create.
+    public var coordinatorTaskID: UUID?
     /// The session this task ORIGINATED in (was created / instantiated in). IMMUTABLE once set — a
     /// task belongs to exactly one session's transcript for its whole life, which is what makes "a
     /// task's messages live in one session's log" hold (unarchiving keeps it; re-running in a different
@@ -628,6 +634,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         validation: TaskValidationState? = nil,
         isTemplate: Bool = false,
         parentTaskID: UUID? = nil,
+        coordinatorTaskID: UUID? = nil,
         sessionID: UUID? = nil,
         templateInputDefinitions: [TemplateInputDefinition] = [],
         templateInstanceTitleTemplate: String? = nil,
@@ -670,6 +677,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.validation = validation
         self.isTemplate = isTemplate
         self.parentTaskID = parentTaskID
+        self.coordinatorTaskID = coordinatorTaskID
         self.sessionID = sessionID
         self.templateInputDefinitions = templateInputDefinitions
         self.templateInstanceTitleTemplate = templateInstanceTitleTemplate
@@ -683,7 +691,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// that every stored property has a case: a defaulted property with no case is silently never
     /// persisted, and a round-trip test stays green because it decodes back to the same default.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, requiredCapabilities, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, coordinatorTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, requiredCapabilities, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
     }
 
     public init(from decoder: Decoder) throws {
@@ -728,6 +736,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         validation = try c.decodeIfPresent(TaskValidationState.self, forKey: .validation)
         isTemplate = try c.decodeIfPresent(Bool.self, forKey: .isTemplate) ?? false
         parentTaskID = try c.decodeIfPresent(UUID.self, forKey: .parentTaskID)
+        coordinatorTaskID = try c.decodeIfPresent(UUID.self, forKey: .coordinatorTaskID)
         sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID)
         templateInputDefinitions = try c.decodeIfPresent([TemplateInputDefinition].self, forKey: .templateInputDefinitions) ?? []
         templateInstanceTitleTemplate = try c.decodeIfPresent(String.self, forKey: .templateInstanceTitleTemplate)
@@ -799,6 +808,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         try c.encodeIfPresent(validation, forKey: .validation)
         if isTemplate { try c.encode(true, forKey: .isTemplate) }
         try c.encodeIfPresent(parentTaskID, forKey: .parentTaskID)
+        try c.encodeIfPresent(coordinatorTaskID, forKey: .coordinatorTaskID)
         try c.encodeIfPresent(sessionID, forKey: .sessionID)
         if !templateInputDefinitions.isEmpty {
             try c.encode(templateInputDefinitions, forKey: .templateInputDefinitions)

@@ -102,22 +102,31 @@ final class SharedAppState {
     var maxSimultaneousTasks: Int = SharedAppState.intDefault(key: "maxSimultaneousTasks", default: 4) {
         didSet {
             UserDefaults.standard.set(maxSimultaneousTasks, forKey: "maxSimultaneousTasks")
-            notifyWorkerCapacityChanged()
+            notifyTaskLimitsChanged()
         }
     }
 
-    /// Per-session observers for worker-capacity changes (same shape as the
-    /// tool-security observers): each session's view model pushes the new value to its
+    /// The most child tasks one task may create (`create_child_task`), counting every child it ever
+    /// created. Default 10; applied to each session's runtime at start and pushed live on change.
+    var maxChildTasksPerTask: Int = SharedAppState.intDefault(key: "maxChildTasksPerTask", default: OrchestrationRuntime.defaultMaxChildTasksPerTask) {
+        didSet {
+            UserDefaults.standard.set(maxChildTasksPerTask, forKey: "maxChildTasksPerTask")
+            notifyTaskLimitsChanged()
+        }
+    }
+
+    /// Per-session observers for the task limits (simultaneous tasks, child tasks per task), same
+    /// shape as the tool-security observers: each session's view model pushes the new values to its
     /// runtime so Settings changes apply without a restart.
-    private var workerCapacityObservers: [UUID: @MainActor () -> Void] = [:]
-    func registerWorkerCapacityObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
-        workerCapacityObservers[id] = observer
+    private var taskLimitsObservers: [UUID: @MainActor () -> Void] = [:]
+    func registerTaskLimitsObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
+        taskLimitsObservers[id] = observer
     }
-    func unregisterWorkerCapacityObserver(_ id: UUID) {
-        workerCapacityObservers.removeValue(forKey: id)
+    func unregisterTaskLimitsObserver(_ id: UUID) {
+        taskLimitsObservers.removeValue(forKey: id)
     }
-    private func notifyWorkerCapacityChanged() {
-        for observer in workerCapacityObservers.values { observer() }
+    private func notifyTaskLimitsChanged() {
+        for observer in taskLimitsObservers.values { observer() }
     }
 
     /// Per-session observers for the compaction-diff capture toggle (same shape as the
@@ -269,7 +278,7 @@ final class SharedAppState {
     /// its entries (inert `[weak self]` closures, but entries nonetheless) stayed keyed in these
     /// maps for the life of the app. Safe to call for a session that never registered.
     func removeSessionObservers(sessionID: UUID) {
-        unregisterWorkerCapacityObserver(sessionID)
+        unregisterTaskLimitsObserver(sessionID)
         unregisterCompactionDiffCaptureObserver(sessionID)
         unregisterAutoArchivePolicyObserver(sessionID)
         removeToolSecurityObserver(sessionID)

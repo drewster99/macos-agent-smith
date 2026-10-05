@@ -47,6 +47,7 @@ struct ChannelMessageKindTests {
         (.scheduledRunDeferred, "scheduled_run_deferred"),
         (.scheduledRunRefused, "scheduled_run_refused"),
         (.taskAmendment, "task_amendment"),
+        (.childTaskOutcome, "child_task_outcome"),
         (.userTaskAction, "user_task_action"),
         (.taskWatchFired, "task_watch_fired"),
         (.taskWatchRefused, "task_watch_refused"),

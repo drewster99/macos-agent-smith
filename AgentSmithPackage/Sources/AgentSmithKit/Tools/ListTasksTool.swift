@@ -356,6 +356,7 @@ struct ListTasksTool: AgentTool {
             missingRequiredTemplateInputNames: task.missingRequiredTemplateInputNames,
             hasTemplateInputValues: !task.templateInputValues.isEmpty,
             templateInputValueNames: task.templateInputValues.keys.sorted(),
+            coordinatorTaskID: task.coordinatorTaskID?.uuidString,
             requiredCapabilities: task.requiredCapabilities.map(\.renderedLine)
         )
     }
@@ -420,6 +421,8 @@ struct ListTasksTool: AgentTool {
         let missingRequiredTemplateInputNames: [String]
         let hasTemplateInputValues: Bool
         let templateInputValueNames: [String]
+        /// For a child task, the task whose worker created it (`create_child_task`).
+        let coordinatorTaskID: String?
         /// Each required capability as `RequiredCapability.renderedLine` — short, and a later
         /// addition is exactly what a reader scanning tasks needs to notice.
         let requiredCapabilities: [String]

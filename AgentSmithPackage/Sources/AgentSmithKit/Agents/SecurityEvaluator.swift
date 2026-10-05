@@ -378,6 +378,9 @@ actor SecurityEvaluator {
                 "task_complete",
                 "request_help",
                 "reply_to_user",
+                // Only pauses the caller until its own child tasks report back; it acts on nothing.
+                // Creating a child (`create_child_task`) is NOT here: it gets a real verdict.
+                "wait_for_child_tasks",
 
                 // Read-only AppleScript DISCOVERY: listing installed apps and reading an app's
                 // scripting schema inspect without acting. `run_applescript`, which acts, is

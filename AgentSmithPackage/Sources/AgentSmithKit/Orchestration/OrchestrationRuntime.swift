@@ -510,6 +510,55 @@ public actor OrchestrationRuntime {
         }
     }
 
+    /// The most child tasks one task may create with `create_child_task` (Settings "Max child tasks
+    /// per task"), counted over every child it ever created, finished ones included.
+    private(set) var maxChildTasksPerTask = OrchestrationRuntime.defaultMaxChildTasksPerTask
+    public static let defaultMaxChildTasksPerTask = 10
+    /// The user-configurable ceiling for `setMaxChildTasksPerTask`.
+    public static let maxChildTasksPerTaskCeiling = 50
+
+    /// Sets the per-task child limit (clamped to 1...maxChildTasksPerTaskCeiling). Checked when a
+    /// child is created, so lowering it never stops a child that already exists.
+    public func setMaxChildTasksPerTask(_ limit: Int) {
+        maxChildTasksPerTask = min(max(1, limit), Self.maxChildTasksPerTaskCeiling)
+    }
+
+    /// Live workers parked in `wait_for_child_tasks`, as each reports it
+    /// (`AgentActor.publishWaitingOnChildTasksIfChanged`). Only ever read against the live worker
+    /// handles, so an entry left by a worker that has since gone can't count.
+    private var waitingCoordinatorAgentIDs: Set<UUID> = []
+
+    /// Records that a worker started or stopped waiting on its child tasks. A worker that starts
+    /// waiting may be the last live worker still making progress, so the queues are drained: a
+    /// queued child may now start above capacity (`childMayStartAboveCapacity`).
+    func setWorkerWaitingOnChildTasks(agentID: UUID, waiting: Bool) async {
+        if waiting {
+            waitingCoordinatorAgentIDs.insert(agentID)
+            await advanceAfterFreedWorkerSlot()
+        } else {
+            waitingCoordinatorAgentIDs.remove(agentID)
+        }
+    }
+
+    /// Whether a child task may start although every worker slot is taken (user decision
+    /// 2026-10-05: allow one overshoot, so everything always makes forward progress). True only
+    /// when EVERY live worker is a coordinator waiting on its children: then nothing running can
+    /// finish, so no slot would ever free and the waiting coordinators would wait forever. The
+    /// child that starts is not waiting, so the condition is false again until it, too, waits —
+    /// exactly one worker above capacity per level of waiting coordinators.
+    private func childMayStartAboveCapacity() -> Bool {
+        let live = supervisor.handles(role: .brown)
+        return !live.isEmpty && live.allSatisfy { waitingCoordinatorAgentIDs.contains($0.id) }
+    }
+
+    /// Whether a worker may be added for `task` — the ONE admission rule, asked by the start gate
+    /// and by the spawn's own backstop so the two can never disagree: below capacity, or a child
+    /// task while every live worker is waiting on its children.
+    private func admitsWorker(for task: AgentTask?) -> Bool {
+        if supervisor.handles(role: .brown).count < maxConcurrentWorkers { return true }
+        return task?.coordinatorTaskID != nil && childMayStartAboveCapacity()
+    }
+
     /// Live worker count vs. capacity — the slot arithmetic tools and UI gate on.
     public func workerSlots() -> (live: Int, capacity: Int) {
         (supervisor.handles(role: .brown).count, maxConcurrentWorkers)
@@ -1341,7 +1390,7 @@ public actor OrchestrationRuntime {
         switch origin {
         case .scheduled:
             await reportScheduledRunRefused(taskID: taskID, title: task.title, reason: reason)
-        case .smithTool, .watchSatisfied:
+        case .smithTool, .coordinatorTool, .watchSatisfied:
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Did not start \"\(task.title)\": \(reason).",
@@ -1523,15 +1572,9 @@ public actor OrchestrationRuntime {
     private func deliver(_ ready: ReadyTaskEffect, via broker: NotificationBroker) async -> Bool {
         switch ready.record.effect {
         case .smithBriefing(let note):
-            let trigger = TriggerSource.taskTransition(taskID: ready.taskID, statusRevision: ready.record.transition.statusRevision)
-            return await broker.submit(AgentNotification(
-                id: NotificationID(namespace: trigger.namespace, key: ready.record.id),
-                triggerSource: trigger,
-                recipient: .smith,
-                title: "Task \(ready.record.transition.to.displayName)",
-                createdAt: Date(),
-                payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string(note)])
-            ))
+            return await submitSmithBriefing(note, for: ready, via: broker)
+        case .coordinatorBriefing(let coordinatorID, let note):
+            return await deliverCoordinatorBriefing(ready, coordinatorID: coordinatorID, note: note, via: broker)
         case .watchFiring(let watchID, let occurrence):
             guard let task = await taskStore.task(id: ready.taskID),
                   let watch = task.watch(id: watchID),
@@ -1551,6 +1594,53 @@ public actor OrchestrationRuntime {
             }
             return await broker.submit(TaskWatchDelivery.notification(task: task, watch: watch, firing: firing))
         }
+    }
+
+    /// Hands a child task's outcome to its coordinator: to the coordinator's live worker as a
+    /// private message (which wakes it from `wait_for_child_tasks`), or, with no worker running it,
+    /// onto the coordinator's queued worker messages for its next worker. A coordinator that has
+    /// since finished or left the active list hears nothing, so the child's own Smith note goes to
+    /// Smith instead — the outcome is never dropped.
+    private func deliverCoordinatorBriefing(
+        _ ready: ReadyTaskEffect,
+        coordinatorID: UUID,
+        note: String,
+        via broker: NotificationBroker
+    ) async -> Bool {
+        if let coordinator = await taskStore.task(id: coordinatorID),
+           coordinator.disposition == .active, !coordinator.status.isTerminal {
+            if let workerID = await liveWorkerID(taskID: coordinatorID) {
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    recipientID: workerID,
+                    recipient: .agent(.brown),
+                    content: note,
+                    metadata: ["messageKind": .kind(.childTaskOutcome), "childTaskID": .string(ready.taskID.uuidString)],
+                    taskID: coordinatorID
+                ))
+                return true
+            }
+            if await taskStore.enqueueWorkerMessage(taskID: coordinatorID, message: QueuedWorkerMessage(text: note)) {
+                return true
+            }
+        }
+        guard let child = await taskStore.task(id: ready.taskID),
+              let smithNote = SmithTaskBriefing.note(for: ready.record.transition, task: child) else { return true }
+        return await submitSmithBriefing(smithNote, for: ready, via: broker)
+    }
+
+    /// Submits a task-transition note to Smith's durable queue, identified by the effect record so
+    /// a resubmission dedups.
+    private func submitSmithBriefing(_ note: String, for ready: ReadyTaskEffect, via broker: NotificationBroker) async -> Bool {
+        let trigger = TriggerSource.taskTransition(taskID: ready.taskID, statusRevision: ready.record.transition.statusRevision)
+        return await broker.submit(AgentNotification(
+            id: NotificationID(namespace: trigger.namespace, key: ready.record.id),
+            triggerSource: trigger,
+            recipient: .smith,
+            title: "Task \(ready.record.transition.to.displayName)",
+            createdAt: Date(),
+            payload: Payload(type: KnownNotificationType.taskBriefing.rawValue, data: ["note": .string(note)])
+        ))
     }
 
     /// Re-drives effect delivery after a failed or pending task write. A later mutation's successful
@@ -1722,12 +1812,11 @@ public actor OrchestrationRuntime {
     /// interrupt from a mid-session Stop is never auto-resumed here; it waits for the next
     /// launch. Governed by `autoRunInterruptedTasks`.
     private func drainPendingTaskQueue() async {
-        // Two queues share the pool: the launch-scoped interrupted-resume queue
-        // (autoRunInterruptedTasks) and pending auto-advance (autoAdvanceEnabled). Run if
-        // either could place work.
-        guard autoAdvanceEnabled
-                || (autoRunInterruptedTasks && !launchResumeQueue.isEmpty)
-                || !capacityDeferredQueue.isEmpty else { return }
+        // The queues that share the pool: capacity-deferred work, child tasks queued for a
+        // coordinator, the launch-scoped interrupted-resume queue (autoRunInterruptedTasks) and
+        // pending auto-advance (autoAdvanceEnabled). Children are not gated on the auto-run setting:
+        // a coordinator is waiting on them, so starting them is a commitment, like a deferred
+        // scheduled run. Whether any are queued is only known from the task list below.
         guard !isDrainingTaskQueues else { drainRequestedWhileBusy = true; return }
         isDrainingTaskQueues = true
         defer { isDrainingTaskQueues = false }
@@ -1745,9 +1834,21 @@ public actor OrchestrationRuntime {
         // the free-slot count instead. A modest overshoot from a racing start elsewhere
         // is safe: performStartTaskWithLiveSmith's serialized gate re-pends the loser.
         let freeSlots = maxConcurrentWorkers - supervisor.handles(role: .brown).count
-        guard freeSlots > 0 else { return }
+        // With every slot taken, only a coordinator's child may start, and only when every live
+        // worker is a coordinator waiting on its children (`childMayStartAboveCapacity`).
+        let startsAboveCapacity = freeSlots <= 0 && childMayStartAboveCapacity()
+        guard freeSlots > 0 || startsAboveCapacity else { return }
         let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
         let byID = Dictionary(activeTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // Children whose coordinator is still active, oldest first. A child whose coordinator is
+        // gone is ordinary pending work, left to auto-advance like any other.
+        let queuedChildren = activeTasks
+            .filter { task in
+                guard task.status == .pending, !task.isTemplate, let coordinatorID = task.coordinatorTaskID,
+                      let coordinator = byID[coordinatorID] else { return false }
+                return !coordinator.status.isTerminal
+            }
+            .sorted { $0.createdAt < $1.createdAt }
 
         // Prune the resume queue to IDs still present AND still interrupted (a task that
         // completed, was manually run, or was archived drops off).
@@ -1758,11 +1859,15 @@ public actor OrchestrationRuntime {
         // (never-started) work; each oldest-first. `restartForNewTask` resumes an interrupted
         // task WITH its prior context (the briefing draws on task.updates), so nothing is lost.
         // Capacity-deferred work first: it was already running before the user shrank the pool.
-        var runnable: [(task: AgentTask, origin: TaskStartOrigin)] = capacityDeferredQueue.compactMap { byID[$0] }.map { ($0, .capacityResume) }
-        if autoRunInterruptedTasks {
+        var runnable: [(task: AgentTask, origin: TaskStartOrigin)] = startsAboveCapacity
+            ? []
+            : capacityDeferredQueue.compactMap { byID[$0] }.map { ($0, .capacityResume) }
+        runnable += queuedChildren.map { ($0, .coordinatorTool) }
+        // Above capacity only a child may start, so nothing else is considered then.
+        if autoRunInterruptedTasks && !startsAboveCapacity {
             runnable += launchResumeQueue.compactMap { byID[$0] }.map { ($0, .launchResume) }
         }
-        if autoAdvanceEnabled {
+        if autoAdvanceEnabled && !startsAboveCapacity {
             // Templates are `.pending` launchers, not queued work — they start only on an
             // EXPLICIT action (run_task, the play button, a scheduled/recurring wake), never
             // by auto-advance. Without this exclusion the drain would clone-and-run every
@@ -1776,7 +1881,7 @@ public actor OrchestrationRuntime {
         // start is never picked up automatically (only its watch, or the user's Play, starts it).
         var queued: Set<UUID> = []
         runnable = runnable.filter { $0.task.startHolds.isEmpty && queued.insert($0.task.id).inserted }
-        let toStart = Array(runnable.prefix(freeSlots))
+        let toStart = Array(runnable.prefix(startsAboveCapacity ? 1 : freeSlots))
         // Drop resumed IDs from the queue immediately, so a later mid-session Stop of the same
         // task can't put it back on the auto-resume path.
         let startedIDs = Set(toStart.map(\.task.id))
@@ -1826,6 +1931,23 @@ public actor OrchestrationRuntime {
                 the description. If you find you cannot do something the task needs, use `request_help` \
                 and say what you need to be able to do — not which tool you want.
                 \(capabilities)
+                """)
+        }
+        if let coordinatorID = task.coordinatorTaskID, let coordinator = await taskStore.taskAnyDisposition(id: coordinatorID) {
+            parts.append("""
+                ## Coordinating task
+                This is a child task, created by the worker on "\(coordinator.title)" (ID: \(coordinatorID.uuidString)). \
+                Your outcome is reported to that worker. Work and finish exactly as for any task.
+                """)
+        }
+        // A respawned coordinator lost its conversation; the list is how it knows what it started.
+        let children = await taskStore.childTasks(ofCoordinator: task.id)
+        if !children.isEmpty {
+            parts.append("""
+                ## Your child tasks
+                Child tasks this task created (`create_child_task`). Each one's outcome is delivered to you; \
+                call `wait_for_child_tasks` when you have nothing else to do until they finish.
+                \(WaitForChildTasksTool.summary(of: children))
                 """)
         }
         if !task.descriptionAttachments.isEmpty {
@@ -2780,7 +2902,12 @@ public actor OrchestrationRuntime {
             ) else {
                 return
             }
-            if await self.hasLiveSmith() {
+            // A child task's start must never take the cold path below: it stops every worker,
+            // the coordinator that is waiting on this child included. That path exists to bring
+            // Smith up, which a child's start does not need.
+            var startsWithoutColdPath = origin == .coordinatorTool
+            if !startsWithoutColdPath { startsWithoutColdPath = await self.hasLiveSmith() }
+            if startsWithoutColdPath {
                 await self.performStartTaskWithLiveSmith(taskID: startID)
                 return
             }
@@ -2916,7 +3043,7 @@ public actor OrchestrationRuntime {
         // the loser's task stranded). This runs on the lifecycle queue, where all spawns
         // and terminations serialize — the loser is PENDED, never failed and never
         // evicting anyone; the auto-advance drain starts it when a slot frees.
-        if supervisor.handles(role: .brown).count >= maxConcurrentWorkers {
+        if !admitsWorker(for: task) {
             // Revert only OUR claim: a wake can flip this `.starting` task to `.paused` during the
             // idle-worker cycling above, and an unconditional `.pending` would clobber that pause and
             // let the auto-advance drain run a task that was meant to stay paused. If the CAS loses,
@@ -4405,7 +4532,7 @@ public actor OrchestrationRuntime {
                 _ = await performTerminateAgent(id: worker.id)
             }
         }
-        guard supervisor.handles(role: .brown).count < maxConcurrentWorkers else {
+        guard admitsWorker(for: task) else {
             stopLogger.notice("spawnBrown refused — worker capacity \(self.maxConcurrentWorkers, privacy: .public) reached")
             return nil
         }
@@ -4727,6 +4854,7 @@ public actor OrchestrationRuntime {
         }
         // A worker was removed — refresh the concurrency meter's Brown count.
         refreshBrownWorkerActivityCount()
+        waitingCoordinatorAgentIDs.remove(handle.id)
         let agent = handle.agent
         let agentRole: AgentRole? = handle.role
         let evaluator = handle.evaluator
@@ -5140,6 +5268,15 @@ public actor OrchestrationRuntime {
                 guard let self else { return }
                 await self.restartForNewTask(taskID: taskID, amendment: amendment, origin: .smithTool)
             },
+            startChildTask: { [weak self] taskID in
+                await self?.restartForNewTask(taskID: taskID, origin: .coordinatorTool)
+            },
+            setWaitingOnChildTasks: { [weak self] waiting in
+                await self?.setWorkerWaitingOnChildTasks(agentID: agentID, waiting: waiting)
+            },
+            maxChildTasksPerTask: { [weak self] in
+                await self?.maxChildTasksPerTask ?? Self.defaultMaxChildTasksPerTask
+            },
             currentResumingTaskID: currentResumingTaskID,
             memoryStore: memoryStore,
             summarizeCompletedTask: { [weak self] taskID in
@@ -5305,6 +5442,7 @@ Message:
         guard let handle = supervisor.remove(id: id) else { return }
         // A worker was removed — refresh the concurrency meter's Brown count.
         refreshBrownWorkerActivityCount()
+        waitingCoordinatorAgentIDs.remove(handle.id)
         let agent = handle.agent
         let role: AgentRole? = handle.role
         let evaluator = handle.evaluator

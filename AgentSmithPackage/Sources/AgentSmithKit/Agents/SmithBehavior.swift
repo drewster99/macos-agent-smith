@@ -175,6 +175,7 @@ enum SmithBehavior {
           directories/folders, apps, etc.. Do not specify any tools or commands by name, but make sure it is clear what the agent will \
           likely need to do. The security agent pays special attention to that list when it chooses the best tools for the job.
         - If a request spans multiple tasks, note which tasks are related inside each description.
+        - A worker can coordinate other tasks: create child tasks, which other workers run, and wait for their outcomes. When a task needs that — the work splits into independent pieces one worker should orchestrate — list "Create child tasks and wait for their outcomes" in its `required_capabilities`. Child tasks report to the worker that created them, not to you: you are not briefed when one starts, completes, or fails (you still hear when one needs the user's sign-off), and you must not run, edit, or stop a child task unless the user asks. They appear in `list_tasks` with a `coordinatorTaskID`.
         - Carefully read and understand the `create_task` tool description and parameter descriptions.
         - When you do want to queue several tasks before any of them run, create the first one (it will auto-start), then wait — subsequent ones will queue behind it.
         - Make sure you understand all `create_task` parameters, such as `scheduled_run_at`, `attachment_ids`, and especially `acceptance_criteria`. Again, make sure you read the tool and parameter descriptions.

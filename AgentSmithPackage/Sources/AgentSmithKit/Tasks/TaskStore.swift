@@ -1375,6 +1375,61 @@ public actor TaskStore {
         return task
     }
 
+    /// What `addChildTask` did.
+    public enum ChildTaskCreation: Sendable, Equatable {
+        case created(AgentTask)
+        /// The coordinator already created `limit` child tasks.
+        case limitReached(limit: Int)
+        /// The coordinator task is not in this session's active list.
+        case coordinatorNotFound
+    }
+
+    /// Creates a child task of `coordinatorTaskID` — the whole task, criteria and steps included, in
+    /// ONE write. A queued child is started by the runtime's drain whatever the auto-run setting, so
+    /// a child written in stages could start before its contract or plan landed.
+    ///
+    /// Refused once the coordinator has created `limit` children, counting every child it ever
+    /// created (finished and archived ones too). The active-list count and the insert happen with no
+    /// suspension between them, so two concurrent calls can't both slip under the limit.
+    public func addChildTask(
+        coordinatorTaskID: UUID,
+        limit: Int,
+        title: String,
+        description: String,
+        descriptionAttachments: [Attachment],
+        acceptanceCriteria: [AcceptanceCriterion],
+        steps: [TaskStep],
+        requiredCapabilities: [RequiredCapability]
+    ) async -> ChildTaskCreation {
+        await autoArchiveStaleCompletedIfEnabled()
+        let archivedChildren = await allInactiveTasks().filter { $0.coordinatorTaskID == coordinatorTaskID }.count
+        guard tasks[coordinatorTaskID] != nil else { return .coordinatorNotFound }
+        let activeChildren = tasks.values.filter { $0.coordinatorTaskID == coordinatorTaskID }.count
+        guard archivedChildren + activeChildren < limit else { return .limitReached(limit: limit) }
+        let task = AgentTask(
+            title: title,
+            description: description,
+            status: .pending,
+            descriptionAttachments: descriptionAttachments,
+            acceptanceCriteria: acceptanceCriteria,
+            steps: steps,
+            coordinatorTaskID: coordinatorTaskID,
+            sessionID: sessionID,
+            requiredCapabilities: requiredCapabilities
+        )
+        tasks[task.id] = task
+        didMutate()
+        return .created(task)
+    }
+
+    /// The child tasks `coordinatorTaskID` created that are in this session's active list, oldest
+    /// first.
+    public func childTasks(ofCoordinator coordinatorTaskID: UUID) -> [AgentTask] {
+        tasks.values
+            .filter { $0.coordinatorTaskID == coordinatorTaskID }
+            .sorted { $0.createdAt < $1.createdAt }
+    }
+
     /// Promotes a `.scheduled` task to `.pending` so the queue (or `run_task`) can pick it up.
     /// No-op when the task is missing, already non-`.scheduled`, or has a future scheduledRunAt
     /// the caller didn't ask to bypass.
@@ -1572,9 +1627,21 @@ public actor TaskStore {
             cause: cause
         )
         // The durable subscribers record their effects in THIS write, so the status and its effects
-        // reach disk together.
-        if let note = SmithTaskBriefing.note(for: transition, task: task) {
+        // reach disk together. A child task's outcome goes to its coordinator while the coordinator
+        // is active, and the routine Smith notes it replaces are not written at all.
+        let activeCoordinatorID = task.coordinatorTaskID.flatMap { id in
+            tasks[id].map { $0.disposition == .active && !$0.status.isTerminal } == true ? id : nil
+        }
+        if let note = SmithTaskBriefing.note(for: transition, task: task),
+           !(activeCoordinatorID != nil && CoordinatorTaskBriefing.replacesSmithBriefing(cause)) {
             task.pendingEffects.append(TaskEffectRecord(transition: transition, effect: .smithBriefing(note: note), release: effectRelease))
+        }
+        if let coordinatorID = activeCoordinatorID, let note = CoordinatorTaskBriefing.note(for: transition, task: task) {
+            task.pendingEffects.append(TaskEffectRecord(
+                transition: transition,
+                effect: .coordinatorBriefing(coordinatorTaskID: coordinatorID, note: note),
+                release: effectRelease
+            ))
         }
         if let trigger = TaskWatchTrigger(transition: transition) {
             for index in task.watches.indices where task.watches[index].isActive && task.watches[index].triggers.contains(trigger) {

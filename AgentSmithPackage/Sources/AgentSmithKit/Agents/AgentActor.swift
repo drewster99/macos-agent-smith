@@ -437,10 +437,15 @@ public actor AgentActor {
     /// that are sent with each API call but not stored in conversationHistory.
     private let apiOverheadChars: Int
 
-    /// When true, the agent has called `task_complete` and is waiting for Smith's review.
-    /// While set, `drainPendingMessages` will not re-wake the agent unless a private message
-    /// addressed to it arrives (indicating Smith sent revision feedback).
-    private var awaitingTaskReview = false
+    /// Why a worker's run loop is parked, or nil when it is not. A parked worker takes no turn, gets
+    /// no tools and no nudges; `drainPendingMessages` un-parks it only for a message that hands work
+    /// back (`resumesParkedWorker`). The reason matters to the runtime, not to the park itself:
+    /// a worker waiting on its child tasks is what lets a queued child start above capacity.
+    private var park: WorkerPark?
+    /// Whether the agent is parked — the one question every gate asks.
+    private var isParked: Bool { park != nil }
+    /// The waiting-on-child-tasks state last reported to the runtime, so a change is reported once.
+    private var publishedWaitingOnChildTasks = false
 
     /// Messages held back from the current drain to be delivered on a separate turn.
     /// Used to ensure task_complete messages get their own focused LLM turn.
@@ -1569,6 +1574,7 @@ public actor AgentActor {
             // any channel message that raced in, so it stays Brown's first context entry.
             drainPendingInjectedMessages()
             drainPendingMessages()
+            await publishWaitingOnChildTasksIfChanged()
             await drainQueuedNotifications()
             checkBrownSilenceNudge()
             await checkSmithDigest()
@@ -1631,12 +1637,12 @@ public actor AgentActor {
                 // Defense-in-depth: while Brown is awaiting review, hand him an empty
                 // tool list regardless of per-tool `isAvailable`. The `drainPendingMessages`
                 // gate and the silence-nudge guard above should prevent us from reaching
-                // this point with `awaitingTaskReview == true`, but if any other wake
+                // this point while parked, but if any other wake
                 // source slips through (a stray scheduled wake, a future feature, a bug),
                 // Brown's LLM turn produces nothing he can act on.
                 await refreshActiveTools()
                 let toolDefinitions: [LLMToolDefinition]
-                if configuration.role == .brown && awaitingTaskReview {
+                if configuration.role == .brown && isParked {
                     toolDefinitions = []
                 } else {
                     toolDefinitions = activeTools
@@ -2341,13 +2347,13 @@ public actor AgentActor {
             // forward progress. Past that the worker is narrating in place, and the honest
             // answer to "nothing left to do" is to idle, not to be nudged again.
             //
-            // A PARKED worker is never nudged, no matter how it got woken. `awaitingTaskReview`
-            // means the work is submitted and control belongs to the validator; the run loop
+            // A PARKED worker is never nudged, no matter how it got woken. A park means control
+            // belongs to someone else (validator, Smith, or the worker's child tasks); the run loop
             // hands a parked Brown an EMPTY tool list (see the `toolDefinitions` override), so
             // "Continue. Use your tools to make progress" asks for something it structurally
             // cannot do — every such turn is guaranteed to come back as text and buy nothing.
             // Idling is the correct response, and it costs one wasted turn instead of ten.
-            if configuration.role == .brown && hasText && !awaitingTaskReview {
+            if configuration.role == .brown && hasText && !isParked {
                 continuationNudgesSinceProgress += 1
                 if continuationNudgesSinceProgress >= Self.maxContinuationNudgesSinceProgress {
                     await toolContext.post(ChannelMessage(
@@ -2426,6 +2432,8 @@ public actor AgentActor {
 
         var sentMessage = false
         var calledTaskComplete = false
+        // Set when `wait_for_child_tasks` succeeded; the worker parks once the batch is done.
+        var startedWaitingForChildTasks = false
         // Set when a tool's declared effect restarts the runtime; the loop must then stop.
         var triggeredRuntimeRestart = false
 
@@ -2493,7 +2501,7 @@ public actor AgentActor {
                         recordToolOutcome(name: call.name, succeeded: false, output: result)
                     }
                     answeredPositions.insert(segment.positions[offset])
-                    updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, triggeredRuntimeRestart: &triggeredRuntimeRestart)
+                    updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, startedWaitingForChildTasks: &startedWaitingForChildTasks, triggeredRuntimeRestart: &triggeredRuntimeRestart)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
                     if calledTaskComplete { break toolSegments }
@@ -2744,7 +2752,7 @@ public actor AgentActor {
                         recordToolOutcome(name: call.name, succeeded: false, output: result)
                     }
                     answeredPositions.insert(segment.positions[batchIndex])
-                    updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, triggeredRuntimeRestart: &triggeredRuntimeRestart)
+                    updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, startedWaitingForChildTasks: &startedWaitingForChildTasks, triggeredRuntimeRestart: &triggeredRuntimeRestart)
                     conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
                     pushLiveContext()
                     // Mirrors the lifecycle branch: once control has been handed off, nothing
@@ -2843,11 +2851,19 @@ public actor AgentActor {
         }
 
         // After completing a task (task_complete) OR escalating a blocker (request_help), stop and
-        // wait for Smith — `awaitingTaskReview` means "parked, waiting on Smith" for both. Reset
+        // wait for Smith — `.awaitingHandoff` means "parked, waiting on Smith" for both. Reset
         // when Smith's private reply (review_work feedback / provide_help) reaches Brown.
         // This takes priority over the sentMessage check since both tools also post a message.
         if calledTaskComplete {
-            awaitingTaskReview = true
+            park = .awaitingHandoff
+            hasUnprocessedInput = false
+            return
+        }
+
+        // `wait_for_child_tasks`: park until a child's outcome arrives. The task stays running.
+        if startedWaitingForChildTasks {
+            park = .awaitingChildTasks
+            await publishWaitingOnChildTasksIfChanged()
             hasUnprocessedInput = false
             return
         }
@@ -3248,15 +3264,15 @@ public actor AgentActor {
     /// rejected call as a failure on the shared tracker so a retry isn't flagged as a
     /// duplicate of a successful operation.
     private func rejectionResultIfUnavailable(_ call: LLMToolCall, tool: any AgentTool) async -> String? {
-        // Mirror the awaitingTaskReview override at the toolDefinitions filter site:
-        // while Brown is awaiting review, no tool may execute, regardless of per-tool
+        // Mirror the parked override at the toolDefinitions filter site:
+        // while Brown is parked, no tool may execute, regardless of per-tool
         // `isAvailable`. Without this branch, a stale tool call enqueued before the
         // state flipped — or a future code path that hands Brown a tool list anyway —
         // could still reach `directExecute`.
-        if configuration.role == .brown && awaitingTaskReview {
-            Self.agentLogger.warning("Tool '\(call.name, privacy: .public)' rejected at execution time — Brown is awaitingTaskReview")
+        if configuration.role == .brown, let park {
+            Self.agentLogger.warning("Tool '\(call.name, privacy: .public)' rejected at execution time — Brown is parked")
             await toolContext.setToolExecutionStatus(call.id, false)
-            return "Tool '\(call.name)' is not available — task is awaiting review."
+            return "Tool '\(call.name)' is not available — you are parked \(park.waitingFor) and take no action until it ends."
         }
         let context = await currentAvailabilityContext()
         if tool.isAvailable(in: context) { return nil }
@@ -3626,7 +3642,7 @@ public actor AgentActor {
         .validationBlockedWorkerNotice
     ]
 
-    /// Whether `message` should pull a parked worker (`awaitingTaskReview`) into a new LLM turn.
+    /// Whether `message` should pull a parked worker (`park`) into a new LLM turn.
     ///
     /// Addressing alone is not sufficient, and assuming it was cost 19 minutes of spin on
     /// 2026-07-27: a worker submitted correctly, parked, and in the SAME millisecond received
@@ -3636,8 +3652,13 @@ public actor AgentActor {
     /// agent it was sent to quiet. The notice had also just forbidden the only two tools that
     /// re-park (`task_complete`, `request_help`), so the worker had no way back to idle and
     /// narrated until a circuit breaker terminated it.
-    static func resumesParkedWorker(_ message: ChannelMessage, agentID: UUID) -> Bool {
+    ///
+    /// `park` is why the worker is parked. A child task's outcome resumes only a worker waiting on
+    /// its children: a coordinator that already submitted its own work (`.awaitingHandoff`) must
+    /// not be pulled back into a turn by a child finishing — the outcome stays in its history.
+    static func resumesParkedWorker(_ message: ChannelMessage, agentID: UUID, park: WorkerPark) -> Bool {
         guard message.recipientID == agentID else { return false }
+        if message.kind == .childTaskOutcome { return park == .awaitingChildTasks }
         // No kind is a POSITIVE answer here, not a fallback: "addressed to this worker and not
         // on the exemption list" IS the rule, and an unkinded message satisfies it. The private
         // work-handing messages are kinded (`orchestratorMessage` for notify_brown,
@@ -3660,6 +3681,7 @@ public actor AgentActor {
         succeeded: Bool,
         sentMessage: inout Bool,
         calledTaskComplete: inout Bool,
+        startedWaitingForChildTasks: inout Bool,
         triggeredRuntimeRestart: inout Bool
     ) {
         let effects: Set<ToolEffect> = succeeded ? (tool?.successEffects ?? []) : []
@@ -3669,6 +3691,7 @@ public actor AgentActor {
         // tool's domain outcome rather than parsing its human-facing response text.
         if Self.shouldParkAfterLifecycleTool(named: call.name, succeeded: succeeded) { calledTaskComplete = true }
         if effects.contains(.triggeredRuntimeRestart) { triggeredRuntimeRestart = true }
+        if effects.contains(.waitsForChildTasks) { startedWaitingForChildTasks = true }
 
         if configuration.role == .brown {
             if effects.contains(.reportedTaskProgress) {
@@ -3692,8 +3715,8 @@ public actor AgentActor {
         // `hasUnprocessedInput = true` directly, waking Brown to resume work he's
         // already submitted for review (observed in session BB94BA9C — Brown's
         // 15-minute hard-ceiling nudge fired at 19:08 and he started running
-        // xcodebuild + file reads despite already being in awaitingTaskReview).
-        guard !awaitingTaskReview else { return }
+        // xcodebuild + file reads despite already being parked awaiting review).
+        guard !isParked else { return }
         guard let last = lastTaskCommunicationAt else { return }
         let elapsed = Date().timeIntervalSince(last)
         let drifting = elapsed >= Self.brownSilenceNudgeMinSeconds
@@ -3793,7 +3816,7 @@ public actor AgentActor {
             return
         }
         guard now.timeIntervalSince(last) >= Self.smithDigestIntervalSeconds else { return }
-        guard !awaitingTaskReview else {
+        guard !isParked else {
             // Skip during review — Smith is actively reading Brown's deliverable.
             lastSmithDigestAt = now
             return
@@ -3987,6 +4010,16 @@ public actor AgentActor {
         return lines.joined(separator: "\n")
     }
 
+    /// Tells the runtime when this worker starts or stops waiting on its child tasks. The runtime
+    /// keeps the only cross-worker view of it: a child may start above capacity only while every
+    /// live worker is a coordinator waiting on its children.
+    private func publishWaitingOnChildTasksIfChanged() async {
+        let waiting = park == .awaitingChildTasks
+        guard waiting != publishedWaitingOnChildTasks else { return }
+        publishedWaitingOnChildTasks = waiting
+        await toolContext.setWaitingOnChildTasks(waiting)
+    }
+
     private func drainPendingMessages() {
         // Drain when there's anything to drain — pending channel messages OR attachments
         // staged via `attach_file` (which arrive with no associated channel message
@@ -3997,12 +4030,12 @@ public actor AgentActor {
         // arrived (revision feedback, an amended task, Smith poking the worker directly).
         // Everything else — system banners, public notifications, and the park notice itself —
         // still drains into history but doesn't trigger a new LLM call.
-        if awaitingTaskReview {
+        if let park {
             let hasResumeMessage = pendingChannelMessages.contains {
-                Self.resumesParkedWorker($0, agentID: id)
+                Self.resumesParkedWorker($0, agentID: id, park: park)
             }
             if hasResumeMessage {
-                awaitingTaskReview = false
+                self.park = nil
                 hasUnprocessedInput = true
                 continuationNudgesSinceProgress = 0
             }
@@ -4895,4 +4928,22 @@ public actor AgentActor {
         return "\(time.string(from: date)) on \(day.string(from: date))"
     }
 
+}
+
+/// Why a worker's run loop is parked (`AgentActor.park`). Either way the worker takes no turn
+/// until a message hands work back; the reason is what the runtime and the worker's own messages
+/// distinguish.
+enum WorkerPark: Sendable, Equatable {
+    /// `task_complete` or `request_help`: control belongs to validation or to Smith.
+    case awaitingHandoff
+    /// `wait_for_child_tasks`: waiting on child tasks this worker created. Its task stays running.
+    case awaitingChildTasks
+
+    /// Completes "you are parked …" in a refusal the worker reads.
+    var waitingFor: String {
+        switch self {
+        case .awaitingHandoff: return "waiting on review or Smith's answer"
+        case .awaitingChildTasks: return "waiting on your child tasks"
+        }
+    }
 }

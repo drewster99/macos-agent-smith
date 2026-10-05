@@ -8,6 +8,10 @@ public enum TaskStartOrigin: Codable, Sendable, Equatable {
     case explicitUser
     /// Smith's `run_task` or `create_task`.
     case smithTool
+    /// A coordinator task's worker created this child task (`create_child_task`), or the runtime
+    /// started a queued child for it. Never takes the cold start path, which would stop every
+    /// worker — the coordinator's included.
+    case coordinatorTool
     /// A scheduled run fired.
     case scheduled
     /// "Auto-run next task" filled a free worker slot.

@@ -33,6 +33,9 @@ public enum TaskEffect: Codable, Sendable, Equatable {
     case smithBriefing(note: String)
     /// Carry out one firing of a task watch.
     case watchFiring(watchID: UUID, occurrence: Int)
+    /// Tell the worker of the coordinator task that created this child how it turned out
+    /// (`CoordinatorTaskBriefing`).
+    case coordinatorBriefing(coordinatorTaskID: UUID, note: String)
 
     /// The subscriber that produced the effect — part of the effect's identity, so one transition
     /// can carry one effect per subscriber.
@@ -40,6 +43,7 @@ public enum TaskEffect: Codable, Sendable, Equatable {
         switch self {
         case .smithBriefing: return "smithBriefing"
         case .watchFiring(let watchID, _): return "watch-\(watchID.uuidString)"
+        case .coordinatorBriefing: return "coordinatorBriefing"
         }
     }
 }
