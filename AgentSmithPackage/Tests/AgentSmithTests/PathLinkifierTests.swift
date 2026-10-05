@@ -257,6 +257,144 @@ struct PathLinkifierTests {
         #expect(PathLinkifier.linkify(input) == input)
     }
 
+    // MARK: - Paths containing spaces and other non-token characters
+
+    /// Creates a fresh temp directory and, under it, every relative path in `files`
+    /// (intermediate directories included) as an empty file. Returns the base URL;
+    /// remove it with `removeTree`.
+    private func makeTree(files: [String], directories: [String] = []) throws -> URL {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-smith-linkifier-\(UUID().uuidString)")
+        for directory in directories {
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent(directory), withIntermediateDirectories: true)
+        }
+        for file in files {
+            let url = base.appendingPathComponent(file)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: url)
+        }
+        return base
+    }
+
+    private func removeTree(_ base: URL) {
+        try? FileManager.default.removeItem(at: base)
+    }
+
+    /// The links a line renders with after linkification, as (visible text, URL) pairs.
+    private func renderedLinks(of markdown: String) throws -> [(text: String, url: URL)] {
+        let parsed = try AttributedString(
+            markdown: markdown,
+            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )
+        return parsed.runs.compactMap { run in
+            run.link.map { (String(parsed[run.range].characters), $0) }
+        }
+    }
+
+    @Test("a path whose directory and file names contain spaces is linked whole")
+    func linkifyPathsWithSpaces() throws {
+        let base = try makeTree(files: ["Application Support/AgentSmith/my report.md"])
+        defer { removeTree(base) }
+        let path = base.path + "/Application Support/AgentSmith/my report.md"
+        let urlString = URL(fileURLWithPath: path).absoluteString
+        #expect(PathLinkifier.linkifyPaths("stored durably at: \(path) for review")
+                == "stored durably at: [\(path)](\(urlString)) for review")
+    }
+
+    @Test("the longest existing name wins over a shorter sibling that is its prefix")
+    func linkifyPathsPrefersLongestExistingComponent() throws {
+        // The live failure: an empty `~/Library/Application` directory existed beside
+        // `Application Support`, so the old token-based match linked the fragment.
+        let base = try makeTree(files: ["Application Support/x.md"], directories: ["Application"])
+        defer { removeTree(base) }
+        let path = base.path + "/Application Support/x.md"
+        let urlString = URL(fileURLWithPath: path).absoluteString
+        #expect(PathLinkifier.linkifyPaths("at \(path)") == "at [\(path)](\(urlString))")
+    }
+
+    @Test("trailing sentence punctuation stays outside a path with spaces")
+    func linkifyPathsWithSpacesAndTrailingPunctuation() throws {
+        let base = try makeTree(files: ["My Folder/final draft.md"])
+        defer { removeTree(base) }
+        let path = base.path + "/My Folder/final draft.md"
+        let urlString = URL(fileURLWithPath: path).absoluteString
+        #expect(PathLinkifier.linkifyPaths("Saved to \(path). Done.")
+                == "Saved to [\(path)](\(urlString)). Done.")
+        #expect(PathLinkifier.linkifyPaths("(see \(path))")
+                == "(see [\(path)](\(urlString)))")
+    }
+
+    @Test("a path that keeps going past what exists links nothing, not a fragment")
+    func linkifyPathsNeverLinksAFragment() throws {
+        let base = try makeTree(files: [], directories: ["With Space"])
+        defer { removeTree(base) }
+        let input = "see \(base.path)/With Space/missing.md now"
+        #expect(PathLinkifier.linkifyPaths(input) == input)
+    }
+
+    @Test("a directory written with its trailing slash keeps the slash in the link")
+    func linkifyPathsKeepsTrailingSlashOfDirectory() throws {
+        let base = try makeTree(files: [], directories: ["With Space"])
+        defer { removeTree(base) }
+        let path = base.path + "/With Space/"
+        let urlString = URL(fileURLWithPath: base.path + "/With Space").absoluteString
+        #expect(PathLinkifier.linkifyPaths("open \(path) next")
+                == "open [\(path)](\(urlString)) next")
+    }
+
+    @Test("a path never extends across a newline")
+    func linkifyPathsStopsAtNewline() throws {
+        let base = try makeTree(files: ["a", "a b"])
+        defer { removeTree(base) }
+        let path = base.path + "/a"
+        let urlString = URL(fileURLWithPath: path).absoluteString
+        #expect(PathLinkifier.linkifyPaths("\(path)\nb") == "[\(path)](\(urlString))\nb")
+    }
+
+    @Test("markdown-significant characters in a path render literally inside one link")
+    func linkifyPathsEscapesMarkdownInLinkText() throws {
+        let name = "a [draft] *v2* _x_ `t` <y>.md"
+        let base = try makeTree(files: [name])
+        defer { removeTree(base) }
+        let path = base.path + "/" + name
+        let links = try renderedLinks(of: PathLinkifier.linkify("see \(path) ok"))
+        #expect(links.count == 1)
+        #expect(links.first?.text == path)
+        #expect(links.first?.url == URL(fileURLWithPath: path))
+    }
+
+    @Test("a bold path still links, with the emphasis delimiters outside the link")
+    func linkifyPathsInsideEmphasis() throws {
+        let base = try makeTree(files: ["two words.md"])
+        defer { removeTree(base) }
+        let path = base.path + "/two words.md"
+        let links = try renderedLinks(of: PathLinkifier.linkify("**\(path)**"))
+        #expect(links.map(\.text) == [path])
+    }
+
+    @Test("two paths with spaces on one line are linked separately")
+    func linkifyTwoPathsWithSpaces() throws {
+        let base = try makeTree(files: ["one a.md", "two b.md"])
+        defer { removeTree(base) }
+        let first = base.path + "/one a.md"
+        let second = base.path + "/two b.md"
+        let links = try renderedLinks(of: PathLinkifier.linkify("\(first) and \(second)"))
+        #expect(links.map(\.text) == [first, second])
+    }
+
+    @Test("a standalone path with spaces links only when it exists")
+    func standaloneLinkTargetWithSpaces() throws {
+        let base = try makeTree(files: ["Application Support/x.md"])
+        defer { removeTree(base) }
+        let path = base.path + "/Application Support/x.md"
+        #expect(PathLinkifier.standaloneLinkTarget(for: path) == URL(fileURLWithPath: path))
+        // A command line looks like a path with spaces; only existence tells them apart.
+        #expect(PathLinkifier.standaloneLinkTarget(for: "/bin/ls -la") == nil)
+        #expect(PathLinkifier.standaloneLinkTarget(for: "/bin/ls\n-la") == nil)
+    }
+
     // MARK: - markdownLinkSpans
 
     @Test("authored link spans are found; escaped and unclosed shapes are not")

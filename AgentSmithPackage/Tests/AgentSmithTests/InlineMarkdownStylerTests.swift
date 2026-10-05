@@ -259,6 +259,23 @@ struct InlineMarkdownStylerTests {
         #expect(plainText(of: line) == "check ls /usr/bin now output")
     }
 
+    @Test("a path with spaces renders as one link, in prose and in a code span")
+    func pathWithSpacesRendersAsOneLink() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-smith-styler-\(UUID().uuidString)")
+        let file = base.appendingPathComponent("Application Support/my report.md")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: file)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        for line in ["stored at \(file.path) now", "stored at `\(file.path)` now"] {
+            let linkRuns = styledRuns(of: line).filter { $0.link != nil }
+            #expect(linkRuns.map(\.text) == [file.path])
+            #expect(linkRuns.first?.link == URL(fileURLWithPath: file.path))
+        }
+    }
+
     @Test("existing path outside a code span is linkified in the same line")
     func pathOutsideCodeSpanIsLinkified() throws {
         let file = try makeTempFile()
