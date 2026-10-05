@@ -35,11 +35,14 @@ public enum PathLinkifier {
     /// path may contain spaces (`~/Library/Application Support/…`), parentheses,
     /// non-ASCII — anything but `/` — so no regex can find its end in prose.
     /// Negative lookbehind excludes: existing markdown link syntax (`[` / `(`),
-    /// URL scheme tails (`:` / `/`), and word-adjacent slashes like `a/b` which
-    /// aren't filesystem paths. The lookahead requires a first component.
+    /// URL scheme tails (`:` / `/`), word-adjacent slashes like `a/b` which
+    /// aren't filesystem paths, JSON-escaped slashes (`\/Users\/me`), which
+    /// otherwise link a bogus `/Users` out of every escaped path in tool output,
+    /// and the slash of a relative path (`./x`, `../usr`), which is not the root.
+    /// The lookahead requires a first component.
     /// `try?` — same rationale as `bareURLRegex`: literal pattern, compile-time correct.
     private static let pathStartRegex = try? NSRegularExpression(
-        pattern: #"(?<![\w/:\[(])(?:~/|/)(?=[^\s/])"#
+        pattern: #"(?<![\w/:\[(\\.])(?:~/|/)(?=[^\s/])"#
     )
 
     /// Characters that end a sentence, close a bracket/quote, or close markdown
@@ -48,7 +51,7 @@ public enum PathLinkifier {
     /// open `/foo/bar.`, and `**/usr/bin**` still links `/usr/bin`).
     private static let trailingPunctuation: Set<Unicode.Scalar> = [
         ".", ",", ";", ":", "!", "?", ")", "]", "}", ">", "'", "\"", "\u{2019}", "\u{201D}",
-        "*", "_", "~", "`",
+        "*", "_", "~", "`", "\u{2026}",
     ]
 
     /// Returns the markdown-link-wrapped form of `text` if (after trimming) the entire
@@ -259,44 +262,73 @@ public enum PathLinkifier {
     /// `NAME_MAX` bytes and a path never exceeds `PATH_MAX`, so a slash in prose
     /// costs at most one existence check per word in the next 255 bytes.
     static func resolvedPathEnd(in text: String, from start: String.Index) -> String.Index? {
+        // Candidate paths are built as `expandedPrefix + text[pathTail..<end]`, so
+        // the tilde is expanded once per path rather than once per existence check.
+        let expandedPrefix: String
+        let pathTail: String.Index
         let firstComponentStart: String.Index
         if text[start...].hasPrefix("~/") {
-            firstComponentStart = text.index(start, offsetBy: 2)
+            expandedPrefix = ("~" as NSString).expandingTildeInPath
+            pathTail = text.index(after: start)
+            firstComponentStart = text.index(after: pathTail)
         } else if text[start] == "/" {
+            expandedPrefix = ""
+            pathTail = start
             firstComponentStart = text.index(after: start)
         } else {
             return nil
         }
 
         let fileManager = FileManager.default
-        var resolvedEnd: String.Index?
+        // The home directory itself is a meaningful target ("find ~/. -type f"), so
+        // a `~/` path starts out resolved to it; the root is not, because a bare `/`
+        // in prose is almost never a reference to the root directory.
+        var resolvedEnd: String.Index? = expandedPrefix.isEmpty ? nil : pathTail
         var componentStart = firstComponentStart
         walk: while componentStart < text.endIndex {
             var componentEnds: [String.Index] = []
             var componentBytes = 0
+            // Only the FIRST token terminator in each space-separated word is a
+            // candidate end — that is where the token matcher ended a path. Every
+            // later one ("a","b","c" in JSON) would cost an existence check for a
+            // name no one wrote; a name that really contains them still ends at a
+            // prose boundary, which is always a candidate.
+            var wordHasTerminatorCandidate = false
+            // Carried forward rather than re-read: every `String` subscript and
+            // `index(before:)` re-runs grapheme breaking, and this loop runs for
+            // every slash in every rendered line.
+            var previous: Character?
             var i = componentStart
             scan: while true {
-                let atLimit = i == text.endIndex || text[i] == "/"
-                    || (text[i].isWhitespace && text[i] != " ")
-                if i > componentStart, !text[text.index(before: i)].isWhitespace,
-                   atLimit || isPathEndBoundary(at: i, in: text) {
-                    componentEnds.append(i)
+                let character: Character? = i < text.endIndex ? text[i] : nil
+                let atLimit = character.map { $0 == "/" || ($0.isWhitespace && $0 != " ") } ?? true
+                if let previous, !previous.isWhitespace {
+                    if atLimit || isProseBoundary(at: i, in: text) {
+                        componentEnds.append(i)
+                    } else if !wordHasTerminatorCandidate, let character, isTokenTerminator(character) {
+                        componentEnds.append(i)
+                        wordHasTerminatorCandidate = true
+                    }
                 }
-                if atLimit { break scan }
-                componentBytes += text[i].utf8.count
+                guard !atLimit, let character else { break scan }
+                if character == " " { wordHasTerminatorCandidate = false }
+                componentBytes += character.utf8.count
                 if componentBytes > Int(NAME_MAX) { break scan }
+                previous = character
                 i = text.index(after: i)
             }
 
             var resolvedComponent: (end: String.Index, isDirectory: Bool)?
             for end in componentEnds.reversed() {
-                let candidate = String(text[start..<end])
+                // Every directory contains ".", so "see /tmp/." would otherwise link
+                // the sentence's period. Only "./" mid-path means the directory.
+                if text[componentStart..<end] == ".", end == text.endIndex || text[end] != "/" {
+                    continue
+                }
+                let candidate = expandedPrefix + text[pathTail..<end]
                 guard candidate.utf8.count <= Int(PATH_MAX) else { continue }
                 var isDirectory: ObjCBool = false
-                if fileManager.fileExists(
-                    atPath: (candidate as NSString).expandingTildeInPath,
-                    isDirectory: &isDirectory
-                ) {
+                if fileManager.fileExists(atPath: candidate, isDirectory: &isDirectory) {
                     resolvedComponent = (end, isDirectory.boolValue)
                     break
                 }
@@ -323,17 +355,24 @@ public enum PathLinkifier {
     /// Where a path may end: a prose boundary, or a character the token-based
     /// matcher this resolver replaced already treated as ending a path — the `:` of
     /// `File.swift:42`, the `#` of `page.html#top`, `(`, `@`, non-ASCII. Keeping
-    /// those means the paths that matcher linked still link; what the filesystem
-    /// walk adds is paths containing spaces (and, via the longest-first search,
-    /// names containing those characters).
+    /// those means a path that matcher linked IN FULL still links; what the
+    /// filesystem walk adds is paths containing spaces (and, via the longest-first
+    /// search, names containing those characters). What it drops is the matcher's
+    /// fragments of a longer path ("node_modules/" of a truncated
+    /// "node_modules/@jest/so…"), by the no-fragment rule above.
     private static func isPathEndBoundary(at index: String.Index, in text: String) -> Bool {
         if isProseBoundary(at: index, in: text) { return true }
         // Not a prose boundary, so `index` is not `endIndex`.
-        let character = text[index]
-        let continuesLegacyToken = character == "/" || character == "." || character == "_"
+        return isTokenTerminator(text[index])
+    }
+
+    /// A non-whitespace character outside the token matcher's path alphabet
+    /// (`[A-Za-z0-9._/~-]`).
+    private static func isTokenTerminator(_ character: Character) -> Bool {
+        let continuesToken = character == "/" || character == "." || character == "_"
             || character == "~" || character == "-"
             || (character.isASCII && (character.isLetter || character.isNumber))
-        return !continuesLegacyToken
+        return !continuesToken && !character.isWhitespace
     }
 
     /// True when the text from `index` on is whitespace, end of text, or a run of

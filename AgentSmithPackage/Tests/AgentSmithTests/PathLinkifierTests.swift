@@ -409,6 +409,46 @@ struct PathLinkifierTests {
         #expect(links.map(\.text) == [path])
     }
 
+    @Test("an ellipsis ending a truncated line stays outside the link")
+    func linkifyPathsBeforeEllipsis() throws {
+        let base = try makeTree(files: [], directories: ["Photo Calorie"])
+        defer { removeTree(base) }
+        let path = base.path + "/Photo Calorie"
+        let urlString = URL(fileURLWithPath: path).absoluteString
+        #expect(PathLinkifier.linkifyPaths("\(path).\u{2026} (21626 more characters)")
+                == "[\(path)](\(urlString)).\u{2026} (21626 more characters)")
+    }
+
+    @Test("a period after a directory's trailing slash is the sentence's, not the directory '.'")
+    func linkifyPathsDoesNotLinkTrailingDotComponent() throws {
+        let base = try makeTree(files: [], directories: ["My Dir"])
+        defer { removeTree(base) }
+        let path = base.path + "/My Dir/"
+        let urlString = URL(fileURLWithPath: base.path + "/My Dir").absoluteString
+        #expect(PathLinkifier.linkifyPaths("It is in \(path).") == "It is in [\(path)](\(urlString)).")
+    }
+
+    @Test("the home directory written as ~/. links ~/ with the dot outside")
+    func linkifyPathsHomeDirectoryDot() {
+        let home = URL(fileURLWithPath: ("~" as NSString).expandingTildeInPath).absoluteString
+        #expect(PathLinkifier.linkifyPaths("find ~/. -type f") == "find [~/](\(home)). -type f")
+        #expect(PathLinkifier.linkifyPaths("see ~/nonexistent-\(UUID().uuidString) now").contains("](") == false)
+    }
+
+    @Test("the slash inside a relative path is not taken for an absolute path")
+    func linkifyPathsSkipsRelativePaths() {
+        // "/usr" and "/etc/passwd" exist, so a match at the slash after ".." linked them.
+        #expect(PathLinkifier.linkifyPaths("cd ../usr then ./usr") == "cd ../usr then ./usr")
+        #expect(PathLinkifier.linkifyPaths("read ../../../etc/passwd") == "read ../../../etc/passwd")
+    }
+
+    @Test("a JSON-escaped path is not linked as a fragment")
+    func linkifyPathsSkipsJSONEscapedSlashes() {
+        // "/Users" exists, so every escaped path in tool output used to link it.
+        let input = #"{"path":"\/Users\/someone\/x.md"}"#
+        #expect(PathLinkifier.linkifyPaths(input) == input)
+    }
+
     @Test("a standalone path with spaces links only when it exists")
     func standaloneLinkTargetWithSpaces() throws {
         let base = try makeTree(files: ["Application Support/x.md"])
