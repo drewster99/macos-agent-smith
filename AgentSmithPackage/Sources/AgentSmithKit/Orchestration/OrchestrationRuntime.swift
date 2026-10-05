@@ -2407,6 +2407,42 @@ public actor OrchestrationRuntime {
         }
     }
 
+    /// Operational notices: system lines ABOUT one agent or the run — a stall warning, a retry or
+    /// error streak, a dropped-calls notice, the running-tasks digest, "Preparing task", a missing
+    /// provider. Smith supervises, so it receives all of them; a worker only those about itself.
+    static let operationalNoticeKinds: Set<ChannelMessageKind> = [
+        .agentLifecycle, .agentRecovery, .rateLimit, .statusUpdate, .preparing, .advisory
+    ]
+
+    /// Whether a worker bound to `workerTaskID` takes `message` into its conversation.
+    ///
+    /// A public operational notice reaches a worker only when it carries the worker's own task
+    /// (a worker's notices are stamped with its task by `ToolContext.post`; Smith's and the
+    /// runtime's carry none). Every public system message used to wake every live worker for an LLM
+    /// turn — one worker's stall warning, Smith's provider errors, the digest — about nothing it
+    /// could act on. A message addressed to the worker (`recipientID`) is its own business and is
+    /// never filtered here. Keyed on the typed kind and task id, never on the text.
+    static func workerAccepts(_ message: ChannelMessage, workerTaskID: UUID?) -> Bool {
+        // Drop all security disposition messages (SAFE/WARN/UNSAFE/ABORT).
+        if message.metadata?["securityDisposition"] != nil { return false }
+        // Drop tool_request and tool_output echo messages (posted for UI visibility
+        // only), and context-management notices (Smith's compaction is none of the
+        // worker's business).
+        // `.toolScopeReview` is the transcript's record of Brown's own scoping; Brown already
+        // has the result as its tool list, and the post must not wake or bloat the worker.
+        let workerIrrelevantKinds: Set<ChannelMessageKind> = [
+            .toolRequest, .toolOutput, .contextManagement, .validationReport, .validationEscalation,
+            .toolScopeReview
+        ]
+        guard let kind = message.kind else { return true }
+        if workerIrrelevantKinds.contains(kind) { return false }
+        if message.recipientID == nil, case .system = message.sender, operationalNoticeKinds.contains(kind) {
+            guard let workerTaskID else { return false }
+            return message.taskID == workerTaskID
+        }
+        return true
+    }
+
     /// Returns every task parked on a missing validator model to `.validating` and re-enqueues
     /// it. Safe to call whenever a validator model is present; a no-op when nothing is parked.
     func releaseTasksBlockedOnValidatorModel() {
@@ -4363,20 +4399,9 @@ public actor OrchestrationRuntime {
         // Brown already receives all security feedback directly as tool results — approved calls
         // return the tool output, denied calls return "Tool execution denied: <reason>".
         // Echoing these through the channel as [System] messages wastes tokens and adds noise.
+        let workerTaskID = task?.id
         let brownMessageFilter: @Sendable (ChannelMessage) -> Bool = { message in
-            // Drop all security disposition messages (SAFE/WARN/UNSAFE/ABORT).
-            if message.metadata?["securityDisposition"] != nil { return false }
-            // Drop tool_request and tool_output echo messages (posted for UI visibility
-            // only), and context-management notices (Smith's compaction is none of the
-            // worker's business).
-            // `.toolScopeReview` is the transcript's record of Brown's own scoping; Brown already
-            // has the result as its tool list, and the post must not wake or bloat the worker.
-            let workerIrrelevantKinds: Set<ChannelMessageKind> = [
-                .toolRequest, .toolOutput, .contextManagement, .validationReport, .validationEscalation,
-                .toolScopeReview
-            ]
-            if let kind = message.kind, workerIrrelevantKinds.contains(kind) { return false }
-            return true
+            Self.workerAccepts(message, workerTaskID: workerTaskID)
         }
 
         let filesRead = FileReadTracker()
