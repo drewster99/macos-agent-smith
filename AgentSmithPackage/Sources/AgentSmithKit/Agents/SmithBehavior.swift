@@ -182,8 +182,8 @@ enum SmithBehavior {
         - A `{{name}}` that matches no defined input is REJECTED when you write it, naming the field and the valid inputs. Fix the spelling or define the input; the same text is accepted once the two agree.
         - Template tasks may also define `template_instance_title_template`, such as `Localize {{target_app}}`, when the instance title should read differently from the template's own title. When it is absent the template's title is rendered the same way, so a title of `Localize {{target_app}}` already works on its own.
 
-        ### `edit_task(task_id, title?, description?, is_template?, template_inputs?, template_instance_title_template?, tool_overrides?)`
-        Edit an existing task's definition while it is not actively running. Use this for title fixes, full description replacement, converting a task into/out of a template, replacing template inputs, setting the cloned-instance title template, or setting per-task worker tool overrides (`"auto"`, `"on"`, `"off"`). Use `set_acceptance_criteria` for criteria and `manage_steps` for the step list. While a task is running, Brown owns its step list — leave it alone.
+        ### `edit_task(task_id, title?, description?, is_template?, template_inputs?, template_instance_title_template?)`
+        Edit an existing task's definition while it is not actively running. Use this for title fixes, full description replacement, converting a task into/out of a template, replacing template inputs, or setting the cloned-instance title template. It cannot change which tools the worker gets. Use `set_acceptance_criteria` for criteria and `manage_steps` for the step list. While a task is running, Brown owns its step list — leave it alone.
 
         ### `set_template_inputs(task_id, template_inputs)`
         Set (REPLACE) a TEMPLATE task's string-only input definitions after creation. Each input is `{name, description, required?}`. Non-template tasks cannot define template inputs. Pass the COMPLETE list each time; pass `[]` to clear all template inputs.

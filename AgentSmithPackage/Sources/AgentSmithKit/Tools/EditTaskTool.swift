@@ -8,7 +8,8 @@ public struct EditTaskTool: AgentTool {
         Edit a pending, paused, interrupted, failed, scheduled, or template task's definition. \
         Use this for title, full description replacement, template toggle, template input \
         definitions (or `clear_template_inputs: true` to remove them), template instance title \
-        template, and per-task worker tool overrides. \
+        template. It cannot change which tools a task's worker gets — the Security Agent scopes \
+        those and only the user can override them. \
         Do not use while a worker is running the task. On a TEMPLATE, title and description may \
         use `{{input_name}}` placeholders; one naming no defined input is refused. Renaming an \
         input and the text that references it in a SINGLE call is accepted — the two are checked \
@@ -40,10 +41,6 @@ public struct EditTaskTool: AgentTool {
             "clear_template_inputs": .dictionary([
                 "type": .string("boolean"),
                 "description": .string("Set true to remove every template input definition. This explicit flag avoids mistaking a model-emitted empty placeholder array for destructive intent.")
-            ]),
-            "tool_overrides": .dictionary([
-                "type": .string("object"),
-                "description": .string("Optional per-task worker tool overrides. Keys are tool names; values are 'auto', 'on', or 'off'. Only the worker's own tools and MCP server tools (mcp__<server>__<tool>) can be overridden: your task-management tools (create_task, list_tasks, watch_task, …) are not available to workers, and a call naming one is refused.")
             ])
         ]),
         "required": .array([.string("task_id")])
@@ -57,7 +54,7 @@ public struct EditTaskTool: AgentTool {
         context.agentRole == .smith
     }
 
-    /// Applies supported task definition and per-task tool override edits.
+    /// Applies supported task definition edits.
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         guard case .string(let taskIDString) = arguments["task_id"], let taskID = UUID(uuidString: taskIDString) else {
             return .failure("Missing or invalid 'task_id'.")
@@ -100,23 +97,17 @@ public struct EditTaskTool: AgentTool {
         let titleTemplate = arguments.keys.contains("template_instance_title_template")
             ? Self.optionalString(arguments["template_instance_title_template"])
             : task.templateInstanceTitleTemplate
-        let parsedOverrides: [(tool: String, enabled: Bool?)]
-        switch Self.parseToolOverrides(arguments["tool_overrides"]) {
-        case .success(let overrides):
-            parsedOverrides = overrides
-        case .failure(let message):
-            return .failure(message)
-        }
-        // An override applies only to a worker's candidate tools, so one for any other tool would
-        // be stored, reported back as done, and do nothing — the worker never receives the tool.
-        // Refused before anything is written. Clearing ('auto') is always allowed, so an override
-        // stored before this check can still be removed.
-        let unavailable = parsedOverrides
-            .filter { $0.enabled != nil && !BrownBehavior.acceptsToolOverride(named: $0.tool) }
-            .map(\.tool)
-            .sorted()
-        if !unavailable.isEmpty {
-            return .failure("Workers cannot use \(unavailable.joined(separator: ", ")), so an override for \(unavailable.count == 1 ? "it" : "them") would have no effect. Only a worker's own tools and MCP server tools (mcp__<server>__<tool>) can be overridden; task-management tools stay with you. Nothing was changed.")
+        // Removed from the schema 2026-10-05: Smith granting tools bypassed both the Security
+        // Agent's scoping and the user's policy. A history that still shows the parameter could
+        // make Smith pass it again, and an ignored key would report a grant that never happened.
+        // An empty object or null is a model emitting an absent optional, not a grant attempt.
+        switch arguments["tool_overrides"] {
+        case .none, .null?:
+            break
+        case .dictionary(let overrides)? where overrides.isEmpty:
+            break
+        default:
+            return .failure("edit_task no longer changes a task's tools: the Security Agent scopes them and only the user can override them. Nothing was changed.")
         }
 
         if let problem = await context.taskStore.updateDefinition(
@@ -130,20 +121,11 @@ public struct EditTaskTool: AgentTool {
             return .failure(problem)
         }
 
-        for override in parsedOverrides {
-            await context.taskStore.setUserToolOverride(id: taskID, tool: override.tool, enabled: override.enabled)
-        }
-
         return .success("Task '\(title)' updated.")
     }
 
     private enum ParseResult {
         case success([TemplateInputDefinition])
-        case failure(String)
-    }
-
-    private enum ToolOverrideParseResult {
-        case success([(tool: String, enabled: Bool?)])
         case failure(String)
     }
 
@@ -167,30 +149,6 @@ public struct EditTaskTool: AgentTool {
             return .failure(problem)
         }
         return .success(definitions)
-    }
-
-    private static func parseToolOverrides(_ rawValue: AnyCodable?) -> ToolOverrideParseResult {
-        guard let rawValue else { return .success([]) }
-        guard case .dictionary(let overrides) = rawValue else {
-            return .failure("tool_overrides must be an object whose values are 'auto', 'on', or 'off'.")
-        }
-        var parsed: [(tool: String, enabled: Bool?)] = []
-        for (tool, rawState) in overrides {
-            guard case .string(let state) = rawState else {
-                return .failure("tool_overrides values must be 'auto', 'on', or 'off'.")
-            }
-            switch state {
-            case "auto":
-                parsed.append((tool: tool, enabled: nil))
-            case "on":
-                parsed.append((tool: tool, enabled: true))
-            case "off":
-                parsed.append((tool: tool, enabled: false))
-            default:
-                return .failure("Invalid tool override state '\(state)' for \(tool). Use 'auto', 'on', or 'off'.")
-            }
-        }
-        return .success(parsed)
     }
 
     private static func optionalString(_ value: AnyCodable?) -> String? {

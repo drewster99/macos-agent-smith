@@ -3,8 +3,9 @@ import AgentSmithKit
 
 /// Settings tab listing every tool the worker (Brown) can be granted — built-in plus MCP — with a
 /// global Default / Always / Never policy each. `Always` forces a tool available regardless of the
-/// security agent's per-task scoping; `Never` removes it; `Default` defers to scoping. A per-task
-/// override (in a task's detail window) takes precedence over these. Forced lifecycle tools
+/// security agent's per-task scoping unless a task turns it off; `Never` removes it from every
+/// task, absolutely; `Default` defers to scoping. Resolution: `ToolPolicy.effectiveApprovedTools`.
+/// Forced lifecycle tools
 /// (`task_update`, …) are always available and intentionally not listed.
 ///
 /// Each MCP server's header carries a Default/Always/Never shortcut that sets all of its tools at
@@ -50,7 +51,7 @@ struct ToolsSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Tool Availability")
                 .font(AppFonts.sectionHeader)
-            Text("Override the security agent's automatic decision for the worker. “Always” forces a tool available, “Never” removes it, “Default” defers to per-task scoping. A per-task override (in a task's detail window) beats these. A server's control sets all of its tools at once. Changes apply immediately. Lifecycle tools are always available and not shown.")
+            Text("Override the security agent's automatic decision for the worker. “Always” makes a tool available unless a task turns it off (in its detail window), “Never” removes it from every task — no per-task setting can bring it back — and “Default” defers to per-task scoping. A server's control sets all of its tools at once. Changes apply immediately. Lifecycle tools are always available and not shown.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -110,7 +111,7 @@ struct ToolsSettingsView: View {
 
     private func policyBinding(_ tool: String) -> Binding<ToolPolicy> {
         Binding(
-            get: { shared.globalToolPolicies[tool] ?? ToolPolicy.builtInDefaults[tool] ?? .default },
+            get: { ToolPolicy.effective(for: tool, globalPolicies: shared.globalToolPolicies) },
             set: { newValue in
                 if newValue == .default {
                     shared.globalToolPolicies.removeValue(forKey: tool)
@@ -127,7 +128,7 @@ struct ToolsSettingsView: View {
     private func serverPolicyBinding(_ keys: [String]) -> Binding<ToolPolicy?> {
         Binding(
             get: {
-                let states = keys.map { shared.globalToolPolicies[$0] ?? .default }
+                let states = keys.map { ToolPolicy.effective(for: $0, globalPolicies: shared.globalToolPolicies) }
                 guard let first = states.first, states.allSatisfy({ $0 == first }) else { return nil }
                 return first
             },

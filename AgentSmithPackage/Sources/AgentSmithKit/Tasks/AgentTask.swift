@@ -135,9 +135,11 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     public var approvedTools: [String]?
 
     /// Per-task user overrides of tool availability, keyed by tool name. `true` = the user forced the
-    /// tool ON for this task; `false` = forced OFF. Takes precedence over both the automatic scoping
-    /// verdict and the global `ToolPolicy`, and is re-applied after every re-evaluation so a re-scope
-    /// never clobbers the user's choice. `nil`/absent = no per-task overrides.
+    /// tool ON for this task; `false` = forced OFF. Takes precedence over the automatic scoping
+    /// verdict and a global `.always`, never over a global `.never` (`ToolPolicy`), and is
+    /// re-applied after every re-evaluation so a re-scope never clobbers the user's choice. Set only
+    /// by the user from the task-detail screen — Smith cannot change a task's tools.
+    /// `nil`/absent = no per-task overrides.
     public var userToolOverrides: [String: Bool]?
 
     /// Non-nil when Brown has escalated a blocker via `request_help` and is waiting for Smith.

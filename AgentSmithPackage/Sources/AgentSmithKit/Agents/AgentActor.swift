@@ -43,11 +43,12 @@ public actor AgentActor {
     /// redefined) triggers a fresh stateless re-scope at the next turn boundary.
     private var lastScopedFingerprint: String?
     /// Global per-tool availability policy (user-set in Settings). Overrides the automatic scoping
-    /// verdict: `.never` strips a tool, `.always` adds it. Empty = no global overrides.
+    /// verdict: `.always` adds a tool, `.never` strips it absolutely. Empty = no global overrides.
+    /// Resolution order: `ToolPolicy.effectiveApprovedTools`.
     private var globalToolPolicy: [String: ToolPolicy] = [:]
-    /// Per-task user overrides keyed by tool name (`true` = force on, `false` = force off). Applied
-    /// AFTER the global policy (so they win) and re-applied every refresh, so a re-scope can't
-    /// clobber the user's choice.
+    /// Per-task user overrides keyed by tool name (`true` = force on, `false` = force off). They beat
+    /// the automatic verdict and a global `.always`, never a global `.never`, and are re-applied
+    /// every refresh, so a re-scope can't clobber the user's choice.
     private var userToolOverrides: [String: Bool] = [:]
     /// Whether Security Agent pre-flight scoping is active for this worker. When false, the base approved set
     /// is "every current candidate" (no scoping verdict, no mid-task re-scope); global policy and
@@ -866,31 +867,6 @@ public actor AgentActor {
         return texts.reversed().joined(separator: "\n---\n")
     }
 
-    /// Applies built-in defaults, global tool policy, then per-task user overrides, on top of a base approved set.
-    /// Order is deliberate: policy `.always`/`.never` override the automatic verdict; per-task
-    /// overrides then override the globals. Forced lifecycle tools are handled separately (above all).
-    private func resolveEffectiveApproved(base: Set<String>, candidates: Set<String>) -> Set<String> {
-        var result = base
-        for (name, policy) in ToolPolicy.builtInDefaults where candidates.contains(name) {
-            switch policy {
-            case .never: result.remove(name)
-            case .always: result.insert(name)
-            case .default: break
-            }
-        }
-        for name in candidates {
-            switch globalToolPolicy[name] {
-            case .never: result.remove(name)
-            case .always: result.insert(name)
-            case .default, .none: break
-            }
-        }
-        for (name, enabled) in userToolOverrides where candidates.contains(name) {
-            if enabled { result.insert(name) } else { result.remove(name) }
-        }
-        return result
-    }
-
     /// Registers a callback fired when the approved tool set changes mid-task, so the runtime
     /// can persist the new set on the task as a record.
     public func setOnApprovedToolsChanged(_ handler: @escaping @Sendable (Set<String>) async -> Void) {
@@ -1446,7 +1422,12 @@ public actor AgentActor {
         lastScopedFingerprint = fingerprint
 
         // Layer global policy + per-task overrides on top of the base verdict, then force lifecycle.
-        let resolved = resolveEffectiveApproved(base: approvedToolNames, candidates: candidateNames)
+        let resolved = ToolPolicy.effectiveApprovedTools(
+            base: approvedToolNames,
+            candidates: candidateNames,
+            globalPolicies: globalToolPolicy,
+            taskOverrides: userToolOverrides
+        )
         toolRegistry.applyApproval(approvedNames: resolved)
         applyForcedLifecycleFlags()
         activeTools = toolRegistry.availableTools()

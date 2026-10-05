@@ -2,9 +2,9 @@ import SwiftUI
 import AgentSmithKit
 
 /// Per-task tool override editor shown in a task's detail window. Lets the user force individual
-/// tools on/off for this task, overriding the security agent's automatic scoping verdict. "Auto"
-/// clears the override (defer to scoping + global policy). Overrides persist and survive any
-/// re-evaluation. Forced lifecycle tools are always available and not listed.
+/// tools on/off for this task, overriding the security agent's automatic scoping verdict and a
+/// global Always — never a global Never. "Auto" clears the override (defer to scoping + global
+/// policy). Overrides persist and survive any re-evaluation. Forced lifecycle tools are always available and not listed.
 ///
 /// MCP tools are grouped under their server, and each server gets an Auto/On/Off shortcut that sets
 /// *every* tool the server advertises at once (a fast way to grant or deny a whole server, including
@@ -102,7 +102,7 @@ struct TaskToolOverrideEditor: View {
                         ForEach(group.tools, id: \.self) { row($0) }
                     }
                 }
-                Text("“Auto” follows the security agent. “On”/“Off” are your overrides — they persist and won't be undone by re-evaluation. A server's control sets every tool it advertises at once.")
+                Text("“Auto” follows the security agent. “On”/“Off” are your overrides — they persist and won't be undone by re-evaluation. A server's control sets every tool it advertises at once. A tool set to Never in Settings › Tools stays off whatever you choose here.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .padding(.top, 2)
@@ -154,6 +154,12 @@ struct TaskToolOverrideEditor: View {
             Text(tool)
                 .font(.body.monospaced())
                 .fontWeight(override != nil ? .bold : .regular)
+            if isBlockedByNeverPolicy(tool) {
+                Label("Never", systemImage: "nosign")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .help("Set to Never in Settings › Tools. It stays off for every task, whatever is chosen here.")
+            }
             Spacer(minLength: 12)
             Picker("", selection: stateBinding(tool)) {
                 Text("Auto").tag(OverrideState.auto)
@@ -170,15 +176,17 @@ struct TaskToolOverrideEditor: View {
     private func effectiveEnabled(_ tool: String) -> Bool {
         // An override cannot give a worker a tool it can never have.
         guard BrownBehavior.acceptsToolOverride(named: tool) else { return false }
-        if let override = task.userToolOverrides?[tool] { return override }
-        switch viewModel.shared.globalToolPolicies[tool] ?? ToolPolicy.builtInDefaults[tool] ?? .default {
-        case .always:
-            return true
-        case .never:
-            return false
-        case .default:
-            return approved.contains(tool)
-        }
+        return ToolPolicy.effectiveApprovedTools(
+            base: approved,
+            candidates: [tool],
+            globalPolicies: viewModel.shared.globalToolPolicies,
+            taskOverrides: task.userToolOverrides ?? [:]
+        ).contains(tool)
+    }
+
+    /// True when the global policy withholds `tool` from every task, so no choice here enables it.
+    private func isBlockedByNeverPolicy(_ tool: String) -> Bool {
+        ToolPolicy.effective(for: tool, globalPolicies: viewModel.shared.globalToolPolicies) == .never
     }
 
     private func stateBinding(_ tool: String) -> Binding<OverrideState> {
