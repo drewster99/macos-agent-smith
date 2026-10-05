@@ -156,9 +156,9 @@ struct ChannelLogJSONLTests {
     @Test("append writer preserves order across batches and flush waits for the write")
     func appendWriterOrderAndFlush() async throws {
         let recorder = Recorder()
-        let writer = ChannelLogAppendWriter { messages in recorder.add(messages.map(\.content)) }
-        await writer.enqueue([message("1"), message("2")])
-        await writer.enqueue([message("3")])
+        let writer = JSONLAppendWriter<ChannelMessage>(label: "test") { messages in recorder.add(messages.map(\.content)) }
+        writer.enqueue([message("1"), message("2")])
+        writer.enqueue([message("3")])
         await writer.flush()
         #expect(recorder.all() == ["1", "2", "3"])
     }
@@ -166,8 +166,8 @@ struct ChannelLogJSONLTests {
     @Test("append writer retries a transient failure and the message still lands")
     func appendWriterRetriesTransient() async throws {
         let recorder = Recorder(failuresLeft: 2)
-        let writer = ChannelLogAppendWriter { messages in try recorder.addThrowing(messages.map(\.content)) }
-        await writer.enqueue([message("x")])
+        let writer = JSONLAppendWriter<ChannelMessage>(label: "test") { messages in try recorder.addThrowing(messages.map(\.content)) }
+        writer.enqueue([message("x")])
         await writer.flush()
         #expect(recorder.all() == ["x"], "the message should land after transient failures are retried")
     }

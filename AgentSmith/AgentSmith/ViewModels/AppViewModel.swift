@@ -448,7 +448,7 @@ final class AppViewModel {
     /// newer one on disk. Each writer drains pending work in FIFO order and
     /// `flush()` actually waits for in-flight writes to complete (the
     /// `flushPersistence()` path used to race them).
-    private let channelLogAppendWriter: ChannelLogAppendWriter
+    private let channelLogAppendWriter: JSONLAppendWriter<ChannelMessage>
     private let timerEventsWriter: SerialPersistenceWriter<[TimerEvent]>
     private let scheduledWakesWriter: SerialPersistenceWriter<[ScheduledWake]>
     private let sessionStateWriter: SerialPersistenceWriter<SessionState>
@@ -458,7 +458,7 @@ final class AppViewModel {
         self.shared = shared
         let pm = PersistenceManager(sessionID: session.id)
         self.persistenceManager = pm
-        self.channelLogAppendWriter = ChannelLogAppendWriter { messages in
+        self.channelLogAppendWriter = JSONLAppendWriter(label: "channel_log.jsonl") { messages in
             try await pm.appendChannelMessages(messages)
         }
         self.timerEventsWriter = SerialPersistenceWriter(label: "timerEvents") { snapshot in
@@ -2547,7 +2547,7 @@ final class AppViewModel {
         await quiesceChannelStream()
         channelLogPersistTask?.cancel()
         channelLogPersistTask = nil
-        await drainPendingChannelAppends()
+        drainPendingChannelAppends()
         let finalState = SessionState(
             agentAssignments: agentAssignments,
             agentPollIntervals: agentPollIntervals,
@@ -2840,19 +2840,18 @@ final class AppViewModel {
                 return
             }
             guard !Task.isCancelled, let self else { return }
-            await self.drainPendingChannelAppends()
+            self.drainPendingChannelAppends()
         }
     }
 
-    /// Hands accumulated appends to the JSONL append writer in FIFO order. The read-and-clear
-    /// runs synchronously on the main actor, so it can't interleave with another drain; awaiting
-    /// the enqueue (rather than spawning a detached task) preserves batch ordering and lets
-    /// `flushPersistence` guarantee everything is written before quit.
-    private func drainPendingChannelAppends() async {
+    /// Hands accumulated appends to the JSONL append writer in FIFO order. The read-and-clear and
+    /// the writer's synchronous `enqueue` run together on the main actor, so no other drain can
+    /// slip a batch in between, and `flushPersistence` can guarantee everything is written before quit.
+    private func drainPendingChannelAppends() {
         guard !pendingChannelAppends.isEmpty else { return }
         let batch = pendingChannelAppends
         pendingChannelAppends = []
-        await channelLogAppendWriter.enqueue(batch)
+        channelLogAppendWriter.enqueue(batch)
     }
 
     /// Wires the crash-safe durable-move hooks onto a session `TaskStore`. Kept in one place so the

@@ -30,8 +30,8 @@ public actor PersistenceManager {
     /// Real-data init. Resolves to `~/Library/Application Support/AgentSmith/` —
     /// the user's actual data path. **Tests MUST NOT use this init**; use
     /// `init(testingRoot:)` instead. Any test that wires this manager into a
-    /// `UsageStore` and calls `append(...)` will overwrite the user's real
-    /// `usage_records.json` when `scheduleFlush`'s timer fires. A source-level
+    /// `UsageStore` and calls `append(...)` will write into the user's real
+    /// `usage_records.jsonl`. A source-level
     /// guard in `PersistenceManagerTestUsageGuardTests` catches such regressions.
     public init() {
         let appSupport = Self.appSupportURL()
@@ -60,10 +60,10 @@ public actor PersistenceManager {
     /// bypassing Application Support entirely. Exists specifically because the
     /// default `init()` resolves to `~/Library/Application Support/AgentSmith/`, and
     /// any test that constructs a `UsageStore` against that path and calls
-    /// `append(...)` will eventually overwrite the user's real `usage_records.json`
-    /// when `scheduleFlush`'s 5-second timer fires (the in-memory `records` array
-    /// is whatever the test loaded into it, NOT what's on disk). Tests MUST use
-    /// this init to point at a per-test temp directory.
+    /// `append(...)` appends the test's records to the user's real
+    /// `usage_records.jsonl` (before it was append-only, a test's flush overwrote the
+    /// whole history with whatever the test held in memory). Tests MUST use this init
+    /// to point at a per-test temp directory.
     public init(testingRoot: URL) {
         baseDirectory = testingRoot.appendingPathComponent("AgentSmith", isDirectory: true)
         sessionDirectory = baseDirectory
@@ -323,28 +323,34 @@ public actor PersistenceManager {
         guard !messages.isEmpty else { return }
         try ensureDirectories()
         try migrateLegacyChannelLogIfNeeded()
-        let blob = try encodeJSONL(messages)
-        if FileManager.default.fileExists(atPath: channelLogJSONLURL.path) {
-            // `forUpdating` (read+write) so the boundary check below can read the last byte;
-            // a write-only handle would fault on read.
-            let handle = try FileHandle(forUpdating: channelLogJSONLURL)
-            defer { try? handle.close() }
-            let end = try handle.seekToEnd()
-            // Guard the line boundary: if a prior unclean shutdown left a partial final record
-            // (no trailing newline), inject one so the partial stays on its own droppable line
-            // and can't fuse with — and corrupt — the first record of this batch.
-            if end > 0 {
-                try handle.seek(toOffset: end - 1)
-                let lastByte = try handle.read(upToCount: 1)
-                try handle.seekToEnd()
-                if lastByte != Data([0x0A]) {
-                    try handle.write(contentsOf: Data([0x0A]))
-                }
-            }
-            try handle.write(contentsOf: blob)
-        } else {
-            try blob.write(to: channelLogJSONLURL, options: .atomic)
+        try Self.appendJSONLBlob(try encodeJSONL(messages), to: channelLogJSONLURL)
+    }
+
+    /// Appends pre-encoded JSONL lines to `url`, creating the file if needed.
+    ///
+    /// Guards the line boundary: if a prior unclean shutdown left a partial final record (no
+    /// trailing newline), a newline is injected first so the partial stays on its own droppable
+    /// line and can't fuse with — and corrupt — the first record of this batch. Synchronous so a
+    /// caller's actor isolation makes the read-last-byte-then-write sequence atomic.
+    private static func appendJSONLBlob(_ blob: Data, to url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            try blob.write(to: url, options: .atomic)
+            return
         }
+        // `forUpdating` (read+write) so the boundary check below can read the last byte;
+        // a write-only handle would fault on read.
+        let handle = try FileHandle(forUpdating: url)
+        defer { try? handle.close() }
+        let end = try handle.seekToEnd()
+        if end > 0 {
+            try handle.seek(toOffset: end - 1)
+            let lastByte = try handle.read(upToCount: 1)
+            try handle.seekToEnd()
+            if lastByte != Data([0x0A]) {
+                try handle.write(contentsOf: Data([0x0A]))
+            }
+        }
+        try handle.write(contentsOf: blob)
     }
 
     /// Loads the most-recent `limit` messages plus the total on-disk count. Reads the file once
@@ -665,20 +671,105 @@ public actor PersistenceManager {
         return try JSONDecoder().decode([MCPServerConfig].self, from: data)
     }
 
-    // MARK: - Usage Records (shared)
+    // MARK: - Usage Records — append-only JSONL (shared)
+    //
+    // One `UsageLogEntry` per line: a bare `UsageRecord` object, or a row naming its `rowKind`
+    // (today only a task backfill). Recording a call appends one line instead of re-encoding the
+    // whole history — the legacy `usage_records.json` array had reached 151 MB and was rewritten
+    // in full every five seconds while agents were busy, holding a second copy of every record in
+    // memory for the duration of each encode. Same file discipline as the channel log: the legacy
+    // array is migrated once and LEFT IN PLACE as a backup, never deleted or overwritten here.
 
-    public func saveUsageRecords(_ records: [UsageRecord]) throws {
-        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-        let data = try JSONEncoder().encode(records)
-        let url = baseDirectory.appendingPathComponent("usage_records.json")
-        try data.write(to: url, options: .atomic)
+    private var usageLogURL: URL {
+        baseDirectory.appendingPathComponent("usage_records.jsonl")
+    }
+    private var usageLegacyURL: URL {
+        baseDirectory.appendingPathComponent("usage_records.json")
     }
 
-    public func loadUsageRecords() throws -> [UsageRecord] {
-        let url = baseDirectory.appendingPathComponent("usage_records.json")
+    /// The one migration in flight. The migration suspends (its read/encode/write runs off the
+    /// actor), so without this a concurrent load and append could each find no `.jsonl` and
+    /// both migrate — racing on the temp file, the loser throwing on the rename.
+    private var usageLogMigration: Task<Void, Error>?
+
+    /// Seeds `usage_records.jsonl` from the legacy array on first use. Temp file + atomic rename,
+    /// so a crash mid-migration can never leave a truncated log. No-op once the `.jsonl` exists.
+    private func migrateLegacyUsageRecordsIfNeeded() async throws {
+        if let usageLogMigration {
+            try await usageLogMigration.value
+            return
+        }
+        let fileManager = FileManager.default
+        guard !fileManager.fileExists(atPath: usageLogURL.path) else { return }
+        guard fileManager.fileExists(atPath: usageLegacyURL.path) else { return }
+        try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let legacyURL = usageLegacyURL
+        let logURL = usageLogURL
+        let temporaryURL = baseDirectory.appendingPathComponent("usage_records.jsonl.tmp")
+        let migration = Task {
+            let migratedCount = try await FileIO.perform {
+                let data = try Data(contentsOf: legacyURL, options: .mappedIfSafe)
+                let legacy = try JSONDecoder().decode([UsageRecord].self, from: data)
+                try Self.encodeUsageLog(legacy.map(UsageLogEntry.record)).write(to: temporaryURL, options: .atomic)
+                try FileManager.default.moveItem(at: temporaryURL, to: logURL)
+                return legacy.count
+            }
+            logger.notice("Migrated \(migratedCount, privacy: .public) usage records to usage_records.jsonl; usage_records.json kept as a backup")
+        }
+        usageLogMigration = migration
+        do {
+            try await migration.value
+        } catch {
+            // A failed migration leaves no `.jsonl`, so the next caller must be free to try again.
+            usageLogMigration = nil
+            throw error
+        }
+    }
+
+    nonisolated private static func encodeUsageLog(_ entries: [UsageLogEntry]) throws -> Data {
+        let encoder = JSONEncoder()
+        var blob = Data()
+        for entry in entries {
+            blob.append(try encoder.encode(entry))
+            blob.append(0x0A)
+        }
+        return blob
+    }
+
+    /// Appends entries to the usage log (migrating the legacy array first). O(size of the batch).
+    public func appendUsageLogEntries(_ entries: [UsageLogEntry]) async throws {
+        guard !entries.isEmpty else { return }
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        try await migrateLegacyUsageRecordsIfNeeded()
+        try Self.appendJSONLBlob(try Self.encodeUsageLog(entries), to: usageLogURL)
+    }
+
+    /// Loads every usage record, replaying backfill rows in log order.
+    ///
+    /// An undecodable line — a torn final record from an unclean shutdown, or a row kind written
+    /// by a newer build — is skipped and reported, never allowed to fail the whole history.
+    public func loadUsageRecords() async throws -> [UsageRecord] {
+        try await migrateLegacyUsageRecordsIfNeeded()
+        let url = usageLogURL
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode([UsageRecord].self, from: data)
+        let (records, skippedLines) = try await FileIO.perform {
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let decoder = JSONDecoder()
+            var entries: [UsageLogEntry] = []
+            var skipped = 0
+            for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+                do {
+                    entries.append(try decoder.decode(UsageLogEntry.self, from: Data(line)))
+                } catch {
+                    skipped += 1
+                }
+            }
+            return (UsageLogEntry.replay(entries), skipped)
+        }
+        if skippedLines > 0 {
+            logger.error("usage_records.jsonl: skipped \(skippedLines, privacy: .public) undecodable line(s) — a partial record from an unclean shutdown, or a row kind from a newer build")
+        }
+        return records
     }
 
     // MARK: - User Model Overrides (shared)

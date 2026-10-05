@@ -39,12 +39,11 @@ struct CostBoardTests {
 
     private func makeStore() async -> (UsageStore, URL) {
         // CRITICAL: `PersistenceManager()` resolves to `~/Library/Application Support/AgentSmith/`
-        // — the real app's data path. `UsageStore.append(...)` schedules a flush that writes
-        // the in-memory `records` array to disk 5 seconds later, with no merge against the
-        // existing file. If a test calls `append` without `load`, the in-memory array contains
-        // ONLY test records; the flush overwrites the real file with that test data. This is
-        // exactly what happened the first time these tests ran and silently wiped a month of
-        // real usage data. We now route every test through a per-test temp dir via the
+        // — the real app's data path. When usage was a whole-array file, a test that appended
+        // without loading overwrote the real history with its test records — exactly what
+        // happened the first time these tests ran, silently wiping a month of real usage data.
+        // The log is append-only now, so the same mistake would instead pollute the real log
+        // with test records. Every test routes through a per-test temp dir via the
         // `init(testingRoot:)` escape hatch on `PersistenceManager`.
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-costboard-tests", isDirectory: true)

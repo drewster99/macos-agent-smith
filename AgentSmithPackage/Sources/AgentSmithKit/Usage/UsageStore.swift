@@ -5,13 +5,13 @@ private let logger = Logger(subsystem: "com.agentsmith", category: "UsageStore")
 
 /// Persistent store for LLM token usage records.
 ///
-/// Append-only: records are immutable once stored. Coalesces disk writes
-/// to avoid I/O on every LLM call — flushes at most every 5 seconds.
+/// Persisted as the append-only `usage_records.jsonl`: every change — a new record or a task
+/// backfill — is ONE `UsageLogEntry` appended through `logWriter`, in the order it was applied to
+/// memory, so the log replays to exactly the in-memory state.
 public actor UsageStore {
     private var records: [UsageRecord] = []
+    private let logWriter: JSONLAppendWriter<UsageLogEntry>
     private let persistence: PersistenceManager
-    private var isDirty = false
-    private var flushTask: Task<Void, Never>?
     /// Fired on every `append`. Subscribers maintain their own incremental
     /// aggregates without re-scanning `records`. Set via `setOnInsert(_:)`;
     /// multiple subscribers should compose into one closure. Delivery is
@@ -26,6 +26,9 @@ public actor UsageStore {
 
     public init(persistence: PersistenceManager) {
         self.persistence = persistence
+        self.logWriter = JSONLAppendWriter(label: "usage_records.jsonl") { entries in
+            try await persistence.appendUsageLogEntries(entries)
+        }
     }
 
     /// Registers a fire-and-forget callback invoked after each `append`. Passing `nil`
@@ -35,19 +38,25 @@ public actor UsageStore {
     }
 
     /// Loads records from disk. Call once at startup.
+    ///
+    /// A record appended before the load finished is already in the log (or queued for it), so it
+    /// is not appended again — but it must not vanish from memory either, which the plain
+    /// `records = loaded` this replaced allowed.
     public func load() async {
         do {
-            records = try await persistence.loadUsageRecords()
+            let loaded = try await persistence.loadUsageRecords()
+            let loadedIDs = Set(loaded.map(\.id))
+            records = loaded + records.filter { !loadedIDs.contains($0.id) }
             logger.info("Loaded \(self.records.count) usage records")
         } catch {
             logger.error("Failed to load usage records: \(error.localizedDescription)")
         }
     }
 
-    /// Appends a usage record and schedules a coalesced save.
+    /// Appends a usage record and queues it for the log.
     public func append(_ record: UsageRecord) {
         records.append(record)
-        scheduleFlush()
+        logWriter.enqueue([.record(record)])
         // Deliver to `onInsert` in append order via a single drain task. The prior
         // per-append `Task { await handler(record) }` let concurrent deliveries
         // race — an `async` handler could observe records out of order. Buffer
@@ -78,12 +87,11 @@ public actor UsageStore {
         }
     }
 
-    /// Forces an immediate save. Call on app quit.
+    /// Returns once everything recorded so far has been appended to the log. Call on app quit.
     public func flush() async {
-        flushTask?.cancel()
-        flushTask = nil
-        guard isDirty else { return }
-        await performSave()
+        if !(await logWriter.flush()) {
+            logger.error("Usage log flush ended with appends still failing; the newest records are in memory only")
+        }
     }
 
     /// All records, for aggregation queries.
@@ -110,37 +118,9 @@ public actor UsageStore {
     /// currently have no task attribution. Used when Smith's pre-task planning
     /// calls should be charged to the task they ultimately produced.
     public func backfillTaskID(_ taskID: UUID, forSession sessionID: UUID) {
-        var changed = false
-        records = records.map { record in
-            guard record.sessionID == sessionID, record.taskID == nil else { return record }
-            changed = true
-            return record.withTaskID(taskID)
-        }
-        if changed {
-            scheduleFlush()
-            logger.info("Backfilled task \(taskID.uuidString.prefix(8)) onto unattributed session records")
-        }
-    }
-
-    // MARK: - Private
-
-    private func scheduleFlush() {
-        isDirty = true
-        guard flushTask == nil else { return }
-        flushTask = Task {
-            try? await Task.sleep(for: .seconds(5))
-            guard !Task.isCancelled else { return }
-            await self.performSave()
-        }
-    }
-
-    private func performSave() async {
-        isDirty = false
-        flushTask = nil
-        do {
-            try await persistence.saveUsageRecords(records)
-        } catch {
-            logger.error("Failed to save usage records: \(error.localizedDescription)")
-        }
+        let backfill = UsageTaskBackfill(taskID: taskID, sessionID: sessionID)
+        guard backfill.apply(to: &records) else { return }
+        logWriter.enqueue([.taskBackfill(backfill)])
+        logger.info("Backfilled task \(taskID.uuidString.prefix(8)) onto unattributed session records")
     }
 }

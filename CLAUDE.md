@@ -373,13 +373,15 @@ Agent Smith uses **JSON files** for all persistence — no SQLite or other datab
 | **Session State** | `/Users/andrew/Library/Application Support/AgentSmith/sessions/{SESSION_ID}/state.json` | Session configuration (agent assignments, poll intervals, etc.) |
 | **Channel Log** | `/Users/andrew/Library/Application Support/AgentSmith/sessions/{SESSION_ID}/channel_log.jsonl` | Newline-delimited JSON message log |
 | **Memories** | `/Users/andrew/Library/Application Support/AgentSmith/memories.json` | Semantic memory entries with embeddings |
-| **Usage Records** | `/Users/andrew/Library/Application Support/AgentSmith/usage_records.json` | Token/cost tracking |
+| **Usage Records** | `/Users/andrew/Library/Application Support/AgentSmith/usage_records.jsonl` | Token/cost tracking — append-only `UsageLogEntry` lines (see below); the legacy `usage_records.json` array is a migration backup, never written |
 | **Backups** | `/Users/andrew/Library/Application Support/AgentSmith/backups/` | Automatic backups from migrations |
 
 **Global vs per-session model:**
 
-- **GLOBAL (shared across all sessions):** `sessions.json` (the list), `inactive_tasks.json`, `task_summaries.json`, `attachments/`, `memories.json`, `usage_records.json`, `backups/`, `mcp_servers.json`, `model_overrides.json`
+- **GLOBAL (shared across all sessions):** `sessions.json` (the list), `inactive_tasks.json`, `task_summaries.json`, `attachments/`, `memories.json`, `usage_records.jsonl`, `backups/`, `mcp_servers.json`, `model_overrides.json`
 - **PER-SESSION (scoped to `sessions/{SESSION_ID}/`):** `tasks.json` (active tasks only), `tasks/{TASK_ID}/evidence/`, `state.json`, `channel_log.jsonl`, `timer_events.json`, `scheduled_wakes.json`, `pending_scheduled_run_queue.json`, `notification_ledger.json`, `notification_pending.json`, `pending_user_messages.json`
+
+**Usage records are append-only JSONL (decided 2026-10-05).** `usage_records.jsonl` holds one `UsageLogEntry` per line: a bare `UsageRecord` object, or a row naming its `rowKind` (`UsageLogRowKind`; today only `task_backfill`). The whole-array `usage_records.json` it replaced had reached 151 MB and was re-encoded and rewritten every five seconds while agents ran, holding a second full copy of every record in memory for each encode. `UsageStore.backfillTaskID` — the one operation that changes stored records — appends a backfill ROW that load replays onto the records before it (`UsageLogEntry.replay`, shared with the live mutation via `UsageTaskBackfill.apply(to:)`); never rewrite earlier lines. Both JSONL logs append through `JSONLAppendWriter`, whose `enqueue` is synchronous on purpose: line order must equal call order, and two awaited hops to an actor are not ordered.
 
 **Task summaries usage:** Task summaries (`task_summaries.json`) are used primarily for **semantic search / memory lookup** via `MemoryStore.searchAll()`. They are NOT used by `list_tasks` — that tool loads actual task objects from the JSON files (both per-session `tasks.json` and global `inactive_tasks.json`).
 

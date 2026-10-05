@@ -86,7 +86,7 @@ struct PersistenceManagerTestUsageGuardTests {
                 """
                 Found test code using a real-data `PersistenceManager` init. This routes \
                 to `~/Library/Application Support/AgentSmith/` and can overwrite the \
-                user's real `usage_records.json` (and other shared files). Use \
+                user's real `usage_records.jsonl` (and other shared files). Use \
                 `PersistenceManager(testingRoot:)` instead.
 
                 \(summary)
