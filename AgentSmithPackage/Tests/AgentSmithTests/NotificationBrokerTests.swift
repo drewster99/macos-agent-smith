@@ -287,7 +287,7 @@ struct NotificationBrokerTests {
     @Test("TriggerSource round-trips, and an unknown kind from a newer build decodes to .unknown")
     func triggerSourceForwardCompatDecode() throws {
         // Round-trip the known cases.
-        for source in [TriggerSource.timer(scheduleID: UUID(), occurrence: Date(timeIntervalSince1970: 5)), .inboundMessageObserver, .taskTransition(taskID: UUID(), statusRevision: 3), .unknown] {
+        for source in [TriggerSource.timer(scheduleID: UUID(), occurrence: Date(timeIntervalSince1970: 5)), .inboundMessageObserver, .taskTransition(taskID: UUID(), statusRevision: 3), .taskWatch(watchID: UUID(), occurrence: 2), .taskLifecycle(taskID: UUID()), .unknown] {
             let data = try JSONEncoder().encode(source)
             #expect(try JSONDecoder().decode(TriggerSource.self, from: data) == source)
         }

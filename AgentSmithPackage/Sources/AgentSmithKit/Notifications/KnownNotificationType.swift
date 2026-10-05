@@ -22,4 +22,7 @@ public enum KnownNotificationType: String, CaseIterable, Sendable {
     /// One firing of a task watch. `.acted` for `startTask` (recipient `.runtime`), `.deliver` for
     /// the notifying actions (recipient `.smith`, or `.external(macOSNotificationTarget)`).
     case taskWatch = "task_watch"
+    /// A note for a coordinating worker about one of its child tasks (`CoordinatorTaskBriefing`):
+    /// an outcome, a stall, or a departure. Dispatch `.deliver`, recipient `.taskWorker`.
+    case coordinatorBriefing = "coordinator_briefing"
 }

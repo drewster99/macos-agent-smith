@@ -3,8 +3,9 @@ import Foundation
 /// Parks a coordinating worker until one of its child tasks reaches an outcome (completed, failed,
 /// waiting for review) or stalls (paused or stopped). The worker stays alive with its whole
 /// conversation and its task stays running — no new status (user decision 2026-10-05: "keeping it
-/// alive and NOT explicitly waiting"). While parked it takes no turns and gets no nudges; the
-/// child's note (`ChannelMessageKind.childTaskOutcome`) or any message handed to it wakes it.
+/// alive and NOT explicitly waiting"). While parked it takes no turns and gets no nudges; a note
+/// about one of its children (`KnownNotificationType.coordinatorBriefing`, drained from its broker
+/// queue) or any message handed to it wakes it.
 ///
 /// Parking is the tool's declared effect (`ToolEffect.waitsForChildTasks`), so it happens only on
 /// success. With no child that can still finish on its own (`ChildTaskProgress.isWaitable`), the

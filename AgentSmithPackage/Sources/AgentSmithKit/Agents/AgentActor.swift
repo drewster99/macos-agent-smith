@@ -377,6 +377,10 @@ public actor AgentActor {
     /// Queued messages are delivered ONCE, on the turn after the briefing — see
     /// `deliverQueuedTaskMessagesIfDue`.
     private var hasDeliveredQueuedTaskMessages = false
+    /// Whether this agent has completed at least one LLM turn — for a worker, that it has read its
+    /// briefing. Never cleared (unlike `llmTurns`, an inspector log a context rebuild empties), so
+    /// "after the briefing" gates can't reopen.
+    private var hasCompletedLLMTurn = false
 
     /// Brown-only: time of the most recent task communication (first-turn acknowledgement,
     /// task_update, or task_complete). Used by the silence nudge. Initialized when the run loop starts.
@@ -411,14 +415,16 @@ public actor AgentActor {
     /// since-cutoff. Returns nil to suppress this fire (no fresh activity).
     private var smithDigestProvider: (@Sendable (Date) async -> String?)?
 
-    /// Smith-only: pulls notifications the broker has queued for this agent (reminders, summaries,
-    /// task briefings, external messages). Drained once per run-loop iteration — the broker holds
-    /// them until Smith drains. Nil in agents/tests without a broker.
+    /// Pulls notifications the broker has queued for this agent — Smith's reminders, summaries, task
+    /// briefings and external messages; a task worker's notes about its child tasks. Drained once per
+    /// run-loop iteration (a worker only when it may take them,
+    /// `workerTakesQueuedNotifications`); the broker holds them until then. Nil in agents/tests
+    /// without a broker.
     private var drainNotifications: (@Sendable () async -> [QueuedDelivery])?
-    /// Smith-only: told which drained notifications Smith has finished ACTING on — fired when the run
-    /// loop next goes idle, i.e. after every turn their arrival triggered has completed. The broker
-    /// keeps them in its durable outbox until then, so a crash mid-action re-delivers them, and one
-    /// fully acted on is never handed out again.
+    /// Told which drained notifications this agent has finished ACTING on — fired when the run loop
+    /// next goes idle, i.e. after every turn their arrival triggered has completed. The broker keeps
+    /// them in its durable outbox until then, so a crash mid-action re-delivers them, and one fully
+    /// acted on is never handed out again.
     private var onNotificationsActedOn: (@Sendable ([NotificationID]) async -> Void)?
     /// Drained notifications not yet reported through `onNotificationsActedOn`.
     private var notificationsAwaitingAcknowledgement: [NotificationID] = []
@@ -905,8 +911,8 @@ public actor AgentActor {
         smithDigestProvider = provider
     }
 
-    /// Smith-only: wires the notification-drain source (the broker's pending queue for this agent).
-    /// Once set, the run loop drains queued notifications each iteration instead of polling wakes.
+    /// Wires the notification-drain source (the broker's pending queue for this agent: Smith's, or a
+    /// task worker's). Once set, the run loop drains queued notifications each iteration.
     public func setDrainNotifications(
         _ handler: @escaping @Sendable () async -> [QueuedDelivery],
         onActedOn: @escaping @Sendable ([NotificationID]) async -> Void
@@ -1352,7 +1358,7 @@ public actor AgentActor {
         guard configuration.role == .brown, !hasDeliveredQueuedTaskMessages else { return }
         // "After the briefing turn" means literally that — at least one LLM turn has completed,
         // so the worker has seen the task before it sees anything said about it.
-        guard !llmTurns.isEmpty else { return }
+        guard hasCompletedLLMTurn else { return }
         guard let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) else { return }
 
         let queued = await toolContext.taskStore.takePendingWorkerMessages(taskID: task.id)
@@ -1365,6 +1371,12 @@ public actor AgentActor {
             Self.orchestratorMessageEnvelope("(sent \(formatter.string(from: $0.queuedAt)), before you started) \($0.text)")
         }
         appendUserMessage(rendered.joined(separator: "\n\n"), attachments: attachments)
+        // A message from Smith hands work back, exactly as it does live: a worker parked when the
+        // handover fires must not be sent into a turn that offers it no tools.
+        if park != nil {
+            park = nil
+            continuationNudgesSinceProgress = 0
+        }
     }
 
     /// How a message from Smith is presented to a worker.
@@ -1580,8 +1592,10 @@ public actor AgentActor {
             // any channel message that raced in, so it stays Brown's first context entry.
             drainPendingInjectedMessages()
             drainPendingMessages()
-            await publishWaitingOnChildTasksIfChanged()
             await drainQueuedNotifications()
+            // After every drain that can un-park the worker, so the runtime stops counting a worker
+            // that resumed as waiting before it takes its turn.
+            await publishWaitingOnChildTasksIfChanged()
             checkBrownSilenceNudge()
             await checkSmithDigest()
             await pruneHistoryIfNeeded()
@@ -1763,6 +1777,7 @@ public actor AgentActor {
                     usage: response.usage
                 )
                 llmTurns.append(turnRecord)
+                hasCompletedLLMTurn = true
                 pruneOldTurnSnapshots()
                 onLLMCallRecorded?(.completed(turnRecord))
 
@@ -3682,12 +3697,10 @@ public actor AgentActor {
     /// re-park (`task_complete`, `request_help`), so the worker had no way back to idle and
     /// narrated until a circuit breaker terminated it.
     ///
-    /// `park` is why the worker is parked. A child task's outcome resumes only a worker waiting on
-    /// its children: a coordinator that already submitted its own work (`.awaitingHandoff`) must
-    /// not be pulled back into a turn by a child finishing — the outcome stays in its history.
-    static func resumesParkedWorker(_ message: ChannelMessage, agentID: UUID, park: WorkerPark) -> Bool {
+    /// A child task's note does not travel this way: it is a broker delivery
+    /// (`drainQueuedNotifications`), which also decides whether it resumes the worker.
+    static func resumesParkedWorker(_ message: ChannelMessage, agentID: UUID) -> Bool {
         guard message.recipientID == agentID else { return false }
-        if message.kind == .childTaskOutcome { return park == .awaitingChildTasks }
         // No kind is a POSITIVE answer here, not a fallback: "addressed to this worker and not
         // on the exemption list" IS the rule, and an unkinded message satisfies it. The private
         // work-handing messages are kinded (`orchestratorMessage` for notify_brown,
@@ -3807,12 +3820,16 @@ public actor AgentActor {
         return max(0, messageDebounceInterval - Date().timeIntervalSince(last))
     }
 
-    /// Smith-only: pulls whatever the broker has queued for this agent and injects each notification
-    /// as a user-role message, flagging unprocessed input so the loop handles them this iteration.
-    /// This is pure CONSUMPTION — the `WakeScheduler` owns scheduling and the broker owns delivery +
-    /// durability. A no-op for agents without a drain source wired (Brown).
+    /// Pulls whatever the broker has queued for this agent and injects each notification as a
+    /// user-role message, flagging unprocessed input so the loop handles them this iteration. This
+    /// is pure CONSUMPTION — the producers own scheduling and the broker owns delivery + durability.
+    /// A worker takes its queue only when `workerTakesQueuedNotifications` says so, and a note about
+    /// its children is what a worker waiting on them was waiting for: it un-parks. A no-op for agents
+    /// without a drain source wired.
     private func drainQueuedNotifications() async {
         guard let drainNotifications else { return }
+        let isWorker = configuration.role == .brown
+        if isWorker, !Self.workerTakesQueuedNotifications(hasCompletedLLMTurn: hasCompletedLLMTurn, park: park) { return }
         let deliveries = await drainNotifications()
         guard !deliveries.isEmpty else { return }
         for delivery in deliveries {
@@ -3820,7 +3837,32 @@ public actor AgentActor {
             notificationsAwaitingAcknowledgement.append(delivery.notification.id)
         }
         hasUnprocessedInput = true
+        // `park` is written only by this run loop, so the suspension above can't have changed it.
+        if isWorker {
+            continuationNudgesSinceProgress = 0
+            if park == .awaitingChildTasks {
+                park = nil
+                // Waiting was legitimate silence: don't greet the resumed worker with a nudge for
+                // the time it spent parked.
+                lastTaskCommunicationAt = Date()
+                toolCallsSinceTaskCommunication = 0
+            }
+        }
         pushLiveContext()
+    }
+
+    /// Whether a worker may take its queued notifications now: only after its briefing turn (the
+    /// worker must know its task before it reads about the task's children), and not while it has
+    /// handed its work off (`.awaitingHandoff` — submitted or escalated; it resumes only when work
+    /// is handed back, and the notes wait in the durable queue until then).
+    static func workerTakesQueuedNotifications(hasCompletedLLMTurn: Bool, park: WorkerPark?) -> Bool {
+        guard hasCompletedLLMTurn else { return false }
+        switch park {
+        case .none, .some(.awaitingChildTasks):
+            return true
+        case .some(.awaitingHandoff):
+            return false
+        }
     }
 
     /// Reports the notifications Smith has finished acting on (see `onNotificationsActedOn`).
@@ -4059,9 +4101,9 @@ public actor AgentActor {
         // arrived (revision feedback, an amended task, Smith poking the worker directly).
         // Everything else — system banners, public notifications, and the park notice itself —
         // still drains into history but doesn't trigger a new LLM call.
-        if let park {
+        if park != nil {
             let hasResumeMessage = pendingChannelMessages.contains {
-                Self.resumesParkedWorker($0, agentID: id, park: park)
+                Self.resumesParkedWorker($0, agentID: id)
             }
             if hasResumeMessage {
                 self.park = nil

@@ -163,3 +163,20 @@ public enum TaskWatchPayloadAction: String, Sendable {
     /// Deliver the payload's `text` to the notification's recipient.
     case deliverText = "deliver_text"
 }
+
+/// Handles `coordinator_briefing` notifications — a note for a coordinating worker about one of its
+/// child tasks (`CoordinatorBriefingDelivery`). The note is already framed for the worker.
+public struct CoordinatorBriefingNotificationHandler: NotificationHandler {
+    public init() {}
+
+    public func handle(_ notification: AgentNotification, runtime: any NotificationRuntime) async throws -> HandlerOutcome {
+        guard case .taskWorker = notification.recipient else {
+            throw NotificationHandlerError("coordinator_briefing must be addressed to a task worker")
+        }
+        guard let note = stringValue(notification.payload.data, CoordinatorBriefingDelivery.Key.note),
+              !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NotificationHandlerError("coordinator_briefing payload missing a note")
+        }
+        return .deliver(note)
+    }
+}

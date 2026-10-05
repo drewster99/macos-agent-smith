@@ -150,9 +150,92 @@ struct NotificationPullDeliveryTests {
         #expect(drained.map(\.text) == ["survive"], "the undelivered reminder survived the restart")
     }
 
+    // MARK: - Task-worker recipients (coordinator notes)
+
+    private func workerNote(_ key: String, taskID: UUID) -> AgentNotification {
+        AgentNotification(
+            id: NotificationID(namespace: "tasktransition", key: key),
+            triggerSource: .taskTransition(taskID: UUID(), statusRevision: 1),
+            recipient: .taskWorker(taskID: taskID), title: "t", createdAt: Date(),
+            payload: Payload(type: "coordinator_briefing")
+        )
+    }
+
+    private func workerBroker() async -> NotificationBroker {
+        let broker = NotificationBroker(runtime: NoopRuntime())
+        await broker.registerHandler(type: "coordinator_briefing", DeliverHandler(text: "note"))
+        await broker.registerPullRecipient(.taskWorker)
+        await broker.registerPullRecipient(.smith)
+        return broker
+    }
+
+    @Test("each task's worker has its own queue, lease and generation")
+    func workerLeasesAreIndependent() async {
+        let broker = await workerBroker()
+        let taskA = UUID(), taskB = UUID()
+        let noteA = workerNote("a", taskID: taskA), noteB = workerNote("b", taskID: taskB)
+        await broker.submit(noteA)
+        await broker.submit(noteB)
+        let generationA = await broker.resetLease(for: .taskWorker(taskID: taskA))
+        let generationB = await broker.resetLease(for: .taskWorker(taskID: taskB))
+
+        #expect(await broker.drainPendingDeliveries(for: .taskWorker(taskID: taskA)).map(\.notification.id) == [noteA.id])
+        #expect(await broker.drainPendingDeliveries(for: .smith).isEmpty, "Smith never gets a worker's note")
+        // An acknowledgement for A's note carrying B's generation names the wrong lease: ignored.
+        await broker.acknowledgeDeliveries([noteA.id], for: .taskWorker(taskID: taskA), leaseGeneration: generationB + 100)
+        #expect(await broker.deliveryStatus(noteA.id) == .pending)
+        // Resetting A's lease re-hands only A's note; B's is untouched and still un-handed.
+        await broker.resetLease(for: .taskWorker(taskID: taskA))
+        #expect(await broker.queuedDeliveries(for: .taskWorker(taskID: taskA)).map(\.isLeased) == [false])
+        #expect(await broker.drainPendingDeliveries(for: .taskWorker(taskID: taskB)).map(\.notification.id) == [noteB.id])
+        await broker.acknowledgeDeliveries([noteB.id], for: .taskWorker(taskID: taskB), leaseGeneration: generationB)
+        if case .delivered = await broker.deliveryStatus(noteB.id) {} else { Issue.record("B's note was not delivered on ack") }
+        _ = generationA
+    }
+
+    @Test("the nudge names the exact recipient")
+    func nudgeNamesWorker() async {
+        let broker = await workerBroker()
+        let box = NudgeBox()
+        await broker.setOnPendingEnqueued { recipient in Task { await box.record(recipient) } }
+        let taskID = UUID()
+        await broker.submit(workerNote("n", taskID: taskID))
+        try? await Task.sleep(for: .milliseconds(20))
+        #expect(await box.kinds == [.taskWorker(taskID: taskID)])
+    }
+
+    @Test("reclaim takes leased and unleased items, settles them withdrawn, and leaves later ones alone")
+    func reclaimQueued() async {
+        let disk = PendingDisk()
+        let broker = NotificationBroker(runtime: NoopRuntime(), persistPendingDelivery: { await disk.write($0) })
+        await broker.registerHandler(type: "coordinator_briefing", DeliverHandler(text: "note"))
+        await broker.registerPullRecipient(.taskWorker)
+        let taskID = UUID()
+        let recipient = Recipient.taskWorker(taskID: taskID)
+        let leasedNote = workerNote("leased", taskID: taskID)
+        let unleasedNote = workerNote("unleased", taskID: taskID)
+        await broker.submit(leasedNote)
+        let generation = await broker.resetLease(for: recipient)
+        _ = await broker.drainPendingDeliveries(for: recipient)
+        await broker.submit(unleasedNote)
+        #expect(await broker.recipientsWithQueuedDeliveries() == [recipient])
+
+        let later = workerNote("later", taskID: taskID)
+        let reclaimed = await broker.reclaimQueued([leasedNote.id, unleasedNote.id], reason: "gone")
+        await broker.submit(later)
+        #expect(Set(reclaimed) == [leasedNote.id, unleasedNote.id])
+        #expect(await broker.deliveryStatus(leasedNote.id) == .dropped(reason: .withdrawn))
+        #expect(await broker.deliveryStatus(unleasedNote.id) == .dropped(reason: .withdrawn))
+        #expect(await broker.queuedDeliveries(for: recipient).map(\.delivery.notification.id) == [later.id])
+        #expect(await disk.snapshot.map(\.notification.id) == [later.id])
+        // A late acknowledgement for a reclaimed id changes nothing.
+        await broker.acknowledgeDeliveries([leasedNote.id], for: recipient, leaseGeneration: generation)
+        #expect(await broker.deliveryStatus(leasedNote.id) == .dropped(reason: .withdrawn))
+    }
+
     private actor NudgeBox {
-        private(set) var kinds: [RecipientKind] = []
-        func record(_ kind: RecipientKind) { kinds.append(kind) }
+        private(set) var kinds: [Recipient] = []
+        func record(_ recipient: Recipient) { kinds.append(recipient) }
     }
 
     private actor PendingDisk {

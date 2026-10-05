@@ -234,19 +234,23 @@ struct CoordinatorTaskTests {
 
     // MARK: - Parking
 
-    @Test("a child's outcome resumes only a worker waiting on its children")
-    func childOutcomeResumesOnlyAWaitingWorker() {
-        let agentID = UUID()
-        let outcome = ChannelMessage(
-            sender: .system, recipientID: agentID, content: "child done",
-            metadata: ["messageKind": .kind(.childTaskOutcome)]
-        )
-        #expect(AgentActor.resumesParkedWorker(outcome, agentID: agentID, park: .awaitingChildTasks))
-        #expect(!AgentActor.resumesParkedWorker(outcome, agentID: agentID, park: .awaitingHandoff),
+    @Test("a worker takes its queued notes only after its briefing turn, and not once it handed its work off")
+    func workerQueueGate() {
+        #expect(!AgentActor.workerTakesQueuedNotifications(hasCompletedLLMTurn: false, park: nil),
+                "a note about the task's children before the worker has read the task")
+        #expect(AgentActor.workerTakesQueuedNotifications(hasCompletedLLMTurn: true, park: nil))
+        #expect(AgentActor.workerTakesQueuedNotifications(hasCompletedLLMTurn: true, park: .awaitingChildTasks))
+        #expect(!AgentActor.workerTakesQueuedNotifications(hasCompletedLLMTurn: true, park: .awaitingHandoff),
                 "a coordinator that already submitted its own work must not be pulled back by a child")
+    }
+
+    @Test("a message addressed to a parked worker resumes it unless it is informational")
+    func addressedMessageResumes() {
+        let agentID = UUID()
         let fromSmith = ChannelMessage(sender: .agent(.smith), recipientID: agentID, content: "also do X",
                                        metadata: ["messageKind": .kind(.orchestratorMessage)])
-        #expect(AgentActor.resumesParkedWorker(fromSmith, agentID: agentID, park: .awaitingChildTasks))
+        #expect(AgentActor.resumesParkedWorker(fromSmith, agentID: agentID))
+        #expect(!AgentActor.resumesParkedWorker(fromSmith, agentID: UUID()))
     }
 
     // MARK: - Tools
@@ -400,6 +404,74 @@ struct CoordinatorTaskTests {
         await runtime.stopAll()
     }
 
+    /// The child's outcome reaches the coordinator's worker through its durable broker queue and
+    /// wakes it from `wait_for_child_tasks` — the worker stays alive, its task running.
+    @Test("a child's outcome is delivered through the broker to the waiting coordinator, waking it")
+    func outcomeDeliveredThroughBroker() async throws {
+        let recorder = CoordinatorWakeRecorder()
+        let runtime = makeRuntime(brownProvider: WakeRecordingProvider(recorder: recorder, coordinatorMarker: Self.coordinatorMarker))
+        await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(
+            autoRunNextTask: false,
+            autoRunInterruptedTasks: false,
+            enableTaskCompletionValidators: false,
+            scopeToolSetOnTaskStart: false
+        )))
+        await runtime.setWorkerCapacity(2)
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        let coordinator = await store.addTask(title: "Coordinator", description: Self.coordinatorMarker)
+        let child = try await createChild(store, coordinator: coordinator.id)
+        await runtime.restartForNewTask(taskID: coordinator.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let coordinatorWorker = try #require(await runtime.liveWorkerID(taskID: coordinator.id))
+        #expect(await waitUntil { await recorder.waitCalls >= 1 }, "the coordinator never waited")
+
+        try await completeThroughValidation(store, child.id)
+        let woken = await waitUntil { await recorder.sawNote(containing: "COMPLETED") }
+        #expect(woken, "the coordinator was not woken with its child's outcome")
+        #expect(await runtime.liveWorkerID(taskID: coordinator.id) == coordinatorWorker)
+        #expect(await store.task(id: coordinator.id)?.status == .running)
+        await runtime.stopAll()
+    }
+
+    private actor CoordinatorWakeRecorder {
+        private(set) var waitCalls = 0
+        private var texts: [String] = []
+        func recordWait() { waitCalls += 1 }
+        func record(_ newTexts: [String]) { texts.append(contentsOf: newTexts) }
+        func sawNote(containing fragment: String) -> Bool { texts.contains { $0.contains(fragment) } }
+    }
+
+    /// The coordinator waits on its children at once, then records what woke it and thinks forever;
+    /// a child's model thinks forever. Sleeps are cancellable so teardown is clean.
+    private final class WakeRecordingProvider: LLMProvider, @unchecked Sendable {
+        private let recorder: CoordinatorWakeRecorder
+        private let coordinatorMarker: String
+        init(recorder: CoordinatorWakeRecorder, coordinatorMarker: String) {
+            self.recorder = recorder
+            self.coordinatorMarker = coordinatorMarker
+        }
+
+        func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
+            let texts = messages.compactMap { message -> String? in
+                guard case .text(let text) = message.content else { return nil }
+                return text
+            }
+            guard texts.contains(where: { $0.contains(coordinatorMarker) }) else {
+                try await Task.sleep(for: .seconds(3600))
+                return LLMResponse(text: "unreachable")
+            }
+            if await recorder.waitCalls == 0 {
+                await recorder.recordWait()
+                return LLMResponse(toolCalls: [LLMToolCall(id: "c\(UUID().uuidString.prefix(8))", name: "wait_for_child_tasks", arguments: "{}")])
+            }
+            await recorder.record(texts)
+            try await Task.sleep(for: .seconds(3600))
+            return LLMResponse(text: "unreachable")
+        }
+    }
+
     private static let coordinatorMarker = "COORDINATOR-MARKER-7f3a"
 
     /// The coordinator's model waits on its children once the gate opens; a child's model thinks
@@ -547,5 +619,71 @@ struct CoordinatorTaskTests {
             autoRunInterruptedTasks: false,
             memoryStore: nil
         )
+    }
+}
+
+/// How a coordinator's note travels through the notification broker (`CoordinatorBriefingDelivery`).
+@Suite("Coordinator briefing delivery")
+struct CoordinatorBriefingDeliveryTests {
+    private struct NoopRuntime: NotificationRuntime {
+        func autoRunTask(_ taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome { .placed }
+        func setTaskStatus(_ taskID: UUID, to status: AgentTask.Status) async -> Bool { true }
+        func taskTitle(_ taskID: UUID) async -> String? { nil }
+        func postSystemNotice(_ text: String, taskID: UUID?) async {}
+        func startTaskForWatch(_ targetID: UUID, watchedTaskID: UUID, watchID: UUID, occurrence: Int) async -> AutoRunDispatchOutcome { .placed }
+    }
+
+    private let coordinatorID = UUID()
+
+    private func record(cause: TaskTransitionCause = .validationPassed(validationWasRun: true)) -> TaskEffectRecord {
+        let transition = TaskStatusTransition(taskID: UUID(), statusRevision: 4, from: .validating, to: .completed, at: Date(), cause: cause)
+        return TaskEffectRecord(transition: transition, effect: .coordinatorBriefing(coordinatorTaskID: coordinatorID, note: "note"), release: .released)
+    }
+
+    @Test("the handler delivers the note, and refuses a missing note or a non-worker recipient")
+    func handler() async throws {
+        let handler = CoordinatorBriefingNotificationHandler()
+        let good = CoordinatorBriefingDelivery.outcomeNotification(for: record(), coordinatorTaskID: coordinatorID, note: "Child done.", smithNote: nil)
+        #expect(try await handler.handle(good, runtime: NoopRuntime()) == .deliver("Child done."))
+
+        var noNote = good
+        noNote.payload.data[CoordinatorBriefingDelivery.Key.note] = nil
+        await #expect(throws: NotificationHandlerError.self) { try await handler.handle(noNote, runtime: NoopRuntime()) }
+        var toSmith = good
+        toSmith.recipient = .smith
+        await #expect(throws: NotificationHandlerError.self) { try await handler.handle(toSmith, runtime: NoopRuntime()) }
+    }
+
+    @Test("the coordinator copy, Smith's fallback and the child's own Smith briefing have distinct ids; the reroute copy equals the direct one")
+    func ids() throws {
+        let effect = record()
+        let coordinatorCopy = CoordinatorBriefingDelivery.outcomeNotification(for: effect, coordinatorTaskID: coordinatorID, note: "n", smithNote: "smith")
+        let trigger = TriggerSource.taskTransition(taskID: effect.transition.taskID, statusRevision: effect.transition.statusRevision)
+        let direct = CoordinatorBriefingDelivery.smithFallback(effectRecordID: effect.id, trigger: trigger, title: coordinatorCopy.title, smithNote: "smith")
+        let smithOwnRecordID = NotificationID(namespace: trigger.namespace, key: "\(effect.transition.taskID.uuidString)|\(effect.transition.statusRevision)|smithBriefing")
+        #expect(Set([coordinatorCopy.id, direct.id, smithOwnRecordID]).count == 3)
+
+        let rerouted = try #require(try CoordinatorBriefingDelivery.smithFallback(rerouting: coordinatorCopy))
+        #expect(rerouted.id == direct.id, "the reroute and the direct fallback must dedup")
+        #expect(rerouted.recipient == .smith)
+
+        let withoutSmithNote = CoordinatorBriefingDelivery.outcomeNotification(for: effect, coordinatorTaskID: coordinatorID, note: "n", smithNote: nil)
+        #expect(try CoordinatorBriefingDelivery.smithFallback(rerouting: withoutSmithNote) == nil, "Smith is owed nothing")
+
+        var broken = coordinatorCopy
+        broken.payload.data[CoordinatorBriefingDelivery.Key.effectRecordID] = nil
+        #expect(throws: NotificationHandlerError.self) { try CoordinatorBriefingDelivery.smithFallback(rerouting: broken) }
+    }
+
+    @Test("a departure's id is deterministic per child revision and destination")
+    func departureIDs() {
+        let child = AgentTask(title: "Child", description: "d", coordinatorTaskID: coordinatorID)
+        func departure(_ where: CoordinatorChildDeparture.Departure) -> CoordinatorChildDeparture {
+            CoordinatorChildDeparture(coordinatorTaskID: coordinatorID, child: child, departure: `where`, undeliveredOutcomes: [])
+        }
+        let archived = CoordinatorBriefingDelivery.departureNotification(departure(.leftActive(.archived)))
+        #expect(archived.id == CoordinatorBriefingDelivery.departureNotification(departure(.leftActive(.archived))).id)
+        #expect(archived.id != CoordinatorBriefingDelivery.departureNotification(departure(.permanentlyDeleted)).id)
+        #expect(archived.recipient == .taskWorker(taskID: coordinatorID))
     }
 }

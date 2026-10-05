@@ -1139,12 +1139,24 @@ public actor OrchestrationRuntime {
     private var taskEventContinuation: AsyncStream<TaskStoreEvent>.Continuation?
     private var taskEffectRetryScheduled = false
 
-    /// Returns the broker, constructing and fully registering it on first call. Called only from
-    /// the serialized Smith-setup path, so there is no concurrent construction. Smith is a PULL
-    /// recipient: a `.deliver` for him is queued (persisted) until his run loop drains it — nothing
-    /// is pushed into Smith, so there is no reentrancy and a momentary absence loses nothing.
+    /// The one in-flight construction of the broker, so concurrent first callers (Smith setup, a
+    /// worker spawn, the task-event consumer) share it instead of building two brokers over the
+    /// same files.
+    private var notificationBrokerBuild: Task<NotificationBroker, Never>?
+
+    /// Returns the broker, constructing and fully registering it on first call. Single-flight
+    /// (`notificationBrokerBuild`). Smith and task workers are PULL recipients: a `.deliver` for one
+    /// is queued (persisted) until its run loop drains it — nothing is pushed into an agent, so there
+    /// is no reentrancy and a momentary absence loses nothing.
     private func ensureNotificationBroker() async -> NotificationBroker {
         if let notificationBroker { return notificationBroker }
+        if let notificationBrokerBuild { return await notificationBrokerBuild.value }
+        let build = Task { await self.buildNotificationBroker() }
+        notificationBrokerBuild = build
+        return await build.value
+    }
+
+    private func buildNotificationBroker() async -> NotificationBroker {
         let adapter = ClosureNotificationRuntime(
             autoRunTask: { [weak self] taskID, amendment in
                 guard let self else { return .refused("the session is shutting down") }
@@ -1196,6 +1208,7 @@ public actor OrchestrationRuntime {
         await broker.registerHandler(type: KnownNotificationType.userMessage.rawValue, UserMessageNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.taskBriefing.rawValue, TaskBriefingNotificationHandler())
         await broker.registerHandler(type: KnownNotificationType.taskWatch.rawValue, TaskWatchNotificationHandler())
+        await broker.registerHandler(type: KnownNotificationType.coordinatorBriefing.rawValue, CoordinatorBriefingNotificationHandler())
         // Every first-party type must have a handler before anything can fire: an unhandled type is
         // dropped on arrival, which would silently lose every notification of that type.
         let unhandled = await broker.typesMissingHandlers(KnownNotificationType.allCases.map(\.rawValue))
@@ -1207,12 +1220,19 @@ public actor OrchestrationRuntime {
             Task { await self?.handleNotificationSettled(notification, settlement) }
         }
         await broker.registerPullRecipient(.smith)
+        await broker.registerPullRecipient(.taskWorker)
         for (key, target) in externalRecipientTargets {
             await broker.registerRecipientTarget(.external(key), target)
         }
-        await broker.setOnPendingEnqueued { [weak self] kind in
-            guard kind == .smith else { return }
-            Task { await self?.wakeSmithFromIdle() }
+        await broker.setOnPendingEnqueued { [weak self] recipient in
+            switch recipient {
+            case .smith:
+                Task { await self?.wakeSmithFromIdle() }
+            case .taskWorker(let taskID):
+                Task { await self?.wakeWorkerFromIdle(taskID: taskID) }
+            case .runtime, .external:
+                break   // never queued: handled mechanically, or pushed
+            }
         }
         // Seed the delivered-set AND the pending-delivery outbox from disk BEFORE anything can fire,
         // so a re-fire after restart is deduped and an undrained reminder is handed out on the next
@@ -1233,6 +1253,13 @@ public actor OrchestrationRuntime {
     /// Wakes Smith's idle run loop so it drains a freshly-queued notification immediately.
     private func wakeSmithFromIdle() async {
         await supervisor.firstHandle(role: .smith)?.agent.wakeFromIdle()
+    }
+
+    /// Wakes the live worker of `taskID`, if any, so it drains a freshly-queued note (it takes it
+    /// only when it may — see `AgentActor.workerTakesQueuedNotifications`).
+    private func wakeWorkerFromIdle(taskID: UUID) async {
+        guard let workerID = await liveWorkerID(taskID: taskID) else { return }
+        await supervisor.agent(id: workerID)?.wakeFromIdle()
     }
 
     /// Promotes a `.scheduled` task to `.pending` — the `WakeScheduler`'s promotion hook, invoked
@@ -1310,6 +1337,8 @@ public actor OrchestrationRuntime {
             )
         }
         await reconcileInFlightWatchFirings()
+        // Notes queued for coordinators that finished or left the list while the app was down.
+        await rerouteStrandedCoordinatorBriefings()
         // Effects restored from disk (a crash before delivery) are due now.
         continuation.yield(.effectsReady)
     }
@@ -1544,6 +1573,7 @@ public actor OrchestrationRuntime {
             // oldest pending task (gated on auto-advance). Task boundaries are also the long-lived
             // Smith's compaction points: the finished task's play-by-play just became history.
             guard transition.entersTerminal else { return }
+            await rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating: transition.taskID)
             await reportHoldsStrandedByTerminal(transition)
             await scheduler.cancelWakesForTask(transition.taskID)
             // Through the coalescing driver, so a drain request arriving while this one is busy
@@ -1573,6 +1603,7 @@ public actor OrchestrationRuntime {
                 // its schedule: an orphaned wake would fire later and be skipped. No queue drain —
                 // an inactive task never held a worker slot.
                 await scheduler.cancelAllWakes(forRemovedTask: lifecycle.taskID)
+                await rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating: lifecycle.taskID)
                 await reportStrandedHolds(watchedTaskID: lifecycle.taskID, because: "is no longer in the active list")
             case .restoredToActive:
                 // A restored pending child of a working coordinator is committed work again.
@@ -1635,11 +1666,13 @@ public actor OrchestrationRuntime {
         }
     }
 
-    /// Hands a child task's outcome to its coordinator (`deliverToCoordinator`). A coordinator that
-    /// has since finished or left the active list hears nothing, so the child's own Smith note goes to
-    /// Smith instead — but only for a cause whose Smith note the coordinator's REPLACED; for any other
-    /// cause Smith already has his own. `child` is the child as the caller has it (it may have left
-    /// the active list since).
+    /// Hands a child's outcome or stall note to its coordinator through the broker
+    /// (`CoordinatorBriefingDelivery`): queued durably for `.taskWorker(coordinator)`, drained by its
+    /// worker, acknowledged once acted on. A note that REPLACED Smith's own note carries Smith's,
+    /// so whoever ends up owning it can give it to Smith if the coordinator never reads it. A
+    /// coordinator that is already gone hears nothing; Smith then gets the child's note only for a
+    /// cause whose Smith note the coordinator's replaced — for any other he already has his own.
+    /// `child` is the child as the caller has it (it may have left the active list since).
     private func deliverCoordinatorBriefing(
         _ record: TaskEffectRecord,
         child: AgentTask?,
@@ -1647,41 +1680,30 @@ public actor OrchestrationRuntime {
         note: String,
         via broker: NotificationBroker
     ) async -> Bool {
-        if await taskStore.task(id: coordinatorID)?.isCoordinatingChildren == true,
-           await deliverToCoordinator(coordinatorID: coordinatorID, childID: record.transition.taskID, note: note) {
-            return true
+        var smithNote: String?
+        if CoordinatorTaskBriefing.replacesSmithBriefing(record.transition.cause), let child {
+            smithNote = SmithTaskBriefing.note(for: record.transition, task: child)
         }
-        guard CoordinatorTaskBriefing.replacesSmithBriefing(record.transition.cause),
-              let child,
-              let smithNote = SmithTaskBriefing.note(for: record.transition, task: child) else { return true }
-        return await submitSmithBriefing(smithNote, for: record, via: broker)
-    }
-
-    /// Hands a note about a child to its coordinator: to the coordinator's live worker as a private
-    /// message (which wakes it from `wait_for_child_tasks`), or, with no worker running it, onto the
-    /// coordinator's queued worker messages for its next worker. Returns whether it was handed over.
-    /// Residuals, both accepted: a note queued for a coordinator with no worker (e.g. parked for the
-    /// user's sign-off) is never read if that coordinator then completes without another worker; and
-    /// a post to a worker that is mid-teardown, or registered but not yet subscribed during a respawn,
-    /// is missed. Neither strands a WAITING coordinator: a parked worker is always subscribed, and
-    /// `wait_for_child_tasks` re-reads every child on each call, as does the respawn briefing.
-    private func deliverToCoordinator(coordinatorID: UUID, childID: UUID, note: String) async -> Bool {
-        if let workerID = await liveWorkerID(taskID: coordinatorID) {
-            await channel.post(ChannelMessage(
-                sender: .system,
-                recipientID: workerID,
-                recipient: .agent(.brown),
-                content: note,
-                metadata: ["messageKind": .kind(.childTaskOutcome), "childTaskID": .string(childID.uuidString)],
-                taskID: coordinatorID
+        if await taskStore.task(id: coordinatorID)?.isCoordinatingChildren == true {
+            return await broker.submit(CoordinatorBriefingDelivery.outcomeNotification(
+                for: record, coordinatorTaskID: coordinatorID, note: note, smithNote: smithNote
             ))
-            return true
         }
-        return await taskStore.enqueueWorkerMessage(taskID: coordinatorID, message: QueuedWorkerMessage(text: note))
+        guard let smithNote else { return true }
+        let transition = record.transition
+        return await broker.submit(CoordinatorBriefingDelivery.smithFallback(
+            effectRecordID: record.id,
+            trigger: .taskTransition(taskID: transition.taskID, statusRevision: transition.statusRevision),
+            title: "Task \(transition.to.displayName)",
+            smithNote: smithNote
+        ))
     }
 
     /// A child left the active list while its coordinator was coordinating: deliver the outcomes the
-    /// move dropped (under their own record ids), then, for an unfinished child, say it won't finish.
+    /// move dropped (under their own record ids, so one already submitted dedups), then, for an
+    /// unfinished child, say it won't finish. The departure EVENT is not durable — a crash before
+    /// it reaches here loses the note, accepted because `wait_for_child_tasks` and a respawned
+    /// coordinator's briefing re-read every child, archived ones included.
     private func handleChildDeparture(_ departure: CoordinatorChildDeparture) async {
         let broker = await ensureNotificationBroker()
         for record in departure.undeliveredOutcomes {
@@ -1690,11 +1712,41 @@ public actor OrchestrationRuntime {
         }
         guard !departure.child.status.isTerminal,
               await taskStore.task(id: departure.coordinatorTaskID)?.isCoordinatingChildren == true else { return }
-        _ = await deliverToCoordinator(
-            coordinatorID: departure.coordinatorTaskID,
-            childID: departure.child.id,
-            note: CoordinatorTaskBriefing.departureNote(departure)
-        )
+        // A failed save is reported by the broker; the note is still queued in memory this launch.
+        _ = await broker.submit(CoordinatorBriefingDelivery.departureNotification(departure))
+    }
+
+    /// Notes queued for a task that is no longer coordinating (finished, archived, deleted) will
+    /// never be read: give Smith the copy each one owes him, then take them back. Re-reads the task
+    /// first — the event is history, and a coordinator retried since keeps its queue. A note its
+    /// worker was already handed (leased) is not copied to Smith: the coordinator had it. Smith's
+    /// copy is submitted BEFORE the original is reclaimed, so a crash in between leaves the original
+    /// for the next sweep, whose copy dedups.
+    private func rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating taskID: UUID) async {
+        if await taskStore.task(id: taskID)?.isCoordinatingChildren == true { return }
+        let broker = await ensureNotificationBroker()
+        var reclaimable: Set<NotificationID> = []
+        for (queued, isLeased) in await broker.queuedDeliveries(for: .taskWorker(taskID: taskID)) {
+            do {
+                if !isLeased, let toSmith = try CoordinatorBriefingDelivery.smithFallback(rerouting: queued.notification) {
+                    // Not durable yet: keep the original for the next sweep.
+                    guard await broker.submit(toSmith) else { continue }
+                }
+            } catch {
+                stopLogger.fault("Unroutable coordinator briefing \(queued.notification.id.description, privacy: .public): \(String(describing: error), privacy: .public)")
+                assertionFailure("Unroutable coordinator briefing: \(error)")
+            }
+            reclaimable.insert(queued.notification.id)
+        }
+        guard !reclaimable.isEmpty else { return }
+        await broker.reclaimQueued(reclaimable, reason: "the coordinating task finished or left the active list")
+    }
+
+    /// The cold-boot sweep of `rerouteCoordinatorBriefings` over every task with a queue.
+    private func rerouteStrandedCoordinatorBriefings() async {
+        for case .taskWorker(let taskID) in await ensureNotificationBroker().recipientsWithQueuedDeliveries() {
+            await rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating: taskID)
+        }
     }
 
     /// Submits a task-transition note to Smith's durable queue, identified by the effect record so
@@ -4878,6 +4930,20 @@ public actor OrchestrationRuntime {
             await brownAgent.markTerminated()
             stopLogger.warning("spawnBrown: aborted or stopped mid-spawn — discarding unregistered Brown \(brownID.uuidString.prefix(8), privacy: .public)")
             return nil
+        }
+        // Every task worker is a pull recipient of its task's queue (any task can become a
+        // coordinator). Same-task workers were terminated above, so nothing live holds this lease;
+        // resetting it re-hands whatever the previous worker never acknowledged.
+        if let task {
+            let broker = await ensureNotificationBroker()
+            let recipient = Recipient.taskWorker(taskID: task.id)
+            let leaseGeneration = await broker.resetLease(for: recipient)
+            await brownAgent.setDrainNotifications(
+                { [weak broker] in await broker?.drainPendingDeliveries(for: recipient) ?? [] },
+                onActedOn: { [weak broker] ids in
+                    await broker?.acknowledgeDeliveries(ids, for: recipient, leaseGeneration: leaseGeneration)
+                }
+            )
         }
         // A Brown worker just went live — refresh the concurrency meter's Brown count.
         refreshBrownWorkerActivityCount()

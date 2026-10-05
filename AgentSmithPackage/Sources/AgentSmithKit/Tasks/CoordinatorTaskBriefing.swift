@@ -11,9 +11,9 @@ extension AgentTask {
 /// The built-in subscriber that tells a coordinator's worker how a child task it created turned
 /// out — the counterpart of `SmithTaskBriefing` for tasks a worker created (decided 2026-10-05,
 /// user: "coordinator only"). Recorded as a durable effect in the same write as the child's status
-/// (`TaskEffect.coordinatorBriefing`) while the coordinator is active; the runtime hands it to the
-/// coordinator's live worker, which wakes it from `wait_for_child_tasks`, or queues it for the
-/// coordinator's next worker.
+/// (`TaskEffect.coordinatorBriefing`) while the coordinator is coordinating; the runtime submits it
+/// to the notification broker for `.taskWorker(coordinator)` (`CoordinatorBriefingDelivery`), whose
+/// durable queue the coordinator's worker drains — waking it from `wait_for_child_tasks`.
 public enum CoordinatorTaskBriefing {
 
     /// The longest result excerpt a note carries; the rest is one `get_task_details` call away.

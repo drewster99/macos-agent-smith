@@ -84,10 +84,6 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     /// Deliberately NOT in `parkedWorkerInformationalMessageKinds` — an amendment is work
     /// handed back, so like `orchestratorMessage` it resumes a parked worker.
     case taskAmendment = "task_amendment"
-    /// How a child task turned out, delivered privately to the worker of the coordinator task that
-    /// created it (`CoordinatorTaskBriefing`). Resumes a coordinator parked in
-    /// `wait_for_child_tasks` — the outcome is exactly what it is waiting for.
-    case childTaskOutcome = "child_task_outcome"
     /// The user acted on a task from the app UI (pause, stop, delete, Retry, Run Again); addressed
     /// to Smith so its picture of the task matches reality. Posted by the SYSTEM, never as the
     /// user — the user clicked a control, they did not write the notice. The typed action rides in
@@ -173,6 +169,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     // `agentOnline`, thousands of times. These cases exist so historical messages still decode
     // to a kind rather than to nil. Do not delete them; the logs outlive the code that wrote them.
 
+    /// How a child task turned out, posted privately to its coordinator's worker by builds of
+    /// 2026-10-05 before the note moved to the notification broker
+    /// (`KnownNotificationType.coordinatorBriefing`, which posts no transcript row).
+    case childTaskOutcome = "child_task_outcome"
     /// Agent-startup announcement from an older build.
     case agentOnline = "agent_online"
     /// Predecessor of the current validation park notices.

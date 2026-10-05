@@ -31,6 +31,8 @@ public enum TriggerSource: Sendable, Codable, Equatable {
     case taskTransition(taskID: UUID, statusRevision: Int)
     /// One firing of a task watch (`TaskWatch`).
     case taskWatch(watchID: UUID, occurrence: Int)
+    /// A task leaving the active list (archive, delete) — not a status transition.
+    case taskLifecycle(taskID: UUID)
     /// Forward-compat: a trigger written by a NEWER build decodes here rather than throwing.
     /// Sources are added freely, so an old build must tolerate an unrecognized trigger without
     /// bricking the decode of a whole persisted array — hence the custom `Codable` below, NOT the
@@ -45,11 +47,12 @@ public enum TriggerSource: Sendable, Codable, Equatable {
         case .inboundMessageObserver: return "inbox"
         case .taskTransition: return "tasktransition"
         case .taskWatch: return "taskwatch"
+        case .taskLifecycle: return "tasklifecycle"
         case .unknown: return "unknown"
         }
     }
 
-    private enum Kind: String, Codable { case timer, inboundMessageObserver, taskTransition, taskWatch, unknown }
+    private enum Kind: String, Codable { case timer, inboundMessageObserver, taskTransition, taskWatch, taskLifecycle, unknown }
     private enum CodingKeys: String, CodingKey { case kind, scheduleID, occurrence, taskID, statusRevision, watchID, watchOccurrence }
 
     public init(from decoder: Decoder) throws {
@@ -75,6 +78,8 @@ public enum TriggerSource: Sendable, Codable, Equatable {
                 watchID: try container.decode(UUID.self, forKey: .watchID),
                 occurrence: try container.decode(Int.self, forKey: .watchOccurrence)
             )
+        case .taskLifecycle:
+            self = .taskLifecycle(taskID: try container.decode(UUID.self, forKey: .taskID))
         case .unknown:
             self = .unknown
         }
@@ -97,6 +102,9 @@ public enum TriggerSource: Sendable, Codable, Equatable {
             try container.encode(Kind.taskWatch, forKey: .kind)
             try container.encode(watchID, forKey: .watchID)
             try container.encode(occurrence, forKey: .watchOccurrence)
+        case .taskLifecycle(let taskID):
+            try container.encode(Kind.taskLifecycle, forKey: .kind)
+            try container.encode(taskID, forKey: .taskID)
         case .unknown:
             try container.encode(Kind.unknown, forKey: .kind)
         }
@@ -106,12 +114,14 @@ public enum TriggerSource: Sendable, Codable, Equatable {
 /// A notification's routing target. Typed and CLOSED — the broker must resolve it exhaustively,
 /// which is why it never lives inside the open `data`. `RecipientKind` is the target-registration
 /// key (kind without the per-notification payload).
-public enum Recipient: Sendable, Codable, Equatable {
+public enum Recipient: Sendable, Codable, Hashable {
     /// No conversation — handled mechanically by the runtime (only `.acted` outcomes carry this).
     case runtime
     /// The long-lived orchestrator.
     case smith
-    /// The worker (Brown) assigned to a task. Delivery may queue until the task's next spawn.
+    /// Whichever worker (Brown) is running a task — a PULL recipient: its queue waits for the task's
+    /// next worker when none is live. Today only a coordinator's notes about its child tasks
+    /// (`KnownNotificationType.coordinatorBriefing`).
     case taskWorker(taskID: UUID)
     /// An outward bridge (e.g. deliver back out to iMessage/Slack), named by target key.
     case external(String)

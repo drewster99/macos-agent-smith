@@ -108,10 +108,12 @@ public actor NotificationBroker {
     /// out again meanwhile. A crash before the acknowledgement leaves them in the outbox, so a restart
     /// re-delivers them (never a lost reminder). In-memory only: on restart the lease is empty and the
     /// still-present outbox items are re-delivered, which is exactly the intended recovery.
-    private var leased: [RecipientKind: Set<NotificationID>] = [:]
+    /// Keyed by the full `Recipient`, not its kind: each task's worker is its own recipient, with
+    /// its own lease and generation.
+    private var leased: [Recipient: Set<NotificationID>] = [:]
     /// Bumped by every `resetLease`, so an acknowledgement from a torn-down recipient (carrying the
     /// OLD generation) can't remove an item its successor has been re-handed and not yet acted on.
-    private var leaseGeneration: [RecipientKind: Int] = [:]
+    private var leaseGeneration: [Recipient: Int] = [:]
     /// Durable outbox writer. Unlike the ledger's single-flight flush (whose fast-path returns
     /// BEFORE the write lands — fine for a dedup ledger), pending-delivery is the reminder-durability
     /// FLOOR: `SerialPersistenceWriter.flush()` parks the caller until its snapshot has actually been
@@ -120,7 +122,7 @@ public actor NotificationBroker {
     private let pendingWriter: SerialPersistenceWriter<[QueuedDelivery]>?
     /// Fired (best-effort) when something is enqueued for a pull recipient, so an idle recipient can
     /// wake and drain instead of waiting for its next scheduled tick.
-    private var onPendingEnqueued: (@Sendable (RecipientKind) -> Void)?
+    private var onPendingEnqueued: (@Sendable (Recipient) -> Void)?
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "Notifications")
 
@@ -188,13 +190,14 @@ public actor NotificationBroker {
 
     /// Register a recipient kind as PULL: a `.deliver` for it is queued (and persisted) until the
     /// recipient calls `drainPendingDeliveries`. Use for in-process recipients that drain on their
-    /// own loop (Smith), so nothing is pushed into them and nothing is lost to a transient absence.
+    /// own loop (Smith, task workers), so nothing is pushed into them and nothing is lost to a
+    /// transient absence.
     public func registerPullRecipient(_ kind: RecipientKind) {
         pullRecipients.insert(kind)
     }
 
     /// Wire the idle-wake nudge for pull recipients (see `onPendingEnqueued`).
-    public func setOnPendingEnqueued(_ handler: @escaping @Sendable (RecipientKind) -> Void) {
+    public func setOnPendingEnqueued(_ handler: @escaping @Sendable (Recipient) -> Void) {
         onPendingEnqueued = handler
     }
 
@@ -204,10 +207,10 @@ public actor NotificationBroker {
     /// the new recipient re-deliver whatever the old one never acknowledged. The new recipient passes
     /// the returned generation with its acknowledgements.
     @discardableResult
-    public func resetLease(for kind: RecipientKind) -> Int {
-        leased[kind] = nil
-        let generation = (leaseGeneration[kind] ?? 0) + 1
-        leaseGeneration[kind] = generation
+    public func resetLease(for recipient: Recipient) -> Int {
+        leased[recipient] = nil
+        let generation = (leaseGeneration[recipient] ?? 0) + 1
+        leaseGeneration[recipient] = generation
         return generation
     }
 
@@ -418,7 +421,7 @@ public actor NotificationBroker {
                     } else {
                         pendingDelivery.append(QueuedDelivery(notification: notification, text: text))
                         owned = await flushPendingDelivery()
-                        onPendingEnqueued?(kind)
+                        onPendingEnqueued?(notification.recipient)
                     }
                 } else {
                     Self.logger.error("No target or pull registration for recipient \(String(describing: kind), privacy: .public) — dropping notification \(id.description, privacy: .public).")
@@ -525,22 +528,55 @@ public actor NotificationBroker {
     /// restart — never lost. Acknowledging only after the recipient has ACTED (not on its next drain,
     /// as this used to) shrinks the redelivery window to "crashed while acting on it": a note that was
     /// fully acted on is not handed out again.
-    public func drainPendingDeliveries(for kind: RecipientKind) -> [QueuedDelivery] {
-        let alreadyLeased = leased[kind] ?? []
-        let batch = pendingDelivery.filter { $0.notification.recipient.kind == kind && !alreadyLeased.contains($0.notification.id) }
+    public func drainPendingDeliveries(for recipient: Recipient) -> [QueuedDelivery] {
+        let alreadyLeased = leased[recipient] ?? []
+        let batch = pendingDelivery.filter { $0.notification.recipient == recipient && !alreadyLeased.contains($0.notification.id) }
         if !batch.isEmpty {
-            leased[kind, default: []].formUnion(batch.map(\.notification.id))
+            leased[recipient, default: []].formUnion(batch.map(\.notification.id))
         }
         return batch
+    }
+
+    /// Everything queued for `recipient`, handed out or not, with whether it is handed out (leased)
+    /// right now.
+    public func queuedDeliveries(for recipient: Recipient) -> [(delivery: QueuedDelivery, isLeased: Bool)] {
+        let leasedNow = leased[recipient] ?? []
+        return pendingDelivery
+            .filter { $0.notification.recipient == recipient }
+            .map { ($0, leasedNow.contains($0.notification.id)) }
+    }
+
+    /// Every recipient something is queued for.
+    public func recipientsWithQueuedDeliveries() -> Set<Recipient> {
+        Set(pendingDelivery.map(\.notification.recipient))
+    }
+
+    /// Takes back queued pull deliveries WHETHER OR NOT they were handed out — for a recipient that
+    /// no longer exists (a coordinating task that finished or left the active list). Unlike
+    /// `withdraw`, a leased item is taken too: its holder is gone or moot, and a later
+    /// acknowledgement then finds nothing leased and is ignored. Only the named ids, so anything
+    /// queued after the caller's snapshot is untouched. Each is settled `.dropped(.withdrawn)`.
+    @discardableResult
+    public func reclaimQueued(_ ids: Set<NotificationID>, reason: String) async -> [NotificationID] {
+        let claimed = pendingDelivery.filter { ids.contains($0.notification.id) }
+        guard !claimed.isEmpty else { return [] }
+        // Synchronous, before any suspension: no drain can re-lease these in between.
+        pendingDelivery.removeAll { ids.contains($0.notification.id) }
+        for key in Array(leased.keys) { leased[key]?.subtract(ids) }
+        for item in claimed {
+            await settle(item.notification, .dropped(reason: .withdrawn), reason: reason)
+        }
+        await flushPendingDelivery()
+        return claimed.map(\.notification.id)
     }
 
     /// The recipient has finished acting on these deliveries: remove them from the durable outbox and
     /// record them delivered. `leaseGeneration` is the value `resetLease` returned when this recipient
     /// was wired; an acknowledgement from an older generation (a torn-down recipient) is ignored, as
     /// are ids not currently leased.
-    public func acknowledgeDeliveries(_ ids: [NotificationID], for kind: RecipientKind, leaseGeneration generation: Int) async {
-        guard generation == (leaseGeneration[kind] ?? 0) else { return }
-        let acknowledged = Set(ids).intersection(leased[kind] ?? [])
+    public func acknowledgeDeliveries(_ ids: [NotificationID], for recipient: Recipient, leaseGeneration generation: Int) async {
+        guard generation == (leaseGeneration[recipient] ?? 0) else { return }
+        let acknowledged = Set(ids).intersection(leased[recipient] ?? [])
         guard !acknowledged.isEmpty else { return }
         let now = Date()
         let settled = pendingDelivery.filter { acknowledged.contains($0.notification.id) }
@@ -550,7 +586,7 @@ public actor NotificationBroker {
             withdrawalsPending[id] = nil
         }
         for item in settled { onSettled?(item.notification, .delivered(now)) }
-        leased[kind]?.subtract(acknowledged)
+        leased[recipient]?.subtract(acknowledged)
         await flushPendingDelivery()
         await flushLedger()
     }
