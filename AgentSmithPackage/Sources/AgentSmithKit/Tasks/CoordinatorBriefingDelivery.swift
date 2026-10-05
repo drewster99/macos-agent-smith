@@ -45,18 +45,14 @@ public enum CoordinatorBriefingDelivery {
         )
     }
 
-    /// An unfinished child that left the active list. Keyed by the child's last status revision and
-    /// where it went, so a repeated event dedups and a later, different departure does not.
+    /// An unfinished child that left the active list. Keyed by the departure's own id: the event is
+    /// handled once, and a later departure of the same child (archive → restore → archive) is a new
+    /// one even though no status revision moved.
     static func departureNotification(_ departure: CoordinatorChildDeparture, now: Date = Date()) -> AgentNotification {
         let child = departure.child
         let trigger = TriggerSource.taskLifecycle(taskID: child.id)
-        let destination: String
-        switch departure.departure {
-        case .leftActive(let disposition): destination = disposition.rawValue
-        case .permanentlyDeleted: destination = "permanentlyDeleted"
-        }
         return AgentNotification(
-            id: NotificationID(namespace: trigger.namespace, key: "\(child.id.uuidString)|\(child.statusRevision)|\(destination)"),
+            id: NotificationID(namespace: trigger.namespace, key: "\(child.id.uuidString)|\(departure.id.uuidString)"),
             triggerSource: trigger,
             recipient: .taskWorker(taskID: departure.coordinatorTaskID),
             title: "Child task left the task list",

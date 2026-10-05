@@ -1586,6 +1586,9 @@ public actor OrchestrationRuntime {
         case .childLeftCoordination(let departure):
             await handleChildDeparture(departure)
 
+        case .promotedToTemplate(let taskID):
+            await rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating: taskID)
+
         case .requiredCapabilitiesChanged(let taskID):
             // The worker re-scopes at its next turn boundary, against the task as it then reads —
             // the same stateless pass a changed candidate set triggers. A task with no live worker
@@ -3029,7 +3032,7 @@ public actor OrchestrationRuntime {
             var startsWithoutColdPath = origin == .coordinatorTool
             if !startsWithoutColdPath { startsWithoutColdPath = await self.hasLiveSmith() }
             if startsWithoutColdPath {
-                await self.performStartTaskWithLiveSmith(taskID: startID)
+                await self.performStartTaskWithLiveSmith(taskID: startID, origin: origin)
                 return
             }
             // Cold path — no Smith to preserve. Capture the most recent user message
@@ -3101,6 +3104,20 @@ public actor OrchestrationRuntime {
         return instance.id
     }
 
+    private enum ResumeQueue { case launchResume, capacityDeferred }
+
+    /// Where a start refused at capacity goes back to: the resume queue it came from when it was
+    /// resuming an interrupted task, else nowhere (it is pended). A coordinator's interrupted child
+    /// returns to the capacity-deferred queue, which resumes regardless of the auto-run settings.
+    private static func resumeQueue(forRefusedStartOf claimedFrom: AgentTask.Status, origin: TaskStartOrigin) -> ResumeQueue? {
+        guard claimedFrom == .interrupted else { return nil }
+        switch origin {
+        case .launchResume: return .launchResume
+        case .capacityResume, .coordinatorTool: return .capacityDeferred
+        case .explicitUser, .smithTool, .scheduled, .autoAdvance, .watchSatisfied: return nil
+        }
+    }
+
     private func hasLiveSmith() -> Bool {
         supervisor.firstHandle(role: .smith) != nil
     }
@@ -3109,7 +3126,7 @@ public actor OrchestrationRuntime {
     /// as a lifecycle-queue item. Mirrors `performStart`'s resuming branch for the Brown
     /// side (spawn → status → assign → briefing → synthetic ack), but Smith is informed
     /// with one appended turn instead of being rebuilt from scratch.
-    private func performStartTaskWithLiveSmith(taskID: UUID) async {
+    private func performStartTaskWithLiveSmith(taskID: UUID, origin: TaskStartOrigin) async {
         guard !aborted, !stopRequested else { return }
         guard let task = await taskStore.task(id: taskID) else {
             await channel.post(ChannelMessage(
@@ -3169,11 +3186,27 @@ public actor OrchestrationRuntime {
         // and terminations serialize — the loser is PENDED, never failed and never
         // evicting anyone; the auto-advance drain starts it when a slot frees.
         if !admitsWorker(for: task) {
+            // An interrupted task being RESUMED from a queue (the launch batch, a capacity cut, a
+            // coordinator's child) goes back to `.interrupted` at the front of its queue. Pending it
+            // would drop it from every resume path — with auto-advance off it would never start
+            // (two drains, or a drain and the cold-launch batch, can each see the same free slot).
+            let resumeQueue = Self.resumeQueue(forRefusedStartOf: task.status, origin: origin)
+            let revertStatus: AgentTask.Status = resumeQueue == nil ? .pending : .interrupted
             // Revert only OUR claim: a wake can flip this `.starting` task to `.paused` during the
-            // idle-worker cycling above, and an unconditional `.pending` would clobber that pause and
+            // idle-worker cycling above, and an unconditional revert would clobber that pause and
             // let the auto-advance drain run a task that was meant to stay paused. If the CAS loses,
             // honor the new status silently (no misleading "queued" message).
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.starting], cause: .startAbandoned) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: revertStatus, ifCurrentlyIn: [.starting], cause: .startAbandoned) else { return }
+            switch resumeQueue {
+            case .launchResume?:
+                launchResumeQueue.removeAll { $0 == taskID }
+                launchResumeQueue.insert(taskID, at: 0)
+            case .capacityDeferred?:
+                capacityDeferredQueue.removeAll { $0 == taskID }
+                capacityDeferredQueue.insert(taskID, at: 0)
+            case nil:
+                break
+            }
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Task \"\(task.title)\" queued — all \(maxConcurrentWorkers) worker slot(s) are busy. It will start automatically when one frees.",

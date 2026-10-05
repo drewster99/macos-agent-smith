@@ -223,6 +223,16 @@ struct CoordinatorTaskTests {
         #expect(departures.first.map(CoordinatorTaskBriefing.departureNote)?.contains("ARCHIVED") == true)
     }
 
+    @Test("promoting a task to a template reports that it stopped coordinating")
+    func promotionEmitsEvent() async throws {
+        let store = TaskStore()
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        let events = StoreEventCollector()
+        await store.setEventObserver { events.append($0) }
+        #expect(await store.setTemplate(id: coordinator.id, isTemplate: true) == nil)
+        #expect(events.values.contains(.promotedToTemplate(taskID: coordinator.id)))
+    }
+
     @Test("a child's routing line follows its coordinator")
     func routingDescription() {
         #expect(CoordinatorTaskBriefing.routingDescription(coordinator: nil).contains("no longer exists"))
@@ -678,12 +688,12 @@ struct CoordinatorBriefingDeliveryTests {
     @Test("a departure's id is deterministic per child revision and destination")
     func departureIDs() {
         let child = AgentTask(title: "Child", description: "d", coordinatorTaskID: coordinatorID)
-        func departure(_ where: CoordinatorChildDeparture.Departure) -> CoordinatorChildDeparture {
-            CoordinatorChildDeparture(coordinatorTaskID: coordinatorID, child: child, departure: `where`, undeliveredOutcomes: [])
-        }
-        let archived = CoordinatorBriefingDelivery.departureNotification(departure(.leftActive(.archived)))
-        #expect(archived.id == CoordinatorBriefingDelivery.departureNotification(departure(.leftActive(.archived))).id)
-        #expect(archived.id != CoordinatorBriefingDelivery.departureNotification(departure(.permanentlyDeleted)).id)
-        #expect(archived.recipient == .taskWorker(taskID: coordinatorID))
+        let first = CoordinatorChildDeparture(id: UUID(), coordinatorTaskID: coordinatorID, child: child, departure: .leftActive(.archived), undeliveredOutcomes: [])
+        let notification = CoordinatorBriefingDelivery.departureNotification(first)
+        #expect(notification.id == CoordinatorBriefingDelivery.departureNotification(first).id, "a resubmission dedups")
+        // Archive → restore → archive: the same child, revision and destination, but a new departure.
+        let second = CoordinatorChildDeparture(id: UUID(), coordinatorTaskID: coordinatorID, child: child, departure: .leftActive(.archived), undeliveredOutcomes: [])
+        #expect(notification.id != CoordinatorBriefingDelivery.departureNotification(second).id)
+        #expect(notification.recipient == .taskWorker(taskID: coordinatorID))
     }
 }

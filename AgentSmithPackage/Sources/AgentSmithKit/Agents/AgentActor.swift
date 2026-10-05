@@ -1450,13 +1450,20 @@ public actor AgentActor {
             // next refresh's fingerprint and re-scopes again.
             let scopingCandidates = ToolPolicy.scopingCandidates(candidates, globalPolicies: globalToolPolicy)
             let scopingFingerprint = ToolRegistry.fingerprint(of: scopingCandidates)
-            // A request is consumed only when there is a task to scope against: one made while the
-            // task is between bindings (validating, say) waits for the next refresh that finds it.
-            if scopingFingerprint != lastScopedFingerprint || toolRescopeRequested,
-               let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) {
+            if scopingFingerprint != lastScopedFingerprint || toolRescopeRequested {
+                // Consumed BEFORE the task read: a request arriving during that suspension (or the
+                // scoping call) sets the flag again and is honored next refresh, instead of being
+                // cleared by a pass that read the task before it.
+                let wasRequested = toolRescopeRequested
                 toolRescopeRequested = false
-                lastScopedFingerprint = scopingFingerprint
-                await rescopeToolsStateless(for: task, candidates: scopingCandidates)
+                if let task = await toolContext.taskStore.taskForAgent(agentID: toolContext.agentID) {
+                    lastScopedFingerprint = scopingFingerprint
+                    await rescopeToolsStateless(for: task, candidates: scopingCandidates)
+                } else if wasRequested {
+                    // Between bindings (validating, say): keep the request for the refresh that
+                    // finds the task.
+                    toolRescopeRequested = true
+                }
             }
         } else {
             approvedToolNames = candidateNames

@@ -135,7 +135,8 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
         case .startClaimed:
             return from.isRunnable && to == .starting
         case .startAbandoned:
-            return from == .starting && to == .pending
+            // `.interrupted` only for a refused resume going back onto its resume queue.
+            return from == .starting && (to == .pending || to == .interrupted)
         case .spawnFailed, .spawnFailedAtRuntimeStart:
             return [.starting, .pending, .paused, .interrupted, .running].contains(from) && to == .failed
         case .workerStarted, .workerStartedAtRuntimeStart:

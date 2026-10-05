@@ -594,6 +594,7 @@ public actor TaskStore {
         }
         guard !child.status.isTerminal || !undelivered.isEmpty else { return }
         emit(.childLeftCoordination(CoordinatorChildDeparture(
+            id: UUID(),
             coordinatorTaskID: coordinatorID,
             child: child,
             departure: departure,
@@ -835,6 +836,7 @@ public actor TaskStore {
             if refusal == nil {
                 if let normalization { publish(normalization) }
                 for watchID in spentChainLinks { releaseStartHolds(placedBy: watchID) }
+                if isTemplate && !wasTemplate { emit(.promotedToTemplate(taskID: id)) }
             }
             return refusal
             }
@@ -1054,6 +1056,7 @@ public actor TaskStore {
         if refusal == nil {
             if let normalization { publish(normalization) }
             for watchID in spentChainLinks { releaseStartHolds(placedBy: watchID) }
+            if isTemplate && !wasTemplate { emit(.promotedToTemplate(taskID: id)) }
         }
         return refusal
         }

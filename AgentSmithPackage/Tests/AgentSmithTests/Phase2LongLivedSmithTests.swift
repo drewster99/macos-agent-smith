@@ -437,11 +437,52 @@ struct Phase2LongLivedSmithTests {
         await runtime.drainPendingTaskQueueForTesting()
         await runtime.waitForPendingRestarts()
 
-        _ = await waitUntil { await statuses().filter { $0 == .interrupted }.isEmpty }
+        // Waits for the asserted state, not just "nothing interrupted": the resume can be kicked by
+        // the task-event consumer's own drain (this call then finds the drain busy and returns
+        // early), so the resumed task may still be `.starting` when the queue is already empty.
+        _ = await waitUntil {
+            let current = await statuses()
+            return current.filter { $0 == .interrupted }.isEmpty && current.filter { $0 == .running }.count == 2
+        }
         let after = await statuses()
         #expect(after.filter { $0 == .interrupted }.count == 0, "the queued interrupted task resumed when a slot freed")
         #expect(after.filter { $0 == .running }.count == 2, "two running again (one completed, the queued one took its slot)")
 
+        await runtime.stopAll()
+    }
+
+    /// Two drains (or a drain and the cold-launch batch) can each see the same free slot; the
+    /// serialized gate refuses the loser. A refused RESUME must go back to `.interrupted` on its
+    /// queue — pended, it fell off every resume path and, with auto-advance off, never started.
+    @Test("A resume refused at capacity stays interrupted on its queue and resumes when a slot frees")
+    func refusedResumeStaysQueued() async {
+        let runtime = makeRuntime(autoRunInterrupted: true)
+        await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(autoRunNextTask: false, autoRunInterruptedTasks: true, scopeToolSetOnTaskStart: false)))
+        await runtime.setWorkerCapacity(1)
+        let store = await runtime.taskStore
+        let a = await store.addTask(title: "A", description: "d")
+        let b = await store.addTask(title: "B", description: "d")
+        for t in [a, b] { await store.driveStatus(id: t.id, to: .interrupted) }
+        await runtime.start()
+        _ = await waitUntil {
+            let aRunning = await store.task(id: a.id)?.status == .running
+            let bRunning = await store.task(id: b.id)?.status == .running
+            return aRunning || bRunning
+        }
+        let running = await store.task(id: a.id)?.status == .running ? a : b
+        let queued = running.id == a.id ? b : a
+
+        // A second resume of the queued task while the only slot is taken: the gate refuses it.
+        await runtime.restartForNewTask(taskID: queued.id, origin: .launchResume)
+        await runtime.waitForPendingRestarts()
+        #expect(await store.task(id: queued.id)?.status == .interrupted, "a refused resume must stay interrupted, not be pended")
+
+        // The slot frees: the queued task resumes on its own (auto-advance is off).
+        await runtime.terminateTaskAgents(taskID: running.id)
+        await store.driveStatus(id: running.id, to: .completed)
+        await runtime.drainPendingTaskQueueForTesting()
+        await runtime.waitForPendingRestarts()
+        #expect(await waitUntil { await store.task(id: queued.id)?.status == .running }, "the refused resume was lost from its queue")
         await runtime.stopAll()
     }
 

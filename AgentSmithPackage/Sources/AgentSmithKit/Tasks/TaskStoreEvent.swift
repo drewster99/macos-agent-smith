@@ -14,6 +14,9 @@ public enum TaskStoreEvent: Sendable, Equatable {
     /// A coordinator's child left the active list while the coordinator was still coordinating —
     /// unfinished, or carrying an outcome its coordinator had not been handed yet.
     case childLeftCoordination(CoordinatorChildDeparture)
+    /// A task became a template, so it no longer coordinates the children it created (a template
+    /// is a launcher, never a piece of work): notes queued for its worker will never be read.
+    case promotedToTemplate(taskID: UUID)
 }
 
 /// A child task leaving its open coordinator's reach (archived, deleted, permanently deleted). The
@@ -25,6 +28,9 @@ public struct CoordinatorChildDeparture: Sendable, Equatable {
         case permanentlyDeleted
     }
 
+    /// This departure's own identity. A disposition change bumps no status revision, so archive →
+    /// restore → archive of one pending child is told apart only by this.
+    public let id: UUID
     public let coordinatorTaskID: UUID
     /// The child as it was just before it left (its effects not yet stripped).
     public let child: AgentTask
