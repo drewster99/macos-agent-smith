@@ -242,16 +242,27 @@ public enum LLMRetryPolicy {
         return min(baseBackoffSeconds * pow(2, Double(exponent)), budget.maxBackoffSeconds)
     }
 
-    /// Sleeps for the computed delay. Returns false if the sleep was cancelled, so callers can
-    /// break out of their retry loop rather than immediately re-issuing a doomed call.
-    @discardableResult
-    public static func sleep(attempt: Int, retryAfter: TimeInterval?) async -> Bool {
-        do {
-            try await Task.sleep(for: .seconds(delay(attempt: attempt, retryAfter: retryAfter)))
-            return true
-        } catch {
-            return false
+    /// Why a caller retrying `error` is about to wait — the typed reason a `ProviderWait` shows.
+    ///
+    /// Read off the same typed facts `classify(_:)` uses (status code, the Codex limit
+    /// discriminator, the kit's memory-exhaustion code, the URL error domain), never off prose.
+    /// Meaningful only for an error `classify` called transient; a permanent one is not waited on.
+    public static func waitReason(for error: Error) -> ProviderWaitReason {
+        guard let providerError = error as? LLMProviderError else {
+            return (error as NSError).domain == NSURLErrorDomain ? .networkError : .transientError
         }
+        if providerError.serverMemoryExhaustion != nil { return .serverOutOfMemory }
+        guard case .httpError(let statusCode, let body, _, let retryAfter) = providerError else {
+            return .transientError
+        }
+        if let limit = CodexLimit.parse(statusCode: statusCode, body: body),
+           case .usageWindowExhausted = limit.kind {
+            return .usageLimitReached
+        }
+        if statusCode == 429 { return .rateLimited }
+        if retryAfter != nil || retryAfterFromErrorBody(body) != nil { return .serverRequestedDelay }
+        if (500...599).contains(statusCode) { return .serverError }
+        return .transientError
     }
 
     /// Extracts a server-requested retry delay (seconds) from an error *body* for providers that

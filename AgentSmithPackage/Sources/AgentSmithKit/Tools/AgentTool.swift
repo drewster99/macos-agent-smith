@@ -270,7 +270,7 @@ public struct ToolContext: Sendable {
     /// Full snapshot of the ModelConfiguration the owning agent is using. Used to stamp channel
     /// messages with provider/model/config provenance.
     ///
-    /// Seeded at context construction and kept current by `AgentActor.applyPendingModelRetune`,
+    /// Seeded at context construction and kept current by `AgentActor.applyPendingModelChange`,
     /// which rewrites it in the same breath as the agent's own configuration. Without that, an
     /// agent retuned in place would keep labelling every message it posted for the rest of the
     /// session with the parameters it was spawned with.

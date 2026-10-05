@@ -59,6 +59,9 @@ final class InspectorLiveState {
     /// untracked `lastProcessingSince` / `lastToolsRunningSince` instead of reading these.
     private(set) var processingSince: [AgentRole: Date] = [:]
     private(set) var toolsRunningSince: [AgentRole: Date] = [:]
+    /// Each role's callers sleeping on their provider, soonest resumption first. Covers every role
+    /// for the same reason `processingSince` does: the standalone inspector window reads it.
+    private(set) var providerWaitsByRole: [AgentRole: [ProviderWait]] = [:]
     @ObservationIgnored private var lastProcessingSince: [AgentRole: Date] = [:]
     @ObservationIgnored private var lastToolsRunningSince: [AgentRole: Date] = [:]
 
@@ -134,6 +137,7 @@ final class InspectorLiveState {
         lastToolsRunningSince = next.toolsRunningSince
         if processingSince != next.processingSince { processingSince = next.processingSince }
         if toolsRunningSince != next.toolsRunningSince { toolsRunningSince = next.toolsRunningSince }
+        if providerWaitsByRole != next.providerWaitsByRole { providerWaitsByRole = next.providerWaitsByRole }
     }
 
     private struct Outputs {
@@ -142,6 +146,7 @@ final class InspectorLiveState {
         let liveRows: [LiveTaskRow]
         let processingSince: [AgentRole: Date]
         let toolsRunningSince: [AgentRole: Date]
+        let providerWaitsByRole: [AgentRole: [ProviderWait]]
     }
 
     /// Everything the views show, from the current inputs. Nil once the view model is gone.
@@ -164,17 +169,21 @@ final class InspectorLiveState {
                 toolsRunning[role] = lastToolsRunningSince[role] ?? now
             }
         }
+        // Already soonest-first from the board; grouping keeps that order within each role.
+        let waitsByRole = Dictionary(grouping: viewModel.providerWaits, by: \.holder.role)
         var cards: [AgentRole: AgentRoleData] = [:]
         for role in roleCards.keys {
             cards[role] = roleCardData(for: role, viewModel: viewModel,
-                                       processingSince: processing[role], toolsRunningSince: toolsRunning[role])
+                                       processingSince: processing[role], toolsRunningSince: toolsRunning[role],
+                                       providerWaits: waitsByRole[role] ?? [])
         }
         return Outputs(
             roleCards: cards,
-            summarizerCard: summarizerCardData(viewModel: viewModel),
+            summarizerCard: summarizerCardData(viewModel: viewModel, providerWaits: waitsByRole[.summarizer] ?? []),
             liveRows: Self.liveRows(viewModel: viewModel, now: now),
             processingSince: processing,
-            toolsRunningSince: toolsRunning
+            toolsRunningSince: toolsRunning,
+            providerWaitsByRole: waitsByRole
         )
     }
 
@@ -187,7 +196,8 @@ final class InspectorLiveState {
     // MARK: - Role cards
 
     private func roleCardData(for role: AgentRole, viewModel: AppViewModel,
-                              processingSince: Date?, toolsRunningSince: Date?) -> AgentRoleData {
+                              processingSince: Date?, toolsRunningSince: Date?,
+                              providerWaits: [ProviderWait]) -> AgentRoleData {
         let store = viewModel.inspectorStore
         let roleMessages = bucketed[role] ?? []
         let isProcessing = Self.isProcessing(role, viewModel: viewModel)
@@ -209,17 +219,19 @@ final class InspectorLiveState {
             processingSince: processingSince,
             executingTools: executingTools,
             toolsRunningSince: toolsRunningSince,
+            providerWaits: providerWaits,
             modelConfig: viewModel.resolvedAgentConfigs[role]
         )
     }
 
-    private func summarizerCardData(viewModel: AppViewModel) -> SummarizerCardData {
+    private func summarizerCardData(viewModel: AppViewModel, providerWaits: [ProviderWait]) -> SummarizerCardData {
         SummarizerCardData(
             currentSystemPrompt: viewModel.inspectorStore.systemPrompt(for: .summarizer),
             pollInterval: viewModel.agentPollIntervals[.summarizer] ?? 5,
             maxToolCalls: viewModel.agentMaxToolCalls[.summarizer] ?? 100,
             isProcessing: viewModel.processingRoles.contains(.summarizer),
             executingTools: Self.executingToolNames(viewModel.toolExecutingByRole[.summarizer]),
+            providerWaits: providerWaits,
             messages: bucketed[.summarizer] ?? []
         )
     }
@@ -331,7 +343,8 @@ final class InspectorLiveState {
                 id: task.id,
                 title: task.title,
                 status: task.status,
-                brownState: brownState(for: task, processing: processing, tools: toolsByInstance, security: security),
+                brownState: brownState(for: task, processing: processing, tools: toolsByInstance,
+                                       security: security, providerWaits: viewModel.providerWaits),
                 // Already newest-first and already capped by the collecting loop above.
                 tools: toolsByTask[task.id] ?? []
             )
@@ -412,9 +425,18 @@ final class InspectorLiveState {
         for task: AgentTask,
         processing: Set<AgentInstanceRef>,
         tools: [AgentInstanceRef: [String: Int]],
-        security: LiveActivityTracker.Snapshot
+        security: LiveActivityTracker.Snapshot,
+        providerWaits: [ProviderWait]
     ) -> String? {
         for id in task.assigneeIDs {
+            // A wait on a provider outranks everything below: while it lasts the worker is neither
+            // thinking nor being reviewed, it is waiting out a limit — possibly for days.
+            if let own = providerWaits.first(where: { $0.holder.agentID == id }) {
+                return "waiting for \(own.modelID ?? "its model") — \(own.reason.displayDescription), until \(own.resumeClockDescription)"
+            }
+            if let review = providerWaits.first(where: { $0.holder.purpose.heldAgentID == id }) {
+                return "waiting on security — its model \(review.reason.displayDescription), until \(review.resumeClockDescription)"
+            }
             let brownRef = AgentInstanceRef(role: .brown, instanceID: id)
             if let counts = tools[brownRef], !counts.isEmpty {
                 let names = counts.keys.sorted()
@@ -501,6 +523,8 @@ struct AgentRoleData: Equatable {
     let executingTools: [String]
     /// When tools started running (continuously); nil while none is running.
     let toolsRunningSince: Date?
+    /// This role's callers sleeping on their provider, soonest resumption first.
+    let providerWaits: [ProviderWait]
     let modelConfig: ModelConfiguration?
 }
 
@@ -511,6 +535,8 @@ struct SummarizerCardData: Equatable {
     let maxToolCalls: Int
     let isProcessing: Bool
     let executingTools: [String]
+    /// The summarizer's calls sleeping on their provider, soonest resumption first.
+    let providerWaits: [ProviderWait]
     let messages: [ChannelMessage]
 }
 

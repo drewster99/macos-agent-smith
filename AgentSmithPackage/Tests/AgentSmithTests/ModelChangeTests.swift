@@ -3,23 +3,24 @@ import Testing
 import SemanticSearch
 @testable import AgentSmithKit
 
-/// A RETUNE is a new provider build for the model an agent is already running — a temperature,
-/// effort, thinking or token-cap edit in Settings. Before this, such an edit reached Brown only at
-/// its next spawn and reached the long-lived Smith never: `restartForNewTask` cycles the worker and
-/// leaves Smith alone, so Smith kept its spawn-time parameters for the life of the session.
+/// A live agent follows its role's model assignment: a RETUNE (temperature, effort, thinking,
+/// token caps) and a SWITCH to a different model or provider both reach it, applied at a turn
+/// boundary so no single turn spans two configurations, and the conversation is kept. Before
+/// 2026-10-05 a switch never reached a live agent, so a worker stuck on an exhausted provider could
+/// only be rescued by stopping it.
 ///
-/// Two halves are pinned here, and they are load-bearing in opposite directions:
+/// Pinned here:
 ///
-/// 1. A retune of the SAME model reaches a live agent, applied at a turn boundary so no single turn
-///    spans two configurations.
-/// 2. A change of MODEL or PROVIDER does NOT, because the stored conversation carries
-///    provider-shaped data and tool-call ids minted in one provider's format.
+/// 1. A change is staged, then applied at the loop boundary, and the next call uses the new provider.
+/// 2. A switch adapts the conversation (`ModelSwitchHistory`) and is announced.
+/// 3. `setProviders` delivers retunes and switches to the live Smith.
+/// 4. An agent sleeping out a provider wait is woken by a switch and retries on the new model at once.
 ///
-/// Not pinned, deliberately: that an UNCHANGED configuration skips the retune. Its failure mode is
+/// Not pinned, deliberately: that an UNCHANGED configuration skips the change. Its failure mode is
 /// a performance regression rather than a wrong answer (a needless swap discards a provider's
 /// per-instance prefix-cache key), and it has no observable signal from outside the actor.
-@Suite("Model retune")
-struct ModelRetuneTests {
+@Suite("Model change")
+struct ModelChangeTests {
 
     private static let sharedEngine = SemanticSearchEngine()
 
@@ -93,7 +94,7 @@ struct ModelRetuneTests {
             supportsDocuments: true
         )
 
-        configuration.applyRetunedModel(
+        configuration.applyModelChange(
             llmConfig: Self.config(temperature: 0.9),
             providerAPIType: .anthropic,
             supportsVision: nil,
@@ -124,7 +125,7 @@ struct ModelRetuneTests {
             supportsVision: true,
             supportsDocuments: false
         )
-        configuration.applyRetunedModel(
+        configuration.applyModelChange(
             llmConfig: Self.config(temperature: 0.2),
             providerAPIType: .openAICompatible,
             supportsVision: false,
@@ -142,14 +143,13 @@ struct ModelRetuneTests {
         let after = MockLLMProvider(responses: [LLMResponse(text: "ok")])
         let agent = Self.makeAgent(provider: before, llmConfig: Self.config(temperature: 0.2))
 
-        let accepted = await agent.scheduleModelRetune(AgentActor.ModelRetune(
+        await agent.scheduleModelChange(AgentActor.ModelChange(
             provider: after,
             llmConfig: Self.config(temperature: 0.9),
             providerAPIType: .openAICompatible,
             supportsVision: nil,
             supportsDocuments: nil
         ))
-        #expect(accepted)
 
         // Something to answer, so the loop actually reaches `provider.send` rather than idling.
         await agent.appendUserMessage("say ok")
@@ -173,22 +173,75 @@ struct ModelRetuneTests {
         #expect(before.callCount == 0, "a call went to the pre-retune provider after the boundary")
     }
 
-    @Test("A retune that changes the model is refused, and changes nothing")
-    func retuneRefusesAModelChange() async {
-        let original = MockLLMProvider(responses: [LLMResponse(text: "ok")])
-        let agent = Self.makeAgent(provider: original, llmConfig: Self.config(temperature: 0.2))
+    @Test("A model switch is applied at the boundary and keeps the conversation")
+    func modelSwitchIsAppliedAndKeepsTheConversation() async throws {
+        let before = MockLLMProvider(responses: [LLMResponse(text: "ok")])
+        let after = MockLLMProvider(responses: [LLMResponse(text: "ok")])
+        let agent = Self.makeAgent(provider: before, llmConfig: Self.config(temperature: 0.2))
 
-        let accepted = await agent.scheduleModelRetune(AgentActor.ModelRetune(
-            provider: MockLLMProvider(responses: [LLMResponse(text: "ok")]),
-            llmConfig: Self.config(temperature: 0.9, modelID: "a-different-model"),
+        await agent.scheduleModelChange(AgentActor.ModelChange(
+            provider: after,
+            llmConfig: Self.config(temperature: 0.2, modelID: "a-different-model"),
+            providerAPIType: .anthropic,
+            supportsVision: nil,
+            supportsDocuments: nil
+        ))
+        await agent.appendUserMessage("say ok")
+        #expect(await agent.configuration.llmConfig.modelID == "test-model", "a switch must wait for the boundary")
+
+        await agent.start()
+        let deadline = Date().addingTimeInterval(3.0)
+        while after.callCount == 0, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        await agent.stop()
+
+        #expect(await agent.configuration.llmConfig.modelID == "a-different-model")
+        #expect(await agent.configuration.providerAPIType == .anthropic)
+        #expect(before.callCount == 0, "a call went to the old model after the switch")
+        let sent = try #require(after.receivedMessages.first)
+        #expect(sent.contains { $0.content.textValue?.contains("say ok") == true }, "the conversation did not survive the switch")
+    }
+
+    @Test("A model change wakes an agent sleeping out a provider wait, and it retries on the new model")
+    func modelChangeWakesAProviderWait() async throws {
+        let board = ProviderWaitBoard()
+        let exhausted = ScriptedProvider([
+            .fail(.httpError(statusCode: 429, body: "{}", url: nil, retryAfter: 3600))
+        ])
+        let replacement = MockLLMProvider(responses: [LLMResponse(text: "ok")])
+        let agent = Self.makeAgent(provider: exhausted, llmConfig: Self.config(temperature: 0.2))
+        await agent.setProviderWaitBoard(board)
+        await agent.appendUserMessage("say ok")
+        await agent.start()
+
+        // The agent publishes its wait for the whole hour instead of reading as idle.
+        let waitDeadline = Date().addingTimeInterval(3.0)
+        while board.waits.isEmpty, Date() < waitDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let wait = try #require(board.waits.first)
+        #expect(wait.reason == .rateLimited)
+        #expect(wait.holder.role == .brown)
+        #expect(wait.holder.purpose == .agentTurn)
+        #expect(wait.resumesAt.timeIntervalSinceNow > 3000)
+
+        await agent.scheduleModelChange(AgentActor.ModelChange(
+            provider: replacement,
+            llmConfig: Self.config(temperature: 0.2, modelID: "a-different-model"),
             providerAPIType: .openAICompatible,
             supportsVision: nil,
             supportsDocuments: nil
         ))
+        #expect(board.wakeForModelChange(of: .brown) == 1)
 
-        #expect(!accepted, "a model change must be refused — the stored history is provider-shaped")
-        let temperature = await agent.configuration.llmConfig.temperature
-        #expect(temperature == 0.2)
+        let retryDeadline = Date().addingTimeInterval(3.0)
+        while replacement.callCount == 0, Date() < retryDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        await agent.stop()
+        #expect(replacement.callCount > 0, "the woken agent did not retry on the new model")
+        #expect(board.waits.isEmpty)
     }
 
     // MARK: - OrchestrationRuntime dispatch
@@ -249,11 +302,12 @@ struct ModelRetuneTests {
         #expect(await smithTemperature(runtime) == 0.9, "a retune never reached the live Smith")
     }
 
-    @Test("A model change leaves the live Smith alone")
-    func modelChangeDoesNotRetuneLiveSmith() async {
+    @Test("A model change reaches the live Smith without restarting it")
+    func modelChangeReachesLiveSmith() async {
         let runtime = makeRuntime()
         await runtime.start()
         defer { Task { await runtime.stopAll() } }
+        let smithIDBefore = await runtime.agentIDForRole(.smith)
 
         await runtime.setProviders(
             providers: [.smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])],
@@ -261,10 +315,13 @@ struct ModelRetuneTests {
             apiTypes: [:]
         )
 
-        let temperature = await smithTemperature(runtime)
-        #expect(
-            temperature == 0.2,
-            "a MODEL change was pushed into a live agent — its history is full of the previous provider's shapes"
-        )
+        #expect(await smithTemperature(runtime) == 0.9, "a model switch never reached the live Smith")
+        guard let smithID = await runtime.agentIDForRole(.smith),
+              let smith = await runtime.liveAgent(id: smithID) else {
+            Issue.record("no live Smith")
+            return
+        }
+        #expect(smithID == smithIDBefore, "Smith was restarted rather than switched in place")
+        #expect(await smith.configuration.llmConfig.modelID == "a-different-model")
     }
 }

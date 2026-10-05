@@ -12,6 +12,8 @@ struct AgentInspectorWindowHeader: View {
     let executingTools: [String]
     let processingStartDate: Date?
     let toolExecutingStartDate: Date?
+    /// This role's callers sleeping on their provider, soonest resumption first. Takes precedence.
+    let providerWaits: [ProviderWait]
     let onDone: () -> Void
 
     var body: some View {
@@ -25,7 +27,9 @@ struct AgentInspectorWindowHeader: View {
 
             Spacer()
 
-            if isProcessing {
+            if let wait = providerWaits.first {
+                ProviderWaitStatusLabel(wait: wait, waitingCount: providerWaits.count, font: .headline)
+            } else if isProcessing {
                 HStack(spacing: 4) {
                     AgentActivitySpinner()
                     Text(role == .securityAgent ? "Evaluating" : "Thinking")

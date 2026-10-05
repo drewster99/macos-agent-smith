@@ -324,6 +324,9 @@ final class AppViewModel {
     /// `AgentInstanceRef` so concurrent workers of a role stay distinct. Populated alongside
     /// the role-keyed dicts, which the current inspector cards still read.
     var processingInstances: Set<AgentInstanceRef> = []
+    /// Every caller in this session sleeping on its provider before a retry, soonest resumption
+    /// first — mirrored from the live runtime's `ProviderWaitBoard`.
+    var providerWaits: [ProviderWait] = []
     var toolExecutingByInstance: [AgentInstanceRef: [String: Int]] = [:]
     var agentToolNamesByInstance: [AgentInstanceRef: [String]] = [:]
     /// Whether the Inspector panel is visible.
@@ -1086,6 +1089,7 @@ final class AppViewModel {
                 self.isRunning = false
                 self.processingRoles.removeAll()
                 self.processingInstances.removeAll()
+                self.providerWaits.removeAll()
                 self.toolExecutingByRole.removeAll()
                 self.toolExecutingByInstance.removeAll()
                 self.agentToolNames.removeAll()
@@ -1098,6 +1102,16 @@ final class AppViewModel {
 
         // Like the inspector feeds below, these drop events from a runtime that is no longer the
         // live one — a late "processing" from a stopped agent must not relight a cleared card.
+        // Re-reads the board after the hop instead of trusting the delivered snapshot: the hops are
+        // unordered, so an older snapshot could otherwise land last and stick.
+        newRuntime.setOnProviderWaitsChanged { [weak self, weak newRuntime] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let newRuntime, self.runtime === newRuntime else { return }
+                let waits = newRuntime.providerWaitBoard.waits
+                if self.providerWaits != waits { self.providerWaits = waits }
+            }
+        }
+
         await newRuntime.setOnProcessingStateChange { [weak self, weak newRuntime] ref, isProcessing in
             Task { @MainActor [weak self] in
                 guard let self, let newRuntime, self.runtime === newRuntime else { return }
@@ -2420,6 +2434,7 @@ final class AppViewModel {
         agentActivityReconcileTask = nil
         processingRoles.removeAll()
         processingInstances.removeAll()
+        providerWaits.removeAll()
         toolExecutingByRole.removeAll()
         toolExecutingByInstance.removeAll()
         agentToolNames.removeAll()

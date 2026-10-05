@@ -16,6 +16,8 @@ struct SummarizerCard: View {
     let messages: [ChannelMessage]
     let isProcessing: Bool
     let executingTools: [String]
+    /// Soonest resumption first.
+    let providerWaits: [ProviderWait]
     let currentSystemPrompt: String
     let pollInterval: TimeInterval
     let maxToolCalls: Int
@@ -38,6 +40,7 @@ struct SummarizerCard: View {
                 hasActivity: hasActivity,
                 isProcessing: isProcessing,
                 executingTools: executingTools,
+                providerWaits: providerWaits,
                 roleColor: Self.roleColor,
                 onOpenWindow: openInspector,
                 onShowConfig: { showingConfig = true }

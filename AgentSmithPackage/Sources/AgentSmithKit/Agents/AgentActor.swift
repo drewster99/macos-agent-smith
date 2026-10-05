@@ -5,12 +5,12 @@ import os
 /// runs an async loop of receive -> LLM -> act -> report.
 public actor AgentActor {
     let id: UUID
-    /// Mutable only through `applyPendingModelRetune`, which re-points this agent at a retuned
-    /// build of the SAME model at a turn boundary. Nothing else writes it.
+    /// Mutable only through `applyPendingModelChange`, which re-points this agent at a new build
+    /// for its role (a retune, or a different model) at a turn boundary. Nothing else writes it.
     private(set) var configuration: AgentConfiguration
     /// Read once per turn, at the single `provider.send` call site. Providers are `Sendable`
     /// value types, so a call already in flight holds its own copy and cannot be reached by a
-    /// retune — the swap is only ever visible to the NEXT call.
+    /// model change — the swap is only ever visible to the NEXT call.
     private var provider: any LLMProvider
     private let tools: [any AgentTool]
     /// Optional source of additional, dynamically-changing tools (currently MCP
@@ -222,6 +222,8 @@ public actor AgentActor {
     /// `nil` until learned; the persisted catalog override (written via the runtime callback)
     /// clamps future runs at provider-construction time.
     private var learnedMaxOutputCeiling: Int?
+    /// Where this agent's retry sleeps are published and woken. Set by the runtime at spawn.
+    private var providerWaitBoard: ProviderWaitBoard?
 
     /// Tracks consecutive prune-driven rebuilds without an intervening successful
     /// LLM turn. The run loop calls `pruneHistoryIfNeeded` at the top of every
@@ -533,15 +535,17 @@ public actor AgentActor {
         conversationHistory.append(.system(configuration.systemPrompt))
     }
 
-    /// A retune staged by `scheduleModelRetune`, applied at the top of the next run-loop
+    /// A model change staged by `scheduleModelChange`, applied at the top of the next run-loop
     /// iteration. Queued rather than applied on arrival for the same reason external message
     /// injections are queued: the loop top is the one point where the previous turn is complete.
     /// Applying it mid-turn would let one turn's LLM call, its tool results and its usage record
     /// describe two different configurations.
-    private var pendingModelRetune: ModelRetune?
+    private var pendingModelChange: ModelChange?
 
-    /// A new provider build for the model this agent is already running.
-    struct ModelRetune: Sendable {
+    /// A new provider build for this agent's role: either a RETUNE of the model it is already
+    /// running (same provider + model, different parameters) or a SWITCH to a different model or
+    /// provider. Both keep the conversation.
+    struct ModelChange: Sendable {
         let provider: any LLMProvider
         let llmConfig: ModelConfiguration
         let providerAPIType: ProviderAPIType
@@ -550,57 +554,76 @@ public actor AgentActor {
         let supportsDocuments: Bool?
     }
 
-    /// Re-points this agent at a retuned build of the model it is ALREADY running, taking effect
-    /// at the top of the next run-loop iteration.
+    /// Re-points this agent at a new provider build for its role, taking effect at the top of the
+    /// next run-loop iteration. A later change replaces an earlier one not yet applied.
     ///
-    /// This exists so a temperature / effort / thinking / token-cap edit in Settings reaches a
-    /// long-lived agent without tearing down its conversation. It deliberately refuses a change of
-    /// MODEL or PROVIDER, and that refusal is the whole safety argument: the stored conversation
-    /// carries provider-shaped data (Anthropic thinking blocks, Gemini parts, Codex reasoning
-    /// items) and tool-call ids minted in one provider's format, none of which survives being
-    /// handed to a different backend. Switching models mid-conversation needs a history strategy
-    /// this method has no way to apply, so it is out of scope rather than half-done.
-    ///
-    /// Fails CLOSED and loudly: a mismatched identity is a caller bug, and refusing it here keeps
-    /// the invariant true even though `OrchestrationRuntime.setProviders` already checks. Returns
-    /// false when the retune was refused.
-    @discardableResult
-    func scheduleModelRetune(_ retune: ModelRetune) -> Bool {
-        let current = configuration.llmConfig
-        guard retune.llmConfig.providerID == current.providerID,
-              retune.llmConfig.modelID == current.modelID else {
-            let roleName = configuration.role.rawValue
-            Self.agentLogger.error("Agent \(roleName, privacy: .public): refused a model retune changing identity from \(current.providerID, privacy: .public)/\(current.modelID, privacy: .public) to \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public) — a model change requires a fresh agent.")
-            return false
-        }
-        pendingModelRetune = retune
-        return true
+    /// A retune (temperature / effort / thinking / token caps) needs nothing more. A switch to a
+    /// different model or provider also adapts the conversation, at apply time, through
+    /// `ModelSwitchHistory` — the stored history carries provider-shaped data (thinking blocks,
+    /// Gemini parts, Codex reasoning items, provider-minted tool-call ids, media the new model may
+    /// not accept) that must be made portable first. Decided 2026-10-05 (user): live agents follow a
+    /// model change instead of keeping their spawn-time model until respawn.
+    func scheduleModelChange(_ change: ModelChange) {
+        pendingModelChange = change
     }
 
-    /// Applies a staged retune. Called at the top of the run-loop iteration, BEFORE this
+    /// Applies a staged model change. Called at the top of the run-loop iteration, BEFORE this
     /// iteration's history pruning, so a changed context-window budget is honored by the very
     /// prune that precedes the next call rather than one turn late.
     ///
-    /// `learnedMaxOutputCeiling` is deliberately NOT cleared: it records what this MODEL actually
-    /// accepts, learned from its own rejection, and the model is unchanged by definition here. A
-    /// raised or lowered user cap still resolves correctly, because the call site clamps with
-    /// `min(configured, learned)`.
-    private func applyPendingModelRetune() {
-        guard let retune = pendingModelRetune else { return }
-        pendingModelRetune = nil
-        provider = retune.provider
-        configuration.applyRetunedModel(
-            llmConfig: retune.llmConfig,
-            providerAPIType: retune.providerAPIType,
-            supportsVision: retune.supportsVision,
-            supportsDocuments: retune.supportsDocuments
+    /// On a retune `learnedMaxOutputCeiling` is deliberately kept: it records what this MODEL
+    /// accepts, learned from its own rejection, and the model is unchanged. A raised or lowered user
+    /// cap still resolves correctly, because the call site clamps with `min(configured, learned)`.
+    /// On a switch it is cleared — it described the old model — and so is the failure streak: the
+    /// new model's retry budget starts fresh.
+    private func applyPendingModelChange() {
+        guard let change = pendingModelChange else { return }
+        pendingModelChange = nil
+        let previousConfig = configuration.llmConfig
+        let previousAPIType = configuration.providerAPIType
+        let switchesModel = change.llmConfig.providerID != previousConfig.providerID
+            || change.llmConfig.modelID != previousConfig.modelID
+        provider = change.provider
+        configuration.applyModelChange(
+            llmConfig: change.llmConfig,
+            providerAPIType: change.providerAPIType,
+            supportsVision: change.supportsVision,
+            supportsDocuments: change.supportsDocuments
         )
         // The tool context stamps provider/model/config provenance onto every channel message this
         // agent posts. Left alone it would keep reporting the spawn-time parameters forever.
-        toolContext.currentConfiguration = retune.llmConfig
-        toolContext.currentProviderType = retune.providerAPIType.rawValue
+        toolContext.currentConfiguration = change.llmConfig
+        toolContext.currentProviderType = change.providerAPIType.rawValue
         let roleName = configuration.role.rawValue
-        Self.agentLogger.info("Agent \(roleName, privacy: .public): applied a model retune for \(retune.llmConfig.providerID, privacy: .public)/\(retune.llmConfig.modelID, privacy: .public)")
+        guard switchesModel else {
+            Self.agentLogger.info("Agent \(roleName, privacy: .public): applied a model retune for \(change.llmConfig.providerID, privacy: .public)/\(change.llmConfig.modelID, privacy: .public)")
+            return
+        }
+        conversationHistory = ModelSwitchHistory.adapt(conversationHistory, for: .init(
+            previousAPIType: previousAPIType,
+            apiType: change.providerAPIType,
+            supportsVision: configuration.supportsVision,
+            supportsDocuments: configuration.supportsDocuments
+        ))
+        learnedMaxOutputCeiling = nil
+        consecutiveErrors = 0
+        retryWindowStartedAt = nil
+        consecutiveContextOverflows = 0
+        consecutiveServerMemoryExhaustions = 0
+        Self.agentLogger.notice("Agent \(roleName, privacy: .public): switched model from \(previousConfig.providerID, privacy: .public)/\(previousConfig.modelID, privacy: .public) to \(change.llmConfig.providerID, privacy: .public)/\(change.llmConfig.modelID, privacy: .public)")
+        let announcement = ChannelMessage(
+            sender: .system,
+            content: "Agent \(configuration.role.displayName) switched from \(previousConfig.model) to \(change.llmConfig.model) and continues its conversation on the new model.",
+            metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.info), "agentRole": .string(roleName)]
+        )
+        let context = toolContext
+        Task { await context.post(announcement) }
+        onContextChanged?(conversationHistory)
+    }
+
+    /// Injects the board every retry sleep of this agent is published on and woken through.
+    func setProviderWaitBoard(_ board: ProviderWaitBoard) {
+        providerWaitBoard = board
     }
 
     /// Injects the security evaluator used for Brown's tool approval flow.
@@ -1465,10 +1488,10 @@ public actor AgentActor {
             // on the live runtime) any more than it may run LLM turns.
             guard await verifyLivenessLease() else { break }
 
-            // A Settings edit that retuned this agent's model lands here, at the boundary where
-            // the previous turn is complete — so no turn ever spans two configurations, and the
-            // prune below already budgets against the new context window.
-            applyPendingModelRetune()
+            // A Settings edit that retuned or switched this agent's model lands here, at the
+            // boundary where the previous turn is complete — so no turn ever spans two
+            // configurations, and the prune below already budgets against the new context window.
+            applyPendingModelChange()
 
             // Re-inject deferred messages (e.g. task_complete held back from a previous batch)
             // so they get their own focused LLM turn.
@@ -1550,6 +1573,9 @@ public actor AgentActor {
                 continue
             }
 
+            // Set when the error reaching the catch below came from the provider call itself, as
+            // opposed to tool handling — only the former is a wait on the provider.
+            var failureWasProviderCall = false
             do {
                 let availabilityContext = await currentAvailabilityContext()
                 // Defense-in-depth: while Brown is awaiting review, hand him an empty
@@ -1578,6 +1604,8 @@ public actor AgentActor {
                 let watchdogRoleRaw = configuration.role.rawValue
                 let watchdogRoleName = configuration.role.displayName
                 let watchdogAgentIDPrefix = String(id.uuidString.prefix(8))
+                let watchdogAgentID = id
+                let watchdogBoard = providerWaitBoard
                 let watchdogTask = Task.detached { [stallSeconds = Self.stallWatchdogSeconds] in
                     do {
                         try await Task.sleep(for: .seconds(stallSeconds))
@@ -1585,9 +1613,17 @@ public actor AgentActor {
                         return  // cancelled by the defer below — normal completion path
                     }
                     AgentActor.stopLogger.error("AgentActor stall role=\(watchdogRoleRaw, privacy: .public) agent=\(watchdogAgentIDPrefix, privacy: .public) elapsed>=\(stallSeconds, privacy: .public)s — turn still in flight (LLM call or tool execution)")
+                    // A turn held by a review that is itself waiting on its provider is not stuck,
+                    // and blaming a tool would send the user looking in the wrong place.
+                    let content: String
+                    if let heldBy = watchdogBoard?.waits.first(where: { $0.holder.purpose.heldAgentID == watchdogAgentID }) {
+                        content = "Agent \(watchdogRoleName) has been in the current turn for \(stallSeconds / 60) minutes because its tool call is waiting on a \(heldBy.holder.role.displayName) review, which is \(heldBy.waitingClause)."
+                    } else {
+                        content = "Agent \(watchdogRoleName) has been in the current turn for \(stallSeconds / 60) minutes — unusually long. A legitimate long subprocess (large bash/gh) explains this; an agent stuck on a tool that doesn't honor cancellation does not. Check the agent inspector for the in-flight tool."
+                    }
                     await watchdogContext.post(ChannelMessage(
                         sender: .system,
-                        content: "Agent \(watchdogRoleName) has been in the current turn for \(stallSeconds / 60) minutes — unusually long. A legitimate long subprocess (large bash/gh) explains this; an agent stuck on a tool that doesn't honor cancellation does not. Check the agent inspector for the in-flight tool.",
+                        content: content,
                         metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.warning), "agentRole": .string(watchdogRoleRaw)]
                     ))
                 }
@@ -1625,6 +1661,7 @@ public actor AgentActor {
                         modelID: configuration.llmConfig.model,
                         providerID: configuration.llmConfig.providerID
                     )))
+                    failureWasProviderCall = true
                     throw error
                 }
                 let llmLatencyMs = Int(Date().timeIntervalSince(llmStartTime) * 1000)
@@ -1980,14 +2017,32 @@ public actor AgentActor {
                     break
                 }
 
-                // Use Task.sleep instead of idleWait — idleWait is interruptible by
-                // incoming channel messages (including the error message we just posted),
-                // which would cancel the backoff immediately.
-                do {
-                    try await Task.sleep(for: .seconds(backoff))
-                } catch {
-                    // Sleep cancelled (agent stopped) — fall through to loop guard
+                // Not idleWait — idleWait is interruptible by incoming channel messages (including
+                // the error message just posted), which would cancel the backoff immediately.
+                guard failureWasProviderCall else {
+                    do {
+                        try await Task.sleep(for: .seconds(backoff))
+                    } catch {
+                        // Sleep cancelled (agent stopped) — fall through to loop guard
+                    }
+                    continue
                 }
+                // A wait on the provider is published for its whole length — the agent is neither
+                // "Thinking" nor "Idle" — and ends early if this role is given a different model:
+                // the loop top then applies the staged switch and retries on the new model.
+                let waitTaskID = configuration.role == .brown
+                    ? await toolContext.taskStore.taskForAgent(agentID: id)?.id
+                    : nil
+                let wait = ProviderWait(
+                    holder: ProviderWaitHolder(role: configuration.role, agentID: id, taskID: waitTaskID, purpose: .agentTurn),
+                    reason: LLMRetryPolicy.waitReason(for: error),
+                    providerID: configuration.llmConfig.providerID,
+                    modelID: configuration.llmConfig.model,
+                    streakStartedAt: retryWindowStartedAt ?? Date(),
+                    resumesAt: Date().addingTimeInterval(backoff),
+                    attempt: consecutiveErrors
+                )
+                _ = await ProviderWaitBoard.sleep(on: providerWaitBoard, for: backoff, wait)
             }
         }
         await toolContext.onSelfTerminate()

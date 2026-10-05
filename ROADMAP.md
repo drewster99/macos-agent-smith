@@ -3242,6 +3242,33 @@ A /stupid sweep of the gate found it leaky and silent. Fixed:
   count). The store's CAS names the exact park (`SignOffPark`), the audit update cites the message,
   and the tool is offered only while such a park exists. Pre-upgrade parks are row-only.
 
+### Provider waits are visible, and a live agent follows its role's model (2026-10-05) ✅
+
+**Incident (2026-10-04 21:52).** The ChatGPT-subscription (Codex) weekly usage window ran out
+(`usage_limit_reached`, `resets_in_seconds` 411,320 ≈ 4.8 days). `LLMRetryPolicy` correctly turned
+`resets_at` into an uncapped stated wait, so every caller on that model slept until Fri Oct 9. The UI
+showed Smith "Idle" (its turn had ended before the sleep), one worker "Thinking 723:45" and the Security
+Agent "Evaluating 665:00" (two workers' tool calls were held by Security Agent reviews that were
+themselves sleeping, and those reviews posted nothing). The 10-minute stall warning blamed "a tool that
+doesn't honor cancellation". The only rescue — a different model — could not reach a live agent.
+
+**Built:**
+- `ProviderWaitBoard` + typed `ProviderWait` / `ProviderWaitReason` / `ProviderWaitPurpose`; every retry
+  sleep goes through it; the app mirrors it and `ProviderWaitStatusLabel` outranks Thinking/Idle.
+- Live model switching for agents (`AgentActor.ModelChange`, `ModelSwitchHistory`), the summarizer
+  switched in place, the validator re-runs, the Security Agent restarts a sleeping review — and
+  `setProviders` wakes every sleeper on a role whose model changed.
+- Security Agent and scoping waits are announced in the transcript; the stall warning names a held review.
+- The validator's timeout no longer counts provider-wait time.
+
+**Decisions (user):** don't fail a review or validation because the provider asked to wait — keep waiting
+uncapped, but visibly and wakeably. Live switching of an agent's model is wanted in general, not only to
+rescue a waiting agent.
+
+**Known limits:** a provider whose models demand replayed reasoning for prior tool turns
+(`replayReasoningContent`, e.g. DeepSeek V4 Pro) receives a foreign history without it after a switch;
+untested against that provider.
+
 ## Blockers
 
 ### ~~SSH key not configured on this device~~ ✅ Resolved

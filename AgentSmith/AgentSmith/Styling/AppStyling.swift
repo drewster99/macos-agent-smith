@@ -9,6 +9,9 @@ enum AppColors {
     static let securityAgent = Color.red
     static let summarizerAgent = Color.blue
     static let validatorAgent = Color.teal
+    /// An agent or evaluation sleeping on its provider before a retry (usage limit, rate limit,
+    /// outage) — neither working nor idle.
+    static let providerWait = Color.orange
     private static let userMessage = Color.blue
     static let systemMessage = Color.gray
     static let background = Color(.windowBackgroundColor)

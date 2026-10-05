@@ -5,6 +5,7 @@ import os
 
 private let stopLogger = Logger(subsystem: "com.agentsmith", category: "Stop")
 private let retrievalLogger = Logger(subsystem: "com.agentsmith", category: "Retrieval")
+private let providerWaitLogger = Logger(subsystem: "com.agentsmith", category: "ProviderWait")
 
 /// Cached date formatters for status/digest lines. `DateFormatter` is expensive to
 /// construct, so we build these once instead of per status fire. Safe to share: each is
@@ -55,6 +56,12 @@ public actor OrchestrationRuntime {
     /// `MemoryStore`), so the strip shows total concurrency across all tabs rather than per-session
     /// counts. See `SharedAppState.liveActivityTracker`.
     public nonisolated let liveActivityTracker: LiveActivityTracker
+
+    /// Every retry sleep in this session — agents, Security Agent reviews and scoping, validators,
+    /// the summarizer — is published here and woken through it when its role's model changes. The
+    /// runtime hands it to every holder it builds; the app observes it via
+    /// `setOnProviderWaitsChanged`.
+    public nonisolated let providerWaitBoard = ProviderWaitBoard()
 
     /// Fixed UUID representing the human user for private Smith→User messages
     /// (`00000000-0000-0000-0000-000000000001`).
@@ -2172,6 +2179,14 @@ public actor OrchestrationRuntime {
         onAbort = handler
     }
 
+    /// Registers the observer of every provider wait in this session (nil clears it). Delivered on
+    /// the board's caller's thread, immediately with the current set and then on every change. An
+    /// observer that hops threads should re-read `providerWaitBoard.waits` after the hop rather than
+    /// trust the delivered snapshot: hops are not ordered, and a stale snapshot could land last.
+    public nonisolated func setOnProviderWaitsChanged(_ handler: (@Sendable ([ProviderWait]) -> Void)?) {
+        providerWaitBoard.setOnChange(handler)
+    }
+
     /// Registers a callback fired when an agent starts or stops an LLM API call.
     public func setOnProcessingStateChange(_ handler: @escaping @Sendable (AgentInstanceRef, Bool) -> Void) {
         onProcessingStateChange = handler
@@ -2243,20 +2258,21 @@ public actor OrchestrationRuntime {
     ///
     /// Timing, by what actually changed:
     ///
-    /// - **A RETUNE of the same model** (same `providerID` + `modelID`, different parameters —
-    ///   temperature, effort, thinking, token caps) reaches every LIVE agent of that role
-    ///   immediately, via `AgentActor.scheduleModelRetune`. The agent applies it at its next
-    ///   turn boundary and keeps its conversation.
-    /// - **A MODEL or PROVIDER change** does NOT touch a live agent, deliberately. Brown picks it
-    ///   up at its next spawn. Smith keeps its model until the runtime cold starts, which
-    ///   `restartForNewTask` does NOT do while Smith is alive — it cycles only the worker. See
-    ///   `scheduleModelRetune` for why a mid-conversation model change is unsafe.
+    /// - **Every live AGENT of the role takes the change** — a RETUNE of the same model
+    ///   (temperature, effort, thinking, token caps) or a SWITCH to a different model or provider —
+    ///   via `AgentActor.scheduleModelChange`. The agent applies it at its next turn boundary and
+    ///   keeps its conversation; a switch first makes that conversation portable
+    ///   (`ModelSwitchHistory`). Decided 2026-10-05 (user), replacing "a model change never touches
+    ///   a live agent".
     /// - Non-agent holders take BOTH, live: every live `SecurityEvaluator` gets the new Security
     ///   Agent model (`applyModel`; each evaluation snapshots its model, and keeps no conversation),
-    ///   and the `TaskSummarizer` is rebuilt. Only when the role's provider was actually rebuilt, so a
-    ///   configuration is never paired with a stale provider.
+    ///   and the `TaskSummarizer` is switched in place (`applyModel`). Only when the role's provider
+    ///   was actually rebuilt, so a configuration is never paired with a stale provider.
     /// - The validator needs none of this: `validatorModel()` reads these dictionaries fresh for
     ///   every criterion judgment.
+    /// - **Anything sleeping on the OLD model is woken** (`ProviderWaitBoard.wakeForModelChange`)
+    ///   once the new model has reached its holder, so a caller waiting out a provider's limit
+    ///   retries on the new model at once instead of finishing a wait that no longer applies.
     ///
     /// An in-flight call always keeps the provider it started with. Providers are `Sendable` value
     /// types, so a call already suspended holds its own copy and a swap cannot reach it.
@@ -2267,19 +2283,11 @@ public actor OrchestrationRuntime {
         supportsVisionByRole: [AgentRole: Bool] = [:],
         supportsDocumentsByRole: [AgentRole: Bool] = [:]
     ) async {
-        // Decide what is a RETUNE before the merge overwrites the configs being compared against.
-        // Three conditions, all required: the role already had a config (nothing live otherwise),
-        // the model identity is unchanged (a model change is out of scope — see the doc above),
-        // and the resolved configuration actually differs. That last one is not an optimization:
-        // the caller rebuilds every role's provider on every edit, and some providers mint
-        // per-instance state (the ChatGPT-subscription provider's `prompt_cache_key`, which is its
-        // prefix-cache routing hint), so retuning a role nobody touched would throw away a live
-        // agent's cache locality to apply a change that isn't there.
-        // The non-agent holders (Security Agent evaluators, the task summarizer) take a MODEL change
-        // as well as a retune: neither keeps a conversation across calls, so nothing provider-shaped
-        // survives the switch (unlike an agent, whose history does). Same "only if the resolved
-        // configuration actually changed" rule as the retune, for the same cache-locality reason.
-        // Requires the rebuilt PROVIDER too (like the retune guard): a role whose provider build
+        // Decide what changed before the merge overwrites the configs being compared against.
+        // The non-agent holders (Security Agent evaluators, the task summarizer) are switched only
+        // if the resolved configuration actually changed, for the same cache-locality reason as the
+        // agents below.
+        // Requires the rebuilt PROVIDER too (like the agent guard): a role whose provider build
         // failed arrives with a new config and no provider, and pairing that config with the old
         // provider would call one model while recording and sizing requests for another.
         // A capability-only change (vision / PDF overrides) counts too: evaluators gate attachments on it.
@@ -2294,20 +2302,29 @@ public actor OrchestrationRuntime {
             && (llmProviders[.summarizer] == nil
                 || (configurations[.summarizer].map { $0 != llmConfigs[.summarizer] } ?? false))
 
-        var retunes: [AgentRole: AgentActor.ModelRetune] = [:]
+        // What reaches live agents: any change of the resolved configuration that arrives with a
+        // rebuilt provider. A role whose resolved `ModelConfiguration` is unchanged is not touched at
+        // all — not an optimization: the caller rebuilds every role's provider on every edit, and
+        // some providers mint per-instance state (the ChatGPT-subscription provider's
+        // `prompt_cache_key`, its prefix-cache routing hint), so re-pointing a role nobody touched
+        // would throw away a live agent's cache locality for a change that isn't there.
+        var modelChanges: [AgentRole: AgentActor.ModelChange] = [:]
+        // Roles whose model IDENTITY changed — the ones whose sleepers are woken below.
+        var switchedRoles: Set<AgentRole> = []
         for (role, newConfig) in configurations {
             guard let currentConfig = llmConfigs[role],
-                  currentConfig.providerID == newConfig.providerID,
-                  currentConfig.modelID == newConfig.modelID,
                   currentConfig != newConfig,
                   let newProvider = providers[role] else { continue }
-            retunes[role] = AgentActor.ModelRetune(
+            modelChanges[role] = AgentActor.ModelChange(
                 provider: newProvider,
                 llmConfig: newConfig,
                 providerAPIType: apiTypes[role] ?? providerAPITypes[role] ?? .openAICompatible,
                 supportsVision: supportsVisionByRole[role],
                 supportsDocuments: supportsDocumentsByRole[role]
             )
+            if currentConfig.providerID != newConfig.providerID || currentConfig.modelID != newConfig.modelID {
+                switchedRoles.insert(role)
+            }
         }
 
         // A role's configuration and facts are merged only together with its provider (or when the
@@ -2332,19 +2349,27 @@ public actor OrchestrationRuntime {
             releaseTasksBlockedOnValidatorModel()
         }
 
-        // Push retunes AFTER the merge, so a spawn racing this call reads the same configuration
+        // Push changes AFTER the merge, so a spawn racing this call reads the same configuration
         // the live agents just received.
-        for (role, retune) in retunes {
+        for (role, change) in modelChanges {
             for workerHandle in supervisor.handles(role: role) {
-                await workerHandle.agent.scheduleModelRetune(retune)
+                await workerHandle.agent.scheduleModelChange(change)
             }
         }
         if securityModelChanged {
             await pushSecurityModelToLiveEvaluators()
         }
-        // Only a running runtime has a summarizer to replace; one not yet started builds it at start.
+        // Only a running runtime has a summarizer to switch; one not yet started builds it at start.
         if summarizerModelChanged, currentSessionID != nil {
-            await rebuildTaskSummarizer()
+            await refreshTaskSummarizerModel()
+        }
+        // Wake LAST: every holder above already has the new model, so a woken retry uses it — an
+        // agent applies its staged change at the loop top the wake returns it to.
+        for role in switchedRoles {
+            let woken = providerWaitBoard.wakeForModelChange(of: role)
+            if woken > 0 {
+                providerWaitLogger.notice("Woke \(woken, privacy: .public) provider wait(s) for \(role.rawValue, privacy: .public) after its model changed")
+            }
         }
     }
 
@@ -2987,6 +3012,7 @@ public actor OrchestrationRuntime {
             toolContext: context
         )
         await smithAgent.setUsageStore(usageStore)
+        await smithAgent.setProviderWaitBoard(providerWaitBoard)
         await smithAgent.setSessionID(currentSessionID)
 
         // Egress filter: gate Smith's open-world calls (web_fetch / web_search / instant_answer)
@@ -4003,6 +4029,7 @@ public actor OrchestrationRuntime {
         onTimerEventForChannel = nil
         onLearnedModelOutputLimit = nil
         onCompactionCaptured = nil
+        providerWaitBoard.setOnChange(nil)
     }
 
     /// True iff every observer callback is nil. Surfaced for tests; do not
@@ -4097,7 +4124,8 @@ public actor OrchestrationRuntime {
             retrieveContext: { [weak self] source, query in
                 await self?.retrieveContext(source: source, query: query)
                     ?? SemanticSearchResults(memories: [], taskSummaries: [])
-            }
+            },
+            providerWaitBoard: providerWaitBoard
         )
         liveSecurityEvaluators.removeAll { $0.evaluator == nil }
         liveSecurityEvaluators.append(WeakSecurityEvaluator(evaluator: evaluator))
@@ -4132,6 +4160,27 @@ public actor OrchestrationRuntime {
 
     /// Replaces the task summarizer with one built from the CURRENT summarizer configuration,
     /// repeating if the configuration changed while it was being built (building suspends).
+    /// Points the live summarizer at the Summarizer role's current model, in place, so a call it
+    /// has sleeping before a retry resumes on the new model; builds one if there is none yet.
+    /// Loops until the configuration it applied is still current — `setProviders` can run again
+    /// while this one is suspended, and the last configuration must be the one that lands.
+    private func refreshTaskSummarizerModel() async {
+        while true {
+            guard let summarizer = taskSummarizer,
+                  let provider = llmProviders[.summarizer],
+                  let config = llmConfigs[.summarizer] else {
+                await rebuildTaskSummarizer()
+                return
+            }
+            await summarizer.applyModel(
+                provider: provider,
+                configuration: config,
+                providerType: providerAPITypes[.summarizer]?.rawValue ?? ""
+            )
+            if llmConfigs[.summarizer] == config { return }
+        }
+    }
+
     private func rebuildTaskSummarizer() async {
         while true {
             let builtFrom = llmConfigs[.summarizer]
@@ -4175,6 +4224,7 @@ public actor OrchestrationRuntime {
             sessionID: currentSessionID,
             activityTracker: liveActivityTracker
         )
+        await summarizer.setProviderWaitBoard(providerWaitBoard)
         // One inspector identity per summarizer instance, so its calls form one stable subject.
         summarizerInspectorRef = AgentInstanceRef(role: .summarizer, instanceID: UUID())
         if let callCallback = onLLMCallRecorded {
@@ -4455,6 +4505,7 @@ public actor OrchestrationRuntime {
             }
         }
         await brownAgent.setUsageStore(usageStore)
+        await brownAgent.setProviderWaitBoard(providerWaitBoard)
         await brownAgent.setSessionID(currentSessionID)
         if let callCallback = onLLMCallRecorded {
             await brownAgent.setOnLLMCallRecorded { event in callCallback(AgentInstanceRef(role: .brown, instanceID: brownID), event) }

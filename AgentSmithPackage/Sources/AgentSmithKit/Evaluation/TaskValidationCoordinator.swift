@@ -795,8 +795,24 @@ extension OrchestrationRuntime {
         extraSlots: [String: String] = [:],
         telemetry: JudgmentTelemetryBox? = nil
     ) async -> (outcome: EvaluationRunner.Outcome, transcript: EvaluationRunner.Transcript) {
+        // A run interrupted because the Validator role got a new model while it waited on its
+        // provider has judged nothing; it re-runs from the start on the model now assigned.
+        while true {
+            let run = await runValidatorOnce(definition, criterion: criterion, task: task, extraSlots: extraSlots, telemetry: telemetry)
+            guard run.interruption == .modelChanged else { return (run.outcome, run.transcript) }
+            validationLogger.notice("Criterion \(criterion.id.uuidString.prefix(8), privacy: .public): the Validator model changed while waiting on its provider — re-running on the new model")
+        }
+    }
+
+    private func runValidatorOnce(
+        _ definition: EvaluatorDefinition,
+        criterion: AcceptanceCriterion,
+        task: AgentTask,
+        extraSlots: [String: String],
+        telemetry: JudgmentTelemetryBox?
+    ) async -> (outcome: EvaluationRunner.Outcome, transcript: EvaluationRunner.Transcript, interruption: EvaluationRunner.Interruption?) {
         guard let resolved = validatorModel() else {
-            return (.error("no model is assigned to the Validator role"), EvaluationRunner.Transcript())
+            return (.error("no model is assigned to the Validator role"), EvaluationRunner.Transcript(), nil)
         }
         let provider = resolved.provider
         let config = resolved.config
@@ -817,7 +833,7 @@ extension OrchestrationRuntime {
         // orders impossible fixes. A missing scope is an invariant violation, not a fallback case —
         // error out so it escalates for manual review rather than fabricating a toolset.
         guard let workerToolNames = task.approvedTools, !workerToolNames.isEmpty else {
-            return (.error("worker tool scope (task.approvedTools) is unavailable — cannot judge feasibility; escalating for manual review"), EvaluationRunner.Transcript())
+            return (.error("worker tool scope (task.approvedTools) is unavailable — cannot judge feasibility; escalating for manual review"), EvaluationRunner.Transcript(), nil)
         }
 
         var fields: [String: String] = [
@@ -1012,7 +1028,13 @@ extension OrchestrationRuntime {
                     agentInstanceID: validatorInstanceID
                 )
             },
-            securityGate: securityGate
+            securityGate: securityGate,
+            providerWait: ProviderWaitContext(
+                board: providerWaitBoard,
+                holder: ProviderWaitHolder(role: .validator, taskID: task.id, purpose: .criterionValidation),
+                providerID: config.providerID,
+                modelID: config.model
+            )
         )
     }
 

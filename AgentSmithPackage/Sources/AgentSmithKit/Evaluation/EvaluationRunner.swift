@@ -27,6 +27,14 @@ public enum EvaluationRunner {
         case error(String)
     }
 
+    /// Why a run ended before producing its own outcome.
+    public enum Interruption: Sendable, Equatable {
+        /// The run was sleeping on its provider and the validator role was given a different
+        /// model. The caller re-runs on the new model; the outcome returned alongside is not a
+        /// judgment and must not be recorded as one.
+        case modelChanged
+    }
+
     /// How many grammar-violating responses are re-prompted before giving up.
     /// Verdict validators get one same-context repair; an empty response aborts the
     /// attempt so the coordinator retries with a fresh validator conversation.
@@ -64,7 +72,9 @@ public enum EvaluationRunner {
     /// allowlist (the caller maps `definition.toolNames` to live tools — the runner never
     /// conjures capabilities). `temperature` overrides the model's configured sampling:
     /// validators pass 0 for a deterministic verdict; nil inherits the provider's config.
-    /// `onResponse` lets the caller record usage per LLM call.
+    /// `onResponse` lets the caller record usage per LLM call. `providerWait` publishes the run's
+    /// retry sleeps; time spent in them does not count against the definition's timeout, which
+    /// bounds the evaluation's own work — a provider that asks to wait is not the judge being slow.
     public static func runMessages(
         definition: EvaluatorDefinition,
         systemPrompt: String,
@@ -78,8 +88,9 @@ public enum EvaluationRunner {
         drainStagedAttachments: (@Sendable () async -> [Attachment])? = nil,
         onResponse: (@Sendable (LLMResponse, Int) async -> Void)? = nil,
         onToolResult: (@Sendable (LLMToolCall, String, Bool) async -> Void)? = nil,
-        securityGate: (@Sendable (LLMToolCall, any AgentTool) async -> Bool)? = nil
-    ) async -> (outcome: Outcome, transcript: Transcript) {
+        securityGate: (@Sendable (LLMToolCall, any AgentTool) async -> Bool)? = nil,
+        providerWait: ProviderWaitContext? = nil
+    ) async -> (outcome: Outcome, transcript: Transcript, interruption: Interruption?) {
         var transcript = Transcript()
         transcript.renderedInput = userMessage
         transcript.renderedSystemPrompt = systemPrompt
@@ -89,17 +100,18 @@ public enum EvaluationRunner {
             .user(userMessage)
         ]
         let toolDefinitions = tools.map { $0.definition(for: .securityAgent) }
-        let deadline = Date().addingTimeInterval(definition.timeoutSeconds)
+        // Extended by every provider wait, so the timeout measures the evaluation, not the outage.
+        var deadline = Date().addingTimeInterval(definition.timeoutSeconds)
         var parseRetries = 0
         var turns = 0
         var toolObservations: [ToolObservation] = []
 
         while turns < definition.maxTurns {
             if Date() > deadline {
-                return (.error("timed out after \(Int(definition.timeoutSeconds))s"), transcript)
+                return (.error("timed out after \(Int(definition.timeoutSeconds))s"), transcript, nil)
             }
             if Task.isCancelled {
-                return (.error("cancelled"), transcript)
+                return (.error("cancelled"), transcript, nil)
             }
             turns += 1
 
@@ -112,6 +124,7 @@ public enum EvaluationRunner {
             let response: LLMResponse
             let callStart = Date()
             var transportAttempt = 0
+            var waitStreakStartedAt: Date?
             while true {
                 transportAttempt += 1
                 do {
@@ -130,10 +143,29 @@ public enum EvaluationRunner {
                           transportAttempt < LLMRetryPolicy.maxAttempts,
                           Date() <= deadline,
                           !Task.isCancelled else {
-                        return (.error("LLM call failed: \(error.localizedDescription)"), transcript)
+                        return (.error("LLM call failed: \(error.localizedDescription)"), transcript, nil)
                     }
-                    guard await LLMRetryPolicy.sleep(attempt: transportAttempt, retryAfter: retryAfter) else {
-                        return (.error("LLM call failed: \(error.localizedDescription)"), transcript)
+                    let delay = LLMRetryPolicy.delay(attempt: transportAttempt, retryAfter: retryAfter)
+                    if transportAttempt == 1 { waitStreakStartedAt = Date() }
+                    let sleepStart = Date()
+                    let wait = ProviderWait(
+                        holder: providerWait?.holder ?? ProviderWaitHolder(role: .validator, purpose: .criterionValidation),
+                        reason: LLMRetryPolicy.waitReason(for: error),
+                        providerID: providerWait?.providerID,
+                        modelID: providerWait?.modelID,
+                        streakStartedAt: waitStreakStartedAt ?? sleepStart,
+                        resumesAt: sleepStart.addingTimeInterval(delay),
+                        attempt: transportAttempt
+                    )
+                    let sleepOutcome = await ProviderWaitBoard.sleep(on: providerWait?.board, for: delay, wait)
+                    deadline = deadline.addingTimeInterval(Date().timeIntervalSince(sleepStart))
+                    switch sleepOutcome {
+                    case .elapsed:
+                        continue
+                    case .cancelled:
+                        return (.error("LLM call failed: \(error.localizedDescription)"), transcript, nil)
+                    case .wokenForModelChange:
+                        return (.error("interrupted: the validator's model changed while it waited on its provider"), transcript, .modelChanged)
                     }
                 }
             }
@@ -222,22 +254,22 @@ public enum EvaluationRunner {
             case .success(let outcome):
                 if let contradiction = contradictedToolClaim(in: outcome, observations: toolObservations) {
                     transcript.turnLog.append("[validator runtime guard] \(contradiction)")
-                    return (.error(contradiction), transcript)
+                    return (.error(contradiction), transcript, nil)
                 }
-                return (outcome, transcript)
+                return (outcome, transcript, nil)
             case .failure(let why):
                 if isEmptyParseFailure(why) && isVerdictGrammar(definition.outputGrammar) {
-                    return (.error("empty response from validator; retrying requires a fresh validator conversation"), transcript)
+                    return (.error("empty response from validator; retrying requires a fresh validator conversation"), transcript, nil)
                 }
                 parseRetries += 1
                 guard parseRetries <= maxParseRetries(for: definition.outputGrammar) else {
-                    return (.error("unparseable after \(parseRetries) attempts: \(why)"), transcript)
+                    return (.error("unparseable after \(parseRetries) attempts: \(why)"), transcript, nil)
                 }
                 messages.append(.assistant(from: response))
                 messages.append(.user(formatRetryNudge(for: definition.outputGrammar, problem: why)))
             }
         }
-        return (.error("exhausted \(definition.maxTurns) turns without a conforming result"), transcript)
+        return (.error("exhausted \(definition.maxTurns) turns without a conforming result"), transcript, nil)
     }
 
     private struct ToolObservation {

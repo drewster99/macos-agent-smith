@@ -130,6 +130,7 @@ private struct SummarizerAgentCardContent: View {
             messages: data.messages,
             isProcessing: data.isProcessing,
             executingTools: data.executingTools,
+            providerWaits: data.providerWaits,
             currentSystemPrompt: data.currentSystemPrompt,
             pollInterval: data.pollInterval,
             maxToolCalls: data.maxToolCalls,
@@ -229,7 +230,8 @@ private struct AgentCard: View {
                 isSecurityAgent: role == .securityAgent,
                 isTerminated: role != .securityAgent && isTerminated,
                 executingTools: executingTools, processingStartDate: data.processingSince,
-                toolExecutingStartDate: data.toolsRunningSince
+                toolExecutingStartDate: data.toolsRunningSince,
+                providerWaits: data.providerWaits
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 28).padding(.trailing, 12).padding(.bottom, 6)

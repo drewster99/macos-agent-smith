@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentSmithKit
 
 /// Compact status indicator that sits at the right edge of `AgentCard`'s header. Picks
 /// between five mutually-exclusive states (Thinking / Working / Idle / Terminated / Not
@@ -30,10 +31,15 @@ struct AgentCardStatusBadge: View {
     let executingTools: [String]
     let processingStartDate: Date?
     let toolExecutingStartDate: Date?
+    /// This role's callers sleeping on their provider, soonest resumption first. Takes precedence:
+    /// during the wait the agent is neither thinking nor idle.
+    let providerWaits: [ProviderWait]
 
     var body: some View {
         Group {
-            if isProcessing {
+            if let wait = providerWaits.first {
+                ProviderWaitStatusLabel(wait: wait, waitingCount: providerWaits.count, font: AppFonts.inspectorLabel)
+            } else if isProcessing {
                 HStack(spacing: 4) {
                     AgentActivitySpinner()
                     Text(isSecurityAgent ? "Evaluating" : "Thinking")

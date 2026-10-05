@@ -147,10 +147,10 @@ struct AgentCardModelInfoLine: View {
 }
 
 
-/// Shown when the model this agent last called is not the one assigned to its role. A model change
-/// never touches a live agent's conversation (its history is shaped by the model that wrote it):
-/// Brown picks it up at its next start, Smith when the agents are next started. The Security Agent
-/// and the Summarizer switch live on their next call, so they never show it.
+/// Shown when the model this agent last called is not the one assigned to its role — the window
+/// between a model change and the agent's next call. A live agent switches at its next turn
+/// boundary and keeps its conversation (`AgentActor.applyPendingModelChange`). The Security Agent
+/// and the Summarizer keep no conversation and switch on their next call, so they never show it.
 struct AgentCardRunningModelNotice: View {
     let assignedModelID: String
     let lastCalledModelID: String?
@@ -161,7 +161,7 @@ struct AgentCardRunningModelNotice: View {
            let running = lastCalledModelID, !running.isEmpty, running != assignedModelID {
             Image(systemName: "arrow.triangle.2.circlepath")
                 .foregroundStyle(AppColors.runningModelMismatch)
-                .help("\(role.displayName) is still calling \(running). The assigned model takes effect when it next starts\(role == .smith ? " (the next time the agents are started)" : "").")
+                .help("\(role.displayName) last called \(running). It switches to the assigned model at its next call and keeps its conversation.")
         }
     }
 }

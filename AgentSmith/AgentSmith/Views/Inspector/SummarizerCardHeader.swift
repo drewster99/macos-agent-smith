@@ -1,4 +1,5 @@
 import SwiftUI
+import AgentSmithKit
 
 /// Header row for `SummarizerCard` — activity dot, title (opens the inspector window), status,
 /// mute placeholder, gear.
@@ -6,6 +7,8 @@ struct SummarizerCardHeader: View {
     let hasActivity: Bool
     let isProcessing: Bool
     let executingTools: [String]
+    /// Soonest resumption first; takes precedence over every other status.
+    let providerWaits: [ProviderWait]
     let roleColor: Color
     let onOpenWindow: () -> Void
     let onShowConfig: () -> Void
@@ -24,7 +27,9 @@ struct SummarizerCardHeader: View {
 
                     Spacer()
 
-                    if isProcessing {
+                    if let wait = providerWaits.first {
+                        ProviderWaitStatusLabel(wait: wait, waitingCount: providerWaits.count, font: AppFonts.inspectorLabel)
+                    } else if isProcessing {
                         HStack(spacing: 4) {
                             AgentActivitySpinner()
                             Text("Summarizing")

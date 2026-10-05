@@ -64,6 +64,7 @@ struct AgentInspectorWindow: View {
                 executingTools: executingTools,
                 processingStartDate: viewModel.inspectorLive.processingSince[role],
                 toolExecutingStartDate: viewModel.inspectorLive.toolsRunningSince[role],
+                providerWaits: viewModel.inspectorLive.providerWaitsByRole[role] ?? [],
                 onDone: { dismiss() }
             )
             InspectorModelCostLine(viewModel: viewModel, role: role)

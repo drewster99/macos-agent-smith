@@ -45,18 +45,23 @@ public struct MemoryReconciliationRequest: Sendable, Equatable {
 /// focused prompt, and no tools. Each summary captures the problem, outcome, and approach
 /// for semantic search retrieval.
 actor TaskSummarizer {
-    private let provider: any LLMProvider
+    /// The model state below is replaced together by `applyModel` when the Summarizer role is
+    /// retuned or reassigned. Each provider call reads it fresh, so a call retrying after a wait
+    /// uses whatever model is assigned when it retries.
+    private var provider: any LLMProvider
     private let memoryStore: MemoryStore
     private let channel: MessageChannel
-    private let contextWindowSize: Int
-    private let maxOutputTokens: Int
+    private var contextWindowSize: Int
+    private var maxOutputTokens: Int
     private let usageStore: UsageStore?
     /// Full snapshot of the ModelConfiguration used for summarization LLM calls.
-    private let configuration: ModelConfiguration?
+    private var configuration: ModelConfiguration?
     /// The model configuration this summarizer calls with.
     public var modelConfiguration: ModelConfiguration? { configuration }
     /// Provider API type (e.g. "anthropic", "openAICompatible") — not on ModelConfiguration.
-    private let providerType: String
+    private var providerType: String
+    /// Where this summarizer's retry sleeps are published and woken. Set by the runtime at creation.
+    private var providerWaitBoard: ProviderWaitBoard?
     /// Session ID for the current orchestration run — stamped on every UsageRecord.
     private let sessionID: UUID?
     /// Bumps the live-activity counter while a summarization run is in flight (inspector strip).
@@ -108,6 +113,49 @@ actor TaskSummarizer {
     /// Registers (or, with nil, clears) the provider-call observer.
     func setOnLLMCallRecorded(_ handler: (@Sendable (LLMCallEvent) -> Void)?) {
         onLLMCallRecorded = handler
+    }
+
+    /// Switches the model this summarizer calls — a retune or a different model. Safe at any
+    /// moment: no summarizer call keeps a conversation, and a call already sent holds its own
+    /// provider copy. A call sleeping before a retry is woken by the runtime and retries on this.
+    func applyModel(provider: any LLMProvider, configuration: ModelConfiguration, providerType: String) {
+        self.provider = provider
+        self.configuration = configuration
+        self.providerType = providerType
+        self.contextWindowSize = configuration.contextWindowSize
+        self.maxOutputTokens = configuration.maxTokens
+    }
+
+    /// Injects the board every retry sleep of this summarizer is published on and woken through.
+    func setProviderWaitBoard(_ board: ProviderWaitBoard) {
+        providerWaitBoard = board
+    }
+
+    /// The one retry sleep for every summarizer call: published as a `ProviderWait` and woken
+    /// early by a Summarizer model change. Either way the next attempt reads the current model.
+    /// Returns false when the sleep was cancelled, so the caller stops retrying.
+    private func sleepBeforeRetry(
+        after error: Error,
+        attempt: Int,
+        retryAfter: TimeInterval?,
+        streakStartedAt: Date,
+        purpose: ProviderWaitPurpose,
+        taskID: UUID?
+    ) async -> Bool {
+        let delay = LLMRetryPolicy.delay(attempt: attempt, retryAfter: retryAfter)
+        let wait = ProviderWait(
+            holder: ProviderWaitHolder(role: .summarizer, taskID: taskID, purpose: purpose),
+            reason: LLMRetryPolicy.waitReason(for: error),
+            providerID: configuration?.providerID,
+            modelID: configuration?.model,
+            streakStartedAt: streakStartedAt,
+            resumesAt: Date().addingTimeInterval(delay),
+            attempt: attempt
+        )
+        switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait) {
+        case .elapsed, .wokenForModelChange: return true
+        case .cancelled: return false
+        }
     }
 
     /// The one path every Summarizer provider call takes: sends `messages`, records usage, and
@@ -218,7 +266,10 @@ actor TaskSummarizer {
                     content: "Summarization retry \(attempt)/\(LLMRetryPolicy.maxAttempts) for '\(task.title)' in \(LLMRetryPolicy.formatDelay(delay))",
                     metadata: ["severity": .severity(.warning)]
                 ))
-                guard await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
+                guard await sleepBeforeRetry(
+                    after: error, attempt: attempt, retryAfter: retryAfter,
+                    streakStartedAt: startTime, purpose: .taskSummary, taskID: task.id
+                ) else { break }
             }
         }
 
@@ -317,6 +368,7 @@ actor TaskSummarizer {
 
         var lastError: Error?
         var attempt = 0
+        let streakStartedAt = Date()
         while true {
             if Task.isCancelled { return .cancelled }
             attempt += 1
@@ -330,7 +382,10 @@ actor TaskSummarizer {
                 lastError = error
                 guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
                       attempt < LLMRetryPolicy.maxAttempts,
-                      await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
+                      await sleepBeforeRetry(
+                          after: error, attempt: attempt, retryAfter: retryAfter,
+                          streakStartedAt: streakStartedAt, purpose: .memoryReconciliation, taskID: nil
+                      ) else { break }
             }
         }
 
@@ -387,6 +442,7 @@ actor TaskSummarizer {
 
         var lastError: Error?
         var attempt = 0
+        let streakStartedAt = Date()
         while true {
             if Task.isCancelled { return nil }
             attempt += 1
@@ -402,7 +458,10 @@ actor TaskSummarizer {
                 lastError = error
                 guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
                       attempt < LLMRetryPolicy.maxAttempts,
-                      await LLMRetryPolicy.sleep(attempt: attempt, retryAfter: retryAfter) else { break }
+                      await sleepBeforeRetry(
+                          after: error, attempt: attempt, retryAfter: retryAfter,
+                          streakStartedAt: streakStartedAt, purpose: .webContentExtraction, taskID: taskID
+                      ) else { break }
             }
         }
 
