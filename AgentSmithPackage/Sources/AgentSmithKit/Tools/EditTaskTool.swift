@@ -43,7 +43,7 @@ public struct EditTaskTool: AgentTool {
             ]),
             "tool_overrides": .dictionary([
                 "type": .string("object"),
-                "description": .string("Optional per-task worker tool overrides. Keys are tool names; values are 'auto', 'on', or 'off'.")
+                "description": .string("Optional per-task worker tool overrides. Keys are tool names; values are 'auto', 'on', or 'off'. Only the worker's own tools and MCP server tools (mcp__<server>__<tool>) can be overridden: your task-management tools (create_task, list_tasks, watch_task, …) are not available to workers, and a call naming one is refused.")
             ])
         ]),
         "required": .array([.string("task_id")])
@@ -106,6 +106,17 @@ public struct EditTaskTool: AgentTool {
             parsedOverrides = overrides
         case .failure(let message):
             return .failure(message)
+        }
+        // An override applies only to a worker's candidate tools, so one for any other tool would
+        // be stored, reported back as done, and do nothing — the worker never receives the tool.
+        // Refused before anything is written. Clearing ('auto') is always allowed, so an override
+        // stored before this check can still be removed.
+        let unavailable = parsedOverrides
+            .filter { $0.enabled != nil && !BrownBehavior.acceptsToolOverride(named: $0.tool) }
+            .map(\.tool)
+            .sorted()
+        if !unavailable.isEmpty {
+            return .failure("Workers cannot use \(unavailable.joined(separator: ", ")), so an override for \(unavailable.count == 1 ? "it" : "them") would have no effect. Only a worker's own tools and MCP server tools (mcp__<server>__<tool>) can be overridden; task-management tools stay with you. Nothing was changed.")
         }
 
         if let problem = await context.taskStore.updateDefinition(

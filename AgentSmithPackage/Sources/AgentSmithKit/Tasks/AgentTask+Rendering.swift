@@ -131,11 +131,16 @@ extension AgentTask {
             lines.append("Approved tools (security-scoped worker toolset): \(list)")
         }
         if let userToolOverrides, !userToolOverrides.isEmpty {
-            let forcedOn = userToolOverrides.filter { $0.value }.keys.sorted()
-            let forcedOff = userToolOverrides.filter { !$0.value }.keys.sorted()
+            // An override for a tool no worker can have is stored but never applied; reporting it
+            // as "forced on" told the reader the worker had a tool it did not.
+            let effective = userToolOverrides.filter { BrownBehavior.acceptsToolOverride(named: $0.key) }
+            let ignored = userToolOverrides.keys.filter { !BrownBehavior.acceptsToolOverride(named: $0) }.sorted()
+            let forcedOn = effective.filter { $0.value }.keys.sorted()
+            let forcedOff = effective.filter { !$0.value }.keys.sorted()
             var parts: [String] = []
             if !forcedOn.isEmpty { parts.append("forced on: \(forcedOn.joined(separator: ", "))") }
             if !forcedOff.isEmpty { parts.append("forced off: \(forcedOff.joined(separator: ", "))") }
+            if !ignored.isEmpty { parts.append("ignored, not worker tools: \(ignored.joined(separator: ", "))") }
             lines.append("User tool overrides — \(parts.joined(separator: "; "))")
         }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")

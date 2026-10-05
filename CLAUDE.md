@@ -177,6 +177,8 @@ Four guard tests in `ChannelMessageKindTests.swift` enforce all of this: wire st
 
 **Varying what a tool shows an agent.** Per role: override `description(for:)` / `parameters(for:)` (today only `manage_steps`, which shows `purge` to Smith alone). Per turn: override `definition(for:in:)` (today only `update_task`, which drops `completed` while a task is validating). All three are PROTOCOL REQUIREMENTS on purpose — an extension-only helper is statically dispatched through `any AgentTool`, so every override is silently ignored. That is exactly what happened from 2026-03 to 2026-10: Smith never saw `purge`, and fifteen Brown-only "security review" description suffixes never reached Brown (deleted 2026-10-04 as redundant with, and less accurate than, Brown's system prompt). Test an override through `any AgentTool`, not the concrete type.
 
+**Per-task tool overrides only reach a worker's own candidate tools** (its built-ins and MCP server tools). `BrownBehavior.acceptsToolOverride(named:)` is the one predicate: `edit_task` refuses an override for any other tool (2026-10-05 — Smith had "enabled" its own `create_task`/`list_tasks`/`watch_task` on a coordinator task, the call reported success, and the worker never got them); the task panel lists such stale overrides under "Not available to workers" (shown off, clearable) instead of "disconnected MCP"; `get_task_details` reports them as ignored. Whether a worker should ever be able to coordinate other tasks is an open design question, not something an override can grant.
+
 Brown's `BashTool` shells out via `/bin/bash -c` (sources the user profile — full PATH). There is no separate `shell` tool anymore.
 
 ### Acceptance validation (replaces Smith's routine review)

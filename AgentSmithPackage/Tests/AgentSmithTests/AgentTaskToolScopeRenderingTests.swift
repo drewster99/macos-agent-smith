@@ -32,8 +32,16 @@ struct AgentTaskToolScopeRenderingTests {
 
     @Test("Overrides render forced on/off (sorted) even without an approved set")
     func overridesOnly() {
-        let out = task(overrides: ["bash": false, "run_applescript": true, "curl": false]).renderedToolScope()
-        #expect(out == "User tool overrides — forced on: run_applescript; forced off: bash, curl")
+        let out = task(overrides: ["bash": false, "run_applescript": true, "file_read": false]).renderedToolScope()
+        #expect(out == "User tool overrides — forced on: run_applescript; forced off: bash, file_read")
+    }
+
+    /// An override for a tool no worker can have is stored but never applied — it must not read as
+    /// "forced on" (2026-10-04: Smith "enabled" its own create_task on a worker's task).
+    @Test("Overrides for tools no worker can have render as ignored")
+    func unavailableOverridesRenderAsIgnored() {
+        let out = task(overrides: ["create_task": true, "curl": false, "file_write": true]).renderedToolScope()
+        #expect(out == "User tool overrides — forced on: file_write; ignored, not worker tools: create_task, curl")
     }
 
     @Test("Approved tools and overrides render together, on separate lines")

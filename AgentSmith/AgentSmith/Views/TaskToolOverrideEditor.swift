@@ -21,7 +21,8 @@ struct TaskToolOverrideEditor: View {
     private enum OverrideState { case auto, on, off }
 
     /// A section of the tool list: built-in tools (no header), one connected MCP server (header +
-    /// aggregate control), or leftover MCP tools from a disconnected server (header, no aggregate).
+    /// aggregate control), leftover MCP tools from a disconnected server (header, no aggregate), or
+    /// overrides naming tools no worker can have (header, no aggregate, always shown as off).
     private struct ToolGroup: Identifiable {
         let id: String
         /// Section header text; `nil` renders no header (the built-in section).
@@ -72,8 +73,17 @@ struct TaskToolOverrideEditor: View {
         if let overrides = task.userToolOverrides { leftover.formUnion(overrides.keys) }
         leftover.subtract(accounted)
         leftover.subtract(lifecycle)
-        if !leftover.isEmpty {
-            result.append(ToolGroup(id: "__other", title: "Other (disconnected MCP)", serverID: nil, tools: leftover.sorted()))
+        // Only an MCP-shaped name can belong to a disconnected server. Anything else is a tool no
+        // worker can have (an override Smith once set for one of its own tools): listed so the
+        // override can be cleared, never presented as an enabled worker tool.
+        let disconnectedMCP = leftover.filter { BrownBehavior.acceptsToolOverride(named: $0) }
+        let unavailable = leftover.subtracting(disconnectedMCP)
+        if !disconnectedMCP.isEmpty {
+            result.append(ToolGroup(id: "__other", title: "Other (disconnected MCP)", serverID: nil, tools: disconnectedMCP.sorted()))
+        }
+        if !unavailable.isEmpty {
+            result.append(ToolGroup(id: "__unavailable", title: "Not available to workers — overrides have no effect",
+                                    serverID: nil, tools: unavailable.sorted()))
         }
         return result
     }
@@ -158,6 +168,8 @@ struct TaskToolOverrideEditor: View {
     }
 
     private func effectiveEnabled(_ tool: String) -> Bool {
+        // An override cannot give a worker a tool it can never have.
+        guard BrownBehavior.acceptsToolOverride(named: tool) else { return false }
         if let override = task.userToolOverrides?[tool] { return override }
         switch viewModel.shared.globalToolPolicies[tool] ?? ToolPolicy.builtInDefaults[tool] ?? .default {
         case .always:

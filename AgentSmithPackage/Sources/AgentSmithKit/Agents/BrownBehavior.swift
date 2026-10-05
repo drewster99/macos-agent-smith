@@ -42,6 +42,19 @@ public enum BrownBehavior {
         tools().map(\.name)
     }
 
+    /// Whether a per-task tool override for `name` can ever take effect: the override is applied
+    /// only to a worker's candidate tools — its own built-ins and its MCP server tools (resolved by
+    /// the `mcp__<server>__<tool>` shape, since a server may be disconnected right now). Anything
+    /// else (Smith's task-management tools, a misspelling) is inert: storing it would report a tool
+    /// as enabled that the worker never receives.
+    public static func acceptsToolOverride(named name: String) -> Bool {
+        builtInToolNames.contains(name) || MCPToolNaming.components(of: name) != nil
+    }
+
+    /// `toolNames` as a set, built once: the built-in roster is fixed, and the override check runs
+    /// per row on every render of the task's tool panel.
+    private static let builtInToolNames = Set(toolNames)
+
 
     /// System prompt for Brown agents.
     static var systemPrompt: String {
