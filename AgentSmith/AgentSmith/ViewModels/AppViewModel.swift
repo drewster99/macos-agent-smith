@@ -2167,6 +2167,12 @@ final class AppViewModel {
             // one without the other (it refuses a provider that arrives without its type).
             guard let modelProvider = shared.llmKit.providers.first(where: { $0.id == providerID }) else {
                 logger.error("Provider refresh: failed to rebuild \(role.displayName, privacy: .public) provider: Provider not found: \(providerID, privacy: .public)")
+                // In the transcript too: the assignment in Settings now names a model the role is
+                // NOT running, and a log line alone leaves that invisible.
+                appendLocalSystemMessage(
+                    "\(role.displayName) was not switched to \(modelID): its provider \"\(providerID)\" is not configured. \(role.displayName) keeps the model it is running.",
+                    severity: .error
+                )
                 continue
             }
             providers[role] = shared.llmKit.makeProvider(configuration: resolved, provider: modelProvider)
@@ -2671,11 +2677,11 @@ final class AppViewModel {
     /// Surfaces a system line in the transcript when there's no runtime (and therefore no
     /// channel) to post through. Mirrors the channel-stream append path so the message
     /// also survives in the persisted history.
-    private func appendLocalSystemMessage(_ content: String) {
+    private func appendLocalSystemMessage(_ content: String, severity: MessageSeverity = .info) {
         let message = ChannelMessage(
             sender: .system,
             content: content,
-            metadata: ["messageKind": .kind(.advisory)]
+            metadata: ["messageKind": .kind(.advisory), "severity": .severity(severity)]
         )
         enqueueChannelAppendForPersist(message)           // disk first (debounced JSONL)
         Task { await transcriptStore.ingest(message) }    // display (off-main fan-out + cap)
