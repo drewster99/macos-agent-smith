@@ -936,6 +936,8 @@ actor SecurityEvaluator {
             providerCallCount += 1
             let callAnnotation = reviewAnnotation.forCall(providerCallCount)
             let callStart = Date()
+            // Read before the call, so a model change during it ends the retry sleep (`ProviderWaitBoard`).
+            let modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .securityAgent)
             do {
                 // Floor the output budget so a small configured Security Agent max_tokens can't starve
                 // the verdict (the model may reason a little before committing). The configured
@@ -994,7 +996,7 @@ actor SecurityEvaluator {
                         metadata: ["messageKind": .kind(.agentRecovery), "severity": .severity(.warning), "agentRole": .string(AgentRole.securityAgent.rawValue)]
                     ), taskID: taskID.flatMap { UUID(uuidString: $0) }, model: model)
                 }
-                switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait) {
+                switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait, modelEpochAtAttempt: modelEpochAtAttempt) {
                 case .elapsed:
                     continue evaluationLoop
                 case .cancelled:
@@ -1290,6 +1292,8 @@ actor SecurityEvaluator {
             providerCallCount += 1
             let callAnnotation = scopingAnnotation.forCall(providerCallCount)
             let callStart = Date()
+            // Read before the call, so a model change during it ends the retry sleep (`ProviderWaitBoard`).
+            let modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .securityAgent)
             do {
                 // Scoping responds with the full allow/block JSON for every candidate tool and
                 // typically reasons through them first — it needs far more room than a single
@@ -1334,7 +1338,7 @@ actor SecurityEvaluator {
                         metadata: ["messageKind": .kind(.agentRecovery), "severity": .severity(.warning), "agentRole": .string(AgentRole.securityAgent.rawValue)]
                     ), taskID: UUID(uuidString: taskID), model: model)
                 }
-                switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait) {
+                switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait, modelEpochAtAttempt: modelEpochAtAttempt) {
                 case .elapsed:
                     continue scopingLoop
                 case .cancelled:

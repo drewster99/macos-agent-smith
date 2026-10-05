@@ -446,7 +446,7 @@ struct Phase2LongLivedSmithTests {
         }
         let after = await statuses()
         #expect(after.filter { $0 == .interrupted }.count == 0, "the queued interrupted task resumed when a slot freed")
-        #expect(after.filter { $0 == .running }.count == 2, "two running again (one completed, the queued one took its slot)")
+        #expect(after.filter { $0 == .running }.count == 2, "two running again (one completed, the queued one took its slot); statuses: \(after.map { $0?.rawValue ?? "nil" }), live workers: \(await runtime.workerSlots().live)")
 
         await runtime.stopAll()
     }

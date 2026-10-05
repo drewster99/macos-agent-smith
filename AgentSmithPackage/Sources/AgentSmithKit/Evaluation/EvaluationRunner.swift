@@ -127,6 +127,8 @@ public enum EvaluationRunner {
             var waitStreakStartedAt: Date?
             while true {
                 transportAttempt += 1
+                // Read before the call, so a model change during it ends the retry sleep (`ProviderWaitBoard`).
+                let modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWait?.board, of: providerWait?.holder.role ?? .validator)
                 do {
                     // Models that reject a temperature override (reasoning models) are handled
                     // proactively by SwiftLLMKit's `mustNeverSendTemperatureParam` metadata — the
@@ -157,7 +159,7 @@ public enum EvaluationRunner {
                         resumesAt: sleepStart.addingTimeInterval(delay),
                         attempt: transportAttempt
                     )
-                    let sleepOutcome = await ProviderWaitBoard.sleep(on: providerWait?.board, for: delay, wait)
+                    let sleepOutcome = await ProviderWaitBoard.sleep(on: providerWait?.board, for: delay, wait, modelEpochAtAttempt: modelEpochAtAttempt)
                     deadline = deadline.addingTimeInterval(Date().timeIntervalSince(sleepStart))
                     switch sleepOutcome {
                     case .elapsed:

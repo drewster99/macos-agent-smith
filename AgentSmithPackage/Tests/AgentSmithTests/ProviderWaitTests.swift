@@ -61,7 +61,7 @@ struct ProviderWaitTests {
         let recorder = SnapshotRecorder()
         board.setOnChange { recorder.record($0) }
         let wait = Self.wait(resumesIn: 0.1)
-        let outcome = await board.sleep(for: 0.1, wait)
+        let outcome = await board.sleep(for: 0.1, wait, modelEpochAtAttempt: 0)
         #expect(outcome == .elapsed)
         #expect(board.waits.isEmpty)
         #expect(recorder.snapshots.contains { $0.map(\.id) == [wait.id] }, "the wait was never published")
@@ -71,8 +71,8 @@ struct ProviderWaitTests {
     @Test("a wake ends only the sleeps of that role, early")
     func wakeIsPerRole() async {
         let board = ProviderWaitBoard()
-        async let brown = board.sleep(for: 3600, Self.wait(role: .brown))
-        async let security = board.sleep(for: 0.5, Self.wait(role: .securityAgent))
+        async let brown = board.sleep(for: 3600, Self.wait(role: .brown), modelEpochAtAttempt: 0)
+        async let security = board.sleep(for: 0.5, Self.wait(role: .securityAgent), modelEpochAtAttempt: 0)
         #expect(await Self.waitUntil { board.waits.count == 2 })
         #expect(board.wakeForModelChange(of: .brown) == 1)
         #expect(await brown == .wokenForModelChange)
@@ -80,10 +80,26 @@ struct ProviderWaitTests {
         #expect(board.wakeForModelChange(of: .brown) == 0, "a finished sleep was woken twice")
     }
 
+    /// The switch's wake can only end sleeps that exist. A change that lands while the failing
+    /// attempt is still in flight must end the sleep that attempt's failure starts — otherwise a
+    /// multi-day Retry-After from the OLD provider is honored in full on a model no longer in use.
+    @Test("a model change during the attempt ends the retry sleep at once")
+    func changeDuringAttempt() async {
+        let board = ProviderWaitBoard()
+        let epochAtAttempt = board.modelEpoch(of: .brown)
+        #expect(board.wakeForModelChange(of: .brown) == 0, "nothing was sleeping yet")
+        let outcome = await board.sleep(for: 3600, Self.wait(role: .brown), modelEpochAtAttempt: epochAtAttempt)
+        #expect(outcome == .wokenForModelChange)
+        #expect(board.waits.isEmpty, "a superseded sleep was published")
+        // Another role's change does not cut a sleep short.
+        let securityEpoch = board.modelEpoch(of: .securityAgent)
+        #expect(await board.sleep(for: 0.05, Self.wait(role: .securityAgent), modelEpochAtAttempt: securityEpoch) == .elapsed)
+    }
+
     @Test("cancelling the sleeping task ends the sleep and unpublishes it")
     func cancellation() async {
         let board = ProviderWaitBoard()
-        let sleeper = Task { await board.sleep(for: 3600, Self.wait()) }
+        let sleeper = Task { await board.sleep(for: 3600, Self.wait(), modelEpochAtAttempt: 0) }
         #expect(await Self.waitUntil { board.waits.count == 1 })
         sleeper.cancel()
         #expect(await sleeper.value == .cancelled)
@@ -95,7 +111,7 @@ struct ProviderWaitTests {
         let board = ProviderWaitBoard()
         let sleeper = Task {
             withUnsafeCurrentTask { $0?.cancel() }
-            return await board.sleep(for: 3600, Self.wait())
+            return await board.sleep(for: 3600, Self.wait(), modelEpochAtAttempt: 0)
         }
         #expect(await sleeper.value == .cancelled)
         #expect(board.waits.isEmpty)
@@ -106,8 +122,8 @@ struct ProviderWaitTests {
         let board = ProviderWaitBoard()
         let later = Self.wait(resumesIn: 7200)
         let sooner = Self.wait(resumesIn: 60)
-        async let first = board.sleep(for: 3600, later)
-        async let second = board.sleep(for: 3600, sooner)
+        async let first = board.sleep(for: 3600, later, modelEpochAtAttempt: 0)
+        async let second = board.sleep(for: 3600, sooner, modelEpochAtAttempt: 0)
         #expect(await Self.waitUntil { board.waits.count == 2 })
         #expect(board.waits.map(\.id) == [sooner.id, later.id])
         board.wakeForModelChange(of: .brown)

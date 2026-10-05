@@ -272,7 +272,10 @@ through `ProviderWaitBoard.sleep`, publishing a typed `ProviderWait` (holder rol
 `ProviderWaitReason` from `LLMRetryPolicy.waitReason` — typed, never prose — model, resume time,
 attempt) for exactly the length of the sleep. `setProviders` calls `wakeForModelChange(of:)` for every
 role whose model IDENTITY changed, LAST (after every holder has the new model), so a waiter retries on
-the new model at once. The app mirrors the board (`AppViewModel.providerWaits`, re-read after the main
+the new model at once. A change that lands while the failing call is still IN FLIGHT has no sleeper to
+wake, so every caller reads `modelEpoch(of:)` when its provider attempt starts and passes it to the
+sleep; a sleep registered after the role's epoch moved ends at once (checked under the registration
+lock), instead of honoring the old provider's — possibly multi-day — `Retry-After`. The app mirrors the board (`AppViewModel.providerWaits`, re-read after the main
 hop because hops are unordered) and `ProviderWaitStatusLabel` outranks Thinking/Evaluating/Idle in the
 agent cards, the inspector window header and the summarizer card; Live rows say "waiting for <model>"
 or "waiting on security — its model <reason>". A Security Agent review publishes the worker it holds

@@ -140,7 +140,8 @@ actor TaskSummarizer {
         retryAfter: TimeInterval?,
         streakStartedAt: Date,
         purpose: ProviderWaitPurpose,
-        taskID: UUID?
+        taskID: UUID?,
+        modelEpochAtAttempt: Int?
     ) async -> Bool {
         let delay = LLMRetryPolicy.delay(attempt: attempt, retryAfter: retryAfter)
         let wait = ProviderWait(
@@ -152,7 +153,7 @@ actor TaskSummarizer {
             resumesAt: Date().addingTimeInterval(delay),
             attempt: attempt
         )
-        switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait) {
+        switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait, modelEpochAtAttempt: modelEpochAtAttempt) {
         case .elapsed, .wokenForModelChange: return true
         case .cancelled: return false
         }
@@ -252,6 +253,8 @@ actor TaskSummarizer {
         while summary == nil {
             if Task.isCancelled { return nil }
             attempt += 1
+            // Read before the call, so a model change during it ends the retry sleep (`ProviderWaitBoard`).
+            let modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .summarizer)
             do {
                 summary = try await generateSummary(for: task, annotation: annotation.forCall(attempt))
             } catch {
@@ -268,7 +271,8 @@ actor TaskSummarizer {
                 ))
                 guard await sleepBeforeRetry(
                     after: error, attempt: attempt, retryAfter: retryAfter,
-                    streakStartedAt: startTime, purpose: .taskSummary, taskID: task.id
+                    streakStartedAt: startTime, purpose: .taskSummary, taskID: task.id,
+                    modelEpochAtAttempt: modelEpochAtAttempt
                 ) else { break }
             }
         }
@@ -372,6 +376,8 @@ actor TaskSummarizer {
         while true {
             if Task.isCancelled { return .cancelled }
             attempt += 1
+            // Read before the call, so a model change during it ends the retry sleep (`ProviderWaitBoard`).
+            let modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .summarizer)
 
             do {
                 let response = try await sendRecorded(messages, annotation: annotation.forCall(attempt))
@@ -384,7 +390,8 @@ actor TaskSummarizer {
                       attempt < LLMRetryPolicy.maxAttempts,
                       await sleepBeforeRetry(
                           after: error, attempt: attempt, retryAfter: retryAfter,
-                          streakStartedAt: streakStartedAt, purpose: .memoryReconciliation, taskID: nil
+                          streakStartedAt: streakStartedAt, purpose: .memoryReconciliation, taskID: nil,
+                          modelEpochAtAttempt: modelEpochAtAttempt
                       ) else { break }
             }
         }
@@ -446,6 +453,8 @@ actor TaskSummarizer {
         while true {
             if Task.isCancelled { return nil }
             attempt += 1
+            // Read before the call, so a model change during it ends the retry sleep (`ProviderWaitBoard`).
+            let modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .summarizer)
 
             do {
                 let response = try await sendRecorded(messages, annotation: annotation.forCall(attempt))
@@ -460,7 +469,8 @@ actor TaskSummarizer {
                       attempt < LLMRetryPolicy.maxAttempts,
                       await sleepBeforeRetry(
                           after: error, attempt: attempt, retryAfter: retryAfter,
-                          streakStartedAt: streakStartedAt, purpose: .webContentExtraction, taskID: taskID
+                          streakStartedAt: streakStartedAt, purpose: .webContentExtraction, taskID: taskID,
+                          modelEpochAtAttempt: modelEpochAtAttempt
                       ) else { break }
             }
         }

@@ -1659,6 +1659,8 @@ public actor AgentActor {
             // Set when the error reaching the catch below came from the provider call itself, as
             // opposed to tool handling — only the former is a wait on the provider.
             var failureWasProviderCall = false
+            // The wait board's model-change count when this turn's provider call started; see below.
+            var modelEpochAtAttempt: Int?
             do {
                 let availabilityContext = await currentAvailabilityContext()
                 // Defense-in-depth: while Brown is awaiting review, hand him an empty
@@ -1722,6 +1724,9 @@ public actor AgentActor {
                 let messagesForLLM = conversationHistory
 
                 let llmStartTime = Date()
+                // Read before the call: a model change that lands while it is in flight must end
+                // a retry sleep this attempt's failure would otherwise start (`ProviderWaitBoard`).
+                modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: configuration.role)
                 // Clamp this turn's output cap to any limit we've learned from a prior
                 // rejection. Passed as a per-call override so we don't have to rebuild the
                 // provider mid-run; nil leaves the provider's configured cap untouched.
@@ -2126,7 +2131,7 @@ public actor AgentActor {
                     resumesAt: Date().addingTimeInterval(backoff),
                     attempt: consecutiveErrors
                 )
-                _ = await ProviderWaitBoard.sleep(on: providerWaitBoard, for: backoff, wait)
+                _ = await ProviderWaitBoard.sleep(on: providerWaitBoard, for: backoff, wait, modelEpochAtAttempt: modelEpochAtAttempt)
             }
         }
         await toolContext.onSelfTerminate()

@@ -38,6 +38,11 @@ public final class ProviderWaitBoard: Sendable {
     private struct State {
         var sleepers: [UUID: Sleeper] = [:]
         var onChange: (@Sendable ([ProviderWait]) -> Void)?
+        /// Per role, how many model changes have been announced (`wakeForModelChange`). A caller
+        /// reads it when its provider attempt starts (`modelEpoch(of:)`) and hands it to `sleep`, so
+        /// a change that landed while that attempt was in flight — when there was no sleeper yet to
+        /// wake — still ends the retry sleep instead of being missed.
+        var modelEpochs: [AgentRole: Int] = [:]
     }
 
     private let state = Mutex(State())
@@ -56,13 +61,30 @@ public final class ProviderWaitBoard: Sendable {
         state.withLock { Self.sortedWaits($0.sleepers) }
     }
 
+    /// The model-change count for `role` — read when a provider attempt STARTS and passed to
+    /// `sleep(for:_:modelEpochAtAttempt:)` if that attempt fails.
+    public func modelEpoch(of role: AgentRole) -> Int {
+        state.withLock { $0.modelEpochs[role] ?? 0 }
+    }
+
     /// Sleeps `seconds` while publishing `wait`. Returns early when the waiter's role gets a new
-    /// model or the calling task is cancelled.
-    public func sleep(for seconds: TimeInterval, _ wait: ProviderWait) async -> SleepOutcome {
+    /// model or the calling task is cancelled. `modelEpochAtAttempt` is `modelEpoch(of:)` as read
+    /// when the failed attempt started: if the role's model has changed since, the attempt used a
+    /// model the role no longer has, so the sleep ends at once (`.wokenForModelChange`) — checked
+    /// under the same lock that registers the sleeper, so a change can't fall between the two.
+    public func sleep(for seconds: TimeInterval, _ wait: ProviderWait, modelEpochAtAttempt: Int) async -> SleepOutcome {
         let id = wait.id
         let outcome = await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<SleepOutcome, Never>) in
-                state.withLock { $0.sleepers[id] = Sleeper(wait: wait, continuation: continuation, timer: nil) }
+                let superseded = state.withLock { state -> Bool in
+                    guard (state.modelEpochs[wait.holder.role] ?? 0) == modelEpochAtAttempt else { return true }
+                    state.sleepers[id] = Sleeper(wait: wait, continuation: continuation, timer: nil)
+                    return false
+                }
+                if superseded {
+                    continuation.resume(returning: .wokenForModelChange)
+                    return
+                }
                 // Registered BEFORE the cancellation check: a cancel that landed before
                 // registration found nothing to finish, and is caught here instead.
                 if Task.isCancelled {
@@ -95,7 +117,8 @@ public final class ProviderWaitBoard: Sendable {
     @discardableResult
     public func wakeForModelChange(of role: AgentRole) -> Int {
         let ids = state.withLock { state in
-            state.sleepers.values.filter { $0.wait.holder.role == role }.map(\.wait.id)
+            state.modelEpochs[role, default: 0] += 1
+            return state.sleepers.values.filter { $0.wait.holder.role == role }.map(\.wait.id)
         }
         var woken = 0
         for id in ids where finish(id, with: .wokenForModelChange) { woken += 1 }
@@ -127,15 +150,25 @@ public final class ProviderWaitBoard: Sendable {
 }
 
 extension ProviderWaitBoard {
+    /// `modelEpoch(of:)` on a board that may be absent (nil without one).
+    static func modelEpoch(on board: ProviderWaitBoard?, of role: AgentRole) -> Int? {
+        board?.modelEpoch(of: role)
+    }
+
     /// The sleep for a caller that may have no board (only tests construct holders without one;
     /// the runtime wires a board into every holder it builds — pinned by a test). Without a board
     /// the sleep is a plain one: never visible, never woken.
     static func sleep(
         on board: ProviderWaitBoard?,
         for seconds: TimeInterval,
-        _ wait: ProviderWait
+        _ wait: ProviderWait,
+        modelEpochAtAttempt: Int?
     ) async -> SleepOutcome {
-        if let board { return await board.sleep(for: seconds, wait) }
+        if let board {
+            // No epoch means the board arrived after the attempt began: still visible and wakeable,
+            // just without the in-flight protection.
+            return await board.sleep(for: seconds, wait, modelEpochAtAttempt: modelEpochAtAttempt ?? board.modelEpoch(of: wait.holder.role))
+        }
         do {
             try await Task.sleep(for: .seconds(max(seconds, 0)))
             return .elapsed
