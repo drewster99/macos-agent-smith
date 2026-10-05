@@ -3,6 +3,15 @@ import AgentSmithKit
 import SwiftLLMKit
 
 /// Centralized color definitions with semantic names.
+/// Schedules shared by every live-ticking label, so they tick together.
+enum SharedTimelineSchedules {
+    /// Every whole second of the reference clock. Each elapsed-time label used to tick on its own
+    /// phase (`periodic(from: start, by: 1)`), so N visible timers produced N separate SwiftUI
+    /// updates — each a window layout — every second; ticking on one shared boundary lets SwiftUI
+    /// batch them into one. The labels still compute elapsed from their own start date.
+    static let everySecond = PeriodicTimelineSchedule(from: Date(timeIntervalSinceReferenceDate: 0), by: 1)
+}
+
 enum AppColors {
     static let smithAgent = Color.green
     static let brownAgent = Color.orange

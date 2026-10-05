@@ -432,7 +432,7 @@ struct ThinkingElapsedTime: View {
     let font: Font
 
     var body: some View {
-        TimelineView(.periodic(from: since, by: 1)) { timeline in
+        TimelineView(SharedTimelineSchedules.everySecond) { timeline in
             let elapsed = Int(timeline.date.timeIntervalSince(since))
             if elapsed >= 5 {
                 Text(String(format: "%02d:%02d", elapsed / 60, elapsed % 60))

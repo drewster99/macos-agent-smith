@@ -1429,20 +1429,36 @@ private struct TaskRowStatusIcon: View {
     let viewModel: AppViewModel
 
     var body: some View {
-        Image(systemName: iconName)
-            .foregroundStyle(foreground)
-            .font(density == .compact ? .caption : nil)
-            .imageScale(.medium)
-            .frame(width: density == .compact ? 13 : 18)
-            .padding(.top, topPadding)
-            .symbolEffect(
-                .rotate,
-                options: .repeat(.continuous),
-                isActive: style == .active && status == .running
-            )
-            // With the status word gone from the row, hover is where the exact lifecycle
-            // state (paused vs interrupted vs scheduled — all circle-ish glyphs) still lives.
-            .help(status.displayName)
+        Group {
+            // A running task's glyph spins on a Core Animation layer, never a SwiftUI symbol effect:
+            // a repeating `.symbolEffect` is a per-frame SwiftUI update that re-lays out the whole
+            // window (see `LayerSpinningSymbol`). Every other state is a plain, still image.
+            if isSpinning {
+                LayerSpinningSymbol(
+                    systemName: iconName,
+                    pointSize: density == .compact ? NSFont.preferredFont(forTextStyle: .caption1).pointSize
+                                                   : NSFont.preferredFont(forTextStyle: .body).pointSize,
+                    color: NSColor(TaskStatusBadge.color(for: status)),
+                    isSpinning: true,
+                    accessibilityLabel: status.displayName
+                )
+            } else {
+                Image(systemName: iconName)
+                    .foregroundStyle(foreground)
+                    .font(density == .compact ? .caption : nil)
+                    .imageScale(.medium)
+            }
+        }
+        .frame(width: density == .compact ? 13 : 18)
+        .padding(.top, topPadding)
+        // With the status word gone from the row, hover is where the exact lifecycle
+        // state (paused vs interrupted vs scheduled — all circle-ish glyphs) still lives.
+        .help(status.displayName)
+    }
+
+    /// Only an active row for a task that is running right now spins.
+    private var isSpinning: Bool {
+        style == .active && status == .running
     }
 
     /// A queued wake outranks the lifecycle glyph, but only for a task that is not itself mid-run —
@@ -1574,8 +1590,8 @@ private struct TaskRunningElapsed: View {
     let start: Date
 
     var body: some View {
-        TimelineView(.periodic(from: start, by: 1)) { context in
-            Text(durationDisplayString(context.date.timeIntervalSince(start)))
+        TimelineView(SharedTimelineSchedules.everySecond) { context in
+            Text(durationDisplayString(max(0, context.date.timeIntervalSince(start))))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

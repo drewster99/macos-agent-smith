@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import AgentSmithKit
 
 /// Compact status indicator that sits at the right edge of `AgentCard`'s header. Picks
@@ -8,14 +9,19 @@ import AgentSmithKit
 /// to leave the agent looking idle while it was actually blocked waiting for the tool to
 /// return; the Working state covers that span.
 /// Activity spinner for agent status rows. Replaces `ProgressView(.mini)`, whose
-/// NSProgressIndicator ignores tint and rendered near-invisible dark-on-dark; the
-/// variable-color symbol follows the label's adaptive `.secondary` style in both modes.
+/// NSProgressIndicator ignores tint and rendered near-invisible dark-on-dark. Drawn in the
+/// secondary label color (adaptive in both modes) and spun on a Core Animation layer: the
+/// `.symbolEffect(.variableColor, options: .repeating)` it replaced was a per-frame SwiftUI update
+/// that re-laid out the whole window (see `LayerSpinningSymbol`).
 struct AgentActivitySpinner: View {
     var body: some View {
-        Image(systemName: "progress.indicator")
-            .symbolEffect(.variableColor.iterative, options: .repeating)
-            .font(AppFonts.inspectorLabel)
-            .foregroundStyle(.secondary)
+        LayerSpinningSymbol(
+            systemName: "progress.indicator",
+            pointSize: NSFont.preferredFont(forTextStyle: .caption1).pointSize,
+            color: .secondaryLabelColor,
+            isSpinning: true,
+            accessibilityLabel: "Working"
+        )
     }
 }
 
