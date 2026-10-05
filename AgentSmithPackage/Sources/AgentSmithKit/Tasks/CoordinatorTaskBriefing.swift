@@ -1,5 +1,13 @@
 import Foundation
 
+extension AgentTask {
+    /// The order child tasks are listed in everywhere: oldest first, ties broken by id so two
+    /// children created in the same instant list identically in the store, tools and Task Detail.
+    public static func coordinationOrder(_ lhs: AgentTask, _ rhs: AgentTask) -> Bool {
+        (lhs.createdAt, lhs.id.uuidString) < (rhs.createdAt, rhs.id.uuidString)
+    }
+}
+
 /// The built-in subscriber that tells a coordinator's worker how a child task it created turned
 /// out — the counterpart of `SmithTaskBriefing` for tasks a worker created (decided 2026-10-05,
 /// user: "coordinator only"). Recorded as a durable effect in the same write as the child's status

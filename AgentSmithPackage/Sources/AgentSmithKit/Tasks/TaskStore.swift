@@ -1307,10 +1307,13 @@ public actor TaskStore {
             templateInputDefinitions: template.templateInputDefinitions,
             templateInputValues: resolvedInputs.values,
             // Every item is part of the instance as written — it existed when the run was created —
-            // but keeps its author, date and reason, so why a template needs it is never lost.
-            requiredCapabilities: template.requiredCapabilities.map { capability in
-                RequiredCapability(
-                    text: substituted(capability.text),
+            // but keeps its author, date and reason, so why a template needs it is never lost. An
+            // item that renders blank (nothing but an omitted optional input) is no item.
+            requiredCapabilities: template.requiredCapabilities.compactMap { capability in
+                let text = substituted(capability.text).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return nil }
+                return RequiredCapability(
+                    text: text,
                     addedBy: capability.addedBy,
                     addedAt: capability.addedAt,
                     origin: .asWritten,
@@ -1427,7 +1430,7 @@ public actor TaskStore {
     public func childTasks(ofCoordinator coordinatorTaskID: UUID) -> [AgentTask] {
         tasks.values
             .filter { $0.coordinatorTaskID == coordinatorTaskID }
-            .sorted { $0.createdAt < $1.createdAt }
+            .sorted(by: AgentTask.coordinationOrder)
     }
 
     /// Promotes a `.scheduled` task to `.pending` so the queue (or `run_task`) can pick it up.
@@ -1973,60 +1976,31 @@ public actor TaskStore {
     /// unmet need of a running worker, which Smith records here instead of granting a tool. Marked
     /// `.addedLater` with its author and reason, and noted in the task's update history.
     ///
-    /// Refused on a completed task (its contract is history; a follow-up is a successor task) and,
-    /// on a template, for a `{{placeholder}}` naming no defined input. On an instance the run's
-    /// input values are substituted, as `amendDescription` does. An item already listed (compared
-    /// case- and whitespace-insensitively, after substitution) is not added twice.
+    /// Gated by `AgentTask.requiredCapabilitiesLockReason` (refused on a completed, validating, or
+    /// archived/deleted task). The per-item rules — template placeholder check, instance
+    /// substitution, dedup — are shared with `editRequiredCapabilities`.
     public func addRequiredCapability(
         id: UUID,
         text: String,
         addedBy author: TaskAuthorship,
         reason: String?
     ) async -> RequiredCapabilityAddition {
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty else { return .refused("The capability text is empty.") }
         let trimmedReason = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
         let reason = (trimmedReason?.isEmpty ?? true) ? nil : trimmedReason
         var outcome = RequiredCapabilityAddition.refused("Task not found: \(id.uuidString)")
         let problem = await mutateTaskOrTemplate(id: id, { task in     // see setSteps for the locking rationale
-            guard task.status != .completed else {
-                return "Task \"\(task.title)\" is completed; its definition is history. Create a successor task for follow-up work."
-            }
-            if task.isTemplate,
-               let problem = TemplateInputValidation.placeholderProblem(
-                   in: trimmedText,
-                   field: "required capability",
-                   definedNames: Set(task.templateInputDefinitions.map(\.name))
-               ) {
+            if let lock = task.requiredCapabilitiesLockReason { return lock.refusal(taskTitle: task.title) }
+            let now = Date()
+            outcome = Self.addRequiredCapability(text, reason: reason, to: &task, by: author, at: now)
+            switch outcome {
+            case .added:
+                task.updatedAt = now
+                return nil
+            case .alreadyListed:
+                return nil
+            case .refused(let problem):
                 return problem
             }
-            var capabilityText = trimmedText
-            if !task.isTemplate, !task.templateInputValues.isEmpty {
-                capabilityText = TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
-                    capabilityText,
-                    values: task.templateInputValues,
-                    definedNames: Set(task.templateInputValues.keys),
-                    layout: .preserved
-                )
-            }
-            let capability = RequiredCapability(
-                text: capabilityText,
-                addedBy: author,
-                origin: .addedLater,
-                reason: reason
-            )
-            if let existing = task.requiredCapabilities.first(where: { $0.normalizedText == capability.normalizedText }) {
-                outcome = .alreadyListed(existing)
-                return nil
-            }
-            task.requiredCapabilities.append(capability)
-            let because = reason.map { " — reason: \($0)" } ?? ""
-            task.updates.append(AgentTask.TaskUpdate(
-                message: "Required capability added by \(author.displayName): \(capability.text)\(because)"
-            ))
-            task.updatedAt = Date()
-            outcome = .added(capability)
-            return nil
         }, afterLocalCommit: {
             if case .added = outcome { emit(.requiredCapabilitiesChanged(taskID: id)) }
         })
@@ -2034,47 +2008,135 @@ public actor TaskStore {
         return outcome
     }
 
-    /// Replaces a task's required capabilities with an edited list — the user's task editor, which
-    /// carries every row's id, author and origin, so an edited row keeps its provenance and a row it
-    /// adds arrives already marked. `original` is the list the edit started from: an item on the
-    /// task now that it did not contain was added while the editor was open (Smith, on a running
-    /// task) and is kept, appended after the edit, rather than silently erased by a stale save.
-    /// Refused on a completed task and, on a template, for a placeholder naming no defined input
-    /// (only the capability text is checked: it is the only text written).
-    public func setRequiredCapabilities(
-        id: UUID,
-        _ edited: [RequiredCapability],
-        editedFrom original: [RequiredCapability]
-    ) async -> String? {
+    /// The batch writer of required-capability changes after creation (the task editor's diff,
+    /// `RequiredCapabilityEdit.edits(from:to:)`). Shares every per-item rule with
+    /// `addRequiredCapability`. Atomic: a refusal leaves the
+    /// task untouched. One history line per change; one change event when anything changed.
+    public func editRequiredCapabilities(id: UUID, _ edits: [RequiredCapabilityEdit], by author: TaskAuthorship) async -> String? {
+        guard !edits.isEmpty else { return nil }
         var changed = false
         return await mutateTaskOrTemplate(id: id, { task in     // see setSteps for the locking rationale
-            let originalIDs = Set(original.map(\.id))
-            let editedIDs = Set(edited.map(\.id))
-            let addedMeanwhile = task.requiredCapabilities.filter { !originalIDs.contains($0.id) && !editedIDs.contains($0.id) }
-            let capabilities = edited + addedMeanwhile
-            guard task.status != .completed else {
-                return "Task \"\(task.title)\" is completed; its definition is history."
-            }
-            if task.isTemplate {
-                let definedNames = Set(task.templateInputDefinitions.map(\.name))
-                for (index, capability) in capabilities.enumerated() {
-                    if let problem = TemplateInputValidation.placeholderProblem(
-                        in: capability.text,
-                        field: "required capability \(index + 1)",
-                        definedNames: definedNames
-                    ) {
-                        return problem
+            if let lock = task.requiredCapabilitiesLockReason { return lock.refusal(taskTitle: task.title) }
+            let now = Date()
+            for edit in edits {
+                switch edit {
+                case .add(let text, let reason):
+                    switch Self.addRequiredCapability(text, reason: reason, to: &task, by: author, at: now) {
+                    case .added: changed = true
+                    case .alreadyListed: continue
+                    case .refused(let problem): return problem
                     }
+                case .reword(let itemID, let text):
+                    switch Self.rewordRequiredCapability(itemID, to: text, in: &task, by: author, at: now) {
+                    case .success(let didChange): changed = changed || didChange
+                    case .failure(let problem): return problem.message
+                    }
+                case .remove(let itemID):
+                    if Self.removeRequiredCapability(itemID, from: &task, by: author, at: now) { changed = true }
                 }
             }
-            guard capabilities != task.requiredCapabilities else { return nil }
-            task.requiredCapabilities = capabilities
-            task.updatedAt = Date()
-            changed = true
+            if changed { task.updatedAt = now }
             return nil
         }, afterLocalCommit: {
             if changed { emit(.requiredCapabilitiesChanged(taskID: id)) }
         })
+    }
+
+    // The per-item rules, shared by `addRequiredCapability` and `editRequiredCapabilities` so the two
+    // writers can't drift. Text written by an add or reword is trimmed, checked for undefined
+    // placeholders on a template, and substituted with an instance's input values; a remove writes no
+    // text and checks none. Every change appends an update naming its author.
+
+    private static func addRequiredCapability(
+        _ raw: String,
+        reason: String?,
+        to task: inout AgentTask,
+        by author: TaskAuthorship,
+        at now: Date
+    ) -> RequiredCapabilityAddition {
+        let text: String
+        switch requiredCapabilityText(raw, position: task.requiredCapabilities.count + 1, of: task) {
+        case .success(let value): text = value
+        case .failure(let problem): return .refused(problem.message)
+        }
+        let key = RequiredCapability.comparisonKey(for: text)
+        if let existing = task.requiredCapabilities.first(where: { $0.normalizedText == key }) {
+            return .alreadyListed(existing)
+        }
+        let capability = RequiredCapability(text: text, addedBy: author, addedAt: now, origin: .addedLater, reason: reason)
+        task.requiredCapabilities.append(capability)
+        let because = reason.map { " — reason: \($0)" } ?? ""
+        task.updates.append(AgentTask.TaskUpdate(date: now, message: "Required capability added by \(author.displayName): \(text)\(because)"))
+        return .added(capability)
+    }
+
+    /// `.success(true)` when the text changed, `.success(false)` when it already read that way.
+    private static func rewordRequiredCapability(
+        _ itemID: UUID,
+        to raw: String,
+        in task: inout AgentTask,
+        by author: TaskAuthorship,
+        at now: Date
+    ) -> Result<Bool, CapabilityTextProblem> {
+        guard let index = task.requiredCapabilities.firstIndex(where: { $0.id == itemID }) else {
+            return .failure(CapabilityTextProblem("A required capability you edited was removed while you were editing. Reopen the editor and try again."))
+        }
+        let text: String
+        switch requiredCapabilityText(raw, position: index + 1, of: task) {
+        case .success(let value): text = value
+        case .failure(let problem): return .failure(problem)
+        }
+        let old = task.requiredCapabilities[index].text
+        guard text != old else { return .success(false) }
+        let key = RequiredCapability.comparisonKey(for: text)
+        if let other = task.requiredCapabilities.first(where: { $0.id != itemID && $0.normalizedText == key }) {
+            return .failure(CapabilityTextProblem("\"\(text)\" is already listed as \"\(other.text)\"."))
+        }
+        task.requiredCapabilities[index].text = text
+        task.updates.append(AgentTask.TaskUpdate(date: now, message: "Required capability reworded by \(author.displayName): \"\(old)\" → \"\(text)\""))
+        return .success(true)
+    }
+
+    /// Whether an item was removed. An id no longer listed is already the requested end state.
+    private static func removeRequiredCapability(
+        _ itemID: UUID,
+        from task: inout AgentTask,
+        by author: TaskAuthorship,
+        at now: Date
+    ) -> Bool {
+        guard let index = task.requiredCapabilities.firstIndex(where: { $0.id == itemID }) else { return false }
+        let removed = task.requiredCapabilities.remove(at: index)
+        task.updates.append(AgentTask.TaskUpdate(date: now, message: "Required capability removed by \(author.displayName): \(removed.text)"))
+        return true
+    }
+
+    private static func requiredCapabilityText(_ raw: String, position: Int, of task: AgentTask) -> Result<String, CapabilityTextProblem> {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure(CapabilityTextProblem("The capability text is empty.")) }
+        if task.isTemplate,
+           let problem = TemplateInputValidation.placeholderProblem(
+               in: trimmed,
+               field: "required capability \(position)",
+               definedNames: Set(task.templateInputDefinitions.map(\.name))
+           ) {
+            return .failure(CapabilityTextProblem(problem))
+        }
+        guard !task.isTemplate, !task.templateInputValues.isEmpty else { return .success(trimmed) }
+        let substituted = TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
+            trimmed,
+            values: task.templateInputValues,
+            definedNames: Set(task.templateInputValues.keys),
+            layout: .preserved
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !substituted.isEmpty else {
+            return .failure(CapabilityTextProblem("The capability text is empty once the run's input values are filled in."))
+        }
+        return .success(substituted)
+    }
+
+    private struct CapabilityTextProblem: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
     }
 
     /// Records a help-request escalation from Brown and parks the task in `.awaitingHelp`, its own
@@ -2821,15 +2883,12 @@ public actor TaskStore {
         didMutate()
     }
 
-    /// Increments the task's acknowledgment counter and returns the new value. Called
-    /// by the first-turn acknowledgement side effect on every ack so a respawned Brown can
-    /// distinguish a first-time ack (count == 1) from a continuation (count > 1) without relying
-    /// on the fragile `updates.isEmpty` heuristic.
-    @discardableResult
-    /// Records a worker's first-turn acknowledgement and returns the new count — but only while the
-    /// task is still `.running` AND assigned to that worker, checked in the same actor step as the
-    /// write. Nil otherwise: a task paused, stopped or finished since the worker was briefed is not
-    /// acknowledged, and its status is never touched here (an acknowledgement is not a transition).
+    /// Records a worker's first-turn acknowledgement and returns the new count, so a respawned
+    /// worker can tell a first acknowledgement from a continuation without the fragile
+    /// `updates.isEmpty` heuristic. Counts only while the task is still `.running` AND assigned to
+    /// that worker, checked in the same actor step as the write. Nil otherwise: a task paused,
+    /// stopped or finished since the worker was briefed is not acknowledged, and its status is
+    /// never touched here (an acknowledgement is not a transition).
     public func acknowledgeTask(id: UUID, byAgent agentID: UUID) -> Int? {
         guard var task = tasks[id], task.status == .running, task.assigneeIDs.contains(agentID) else { return nil }
         task.acknowledgmentCount += 1

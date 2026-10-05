@@ -15,11 +15,13 @@ struct AddRequiredCapabilityTool: AgentTool {
         be able to DO, never a tool name ("Read the user's calendar", not "mcp__calendar__list"). \
         Use this when a worker reports it cannot do something the task needs, or when you realize \
         the task as written left a need out. The addition is marked as added later, with your \
-        reason, wherever the task is shown. If a worker is running the task, the Security Agent \
-        re-scopes its tools against the updated list before its next turn; whether a tool is granted \
-        is the Security Agent's decision, and a tool the user has set to Never stays unavailable. \
-        If the worker is waiting on your help, answer it with `provide_help` afterwards. Works on \
-        any task that is not completed, including templates and running tasks.
+        reason, wherever the task is shown. With tool scoping on (the default), the Security Agent \
+        re-scopes a running worker's tools against the updated list before its next turn, and \
+        whether a tool is granted is its decision; with scoping off, a worker already has every \
+        tool the user's tool policy allows. A tool the user has set to Never stays unavailable \
+        either way. If the worker is waiting on your help, answer it with `provide_help` \
+        afterwards. Works on templates and on any task that is not completed, being validated, \
+        archived or deleted — running tasks included.
         """
 
     let parameters: [String: AnyCodable] = [
@@ -67,12 +69,23 @@ struct AddRequiredCapabilityTool: AgentTool {
         case .refused(let problem):
             return .failure(problem)
         case .alreadyListed(let existing):
-            return .success("The task already lists this capability (\"\(existing.text)\"), so nothing was added and its worker's tools were not re-scoped. If the worker still cannot do it, the Security Agent did not grant a tool for it, or the user's tool policy forbids one — tell the user.")
+            let scopingNote = await context.scopesToolSetOnTaskStart()
+                ? "; or the Security Agent did not grant one when it scoped the task"
+                : ""
+            return .success("The task already lists this capability (\"\(existing.text)\"), so nothing was added and nothing was re-scoped. If its worker still cannot do it: no available tool can do it; or the user set the tool that would to Never in Settings › Tools, or Off for this task\(scopingNote). Tell the user rather than adding it again.")
         case .added(let added):
-            if await context.workerIDForTask(taskID) != nil {
-                return .success("Added \"\(added.text)\" to the task's required capabilities. The Security Agent re-scopes the running worker's tools against the updated list before its next turn.")
+            let addedLine = "Added \"\(added.text)\" to the task's required capabilities."
+            let workerIsRunning = await context.workerIDForTask(taskID) != nil
+            switch (workerIsRunning, await context.scopesToolSetOnTaskStart()) {
+            case (true, true):
+                return .success("\(addedLine) The Security Agent re-scopes the running worker's tools against the updated list before its next turn.")
+            case (true, false):
+                return .success("\(addedLine) Tool scoping is off in the orchestration settings, so the running worker already has every tool the user's tool policy allows; nothing is re-scoped. If it still cannot do this, no allowed tool can — tell the user.")
+            case (false, true):
+                return .success("\(addedLine) No worker is running it; the next one is scoped against the updated list.")
+            case (false, false):
+                return .success("\(addedLine) No worker is running it. Tool scoping is off, so the next worker gets every tool the user's tool policy allows.")
             }
-            return .success("Added \"\(added.text)\" to the task's required capabilities. No worker is running it; the next one is scoped against the updated list.")
         }
     }
 }

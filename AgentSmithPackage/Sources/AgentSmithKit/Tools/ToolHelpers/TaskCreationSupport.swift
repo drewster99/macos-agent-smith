@@ -5,26 +5,27 @@ import Foundation
 /// relevant context is attached, and the New Task banner.
 enum TaskCreationSupport {
 
-    /// The `steps` argument as trimmed, non-empty texts, in order.
-    static func stepTexts(from arguments: [String: AnyCodable]) -> [String] {
-        (ToolArguments.optionalArray(arguments, "steps") ?? []).compactMap { raw -> String? in
-            guard case .string(let text) = raw else { return nil }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
+    /// The `steps` argument as trimmed, non-empty texts, in order — or why it can't be read.
+    static func stepTexts(from arguments: [String: AnyCodable]) -> Result<[String], MalformedListArgument> {
+        stringList(arguments, "steps")
     }
 
-    /// The `required_capabilities` argument as items of the task as written. Duplicates (compared
-    /// as `RequiredCapability.normalizedText` does) are dropped, keeping the first spelling: one
-    /// need listed twice is still one need.
-    static func requiredCapabilities(from arguments: [String: AnyCodable], addedBy author: TaskAuthorship) -> [RequiredCapability] {
-        var seen = Set<String>()
-        return (ToolArguments.optionalArray(arguments, "required_capabilities") ?? []).compactMap { raw -> RequiredCapability? in
-            guard case .string(let text) = raw else { return nil }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            let capability = RequiredCapability(text: trimmed, addedBy: author, origin: .asWritten)
-            return seen.insert(capability.normalizedText).inserted ? capability : nil
+    /// The `required_capabilities` argument as items of the task as written
+    /// (`RequiredCapability.makeAsWritten`: duplicates dropped, keeping the first spelling) — or why
+    /// it can't be read.
+    static func requiredCapabilities(from arguments: [String: AnyCodable], addedBy author: TaskAuthorship) -> Result<[RequiredCapability], MalformedListArgument> {
+        stringList(arguments, "required_capabilities").map { RequiredCapability.makeAsWritten($0, addedBy: author) }
+    }
+
+    struct MalformedListArgument: Error {
+        let message: String
+    }
+
+    private static func stringList(_ arguments: [String: AnyCodable], _ key: String) -> Result<[String], MalformedListArgument> {
+        switch ToolArguments.strictOptionalStringList(arguments, key) {
+        case .absent: return .success([])
+        case .value(let items): return .success(items)
+        case .malformed(let problem): return .failure(MalformedListArgument(message: problem))
         }
     }
 

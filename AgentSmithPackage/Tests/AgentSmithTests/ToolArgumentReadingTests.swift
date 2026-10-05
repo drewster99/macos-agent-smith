@@ -7,6 +7,32 @@ import SwiftLLMKit
 @Suite("ToolArguments")
 struct ToolArgumentReadingTests {
 
+    @Test("isSupplied: an empty placeholder of any shape is not a value; anything else is")
+    func isSupplied() {
+        for empty: AnyCodable in [.null, .string(""), .string("  "), .array([]), .dictionary([:])] {
+            #expect(!ToolArguments.isSupplied(["k": empty], "k"), "\(empty) read as supplied")
+        }
+        #expect(!ToolArguments.isSupplied([:], "k"))
+        for value: AnyCodable in [.bool(false), .int(0), .string("x"), .array([.null]), .dictionary(["k": .null])] {
+            #expect(ToolArguments.isSupplied(["k": value], "k"), "\(value) read as absent")
+        }
+    }
+
+    @Test("strictOptionalStringList: placeholders are absent, items are trimmed, wrong shapes are refused")
+    func strictStringList() {
+        for empty: AnyCodable in [.null, .string(""), .string(" "), .array([]), .array([.string(" "), .null])] {
+            #expect(ToolArguments.strictOptionalStringList(["k": empty], "k") == .absent, "\(empty)")
+        }
+        #expect(ToolArguments.strictOptionalStringList([:], "k") == .absent)
+        #expect(ToolArguments.strictOptionalStringList(["k": .array([.string(" a "), .string(""), .string("b")])], "k") == .value(["a", "b"]))
+        for malformed: AnyCodable in [.string("a, b"), .array([.string("a"), .int(1)]), .int(1), .dictionary(["a": .string("b")])] {
+            guard case .malformed = ToolArguments.strictOptionalStringList(["k": malformed], "k") else {
+                Issue.record("\(malformed) was not refused")
+                continue
+            }
+        }
+    }
+
     @Test("A blank string reads as absent, however it is spelled")
     func blankStringsReadAsAbsent() {
         for blank in ["", " ", "\t", "\n", "   \n  "] {

@@ -150,14 +150,21 @@ public struct CreateTaskTool: AgentTool {
                 """)
         ])
 
-    /// The `required_capabilities` parameter schema, shared with `create_child_task`.
-    static let requiredCapabilitiesSchema: AnyCodable = .dictionary([
+    /// What every `required_capabilities` description says, whichever tool takes the list.
+    private static let requiredCapabilitiesGuidance = """
+        What the worker agent will need to be able to DO to complete the task, one capability per item. PROVIDE THIS for every task: the Security Agent chooses the worker's tools with special attention to this list, and a capability missing from it may leave the worker without a tool it needs. Never name a specific tool. For example, don't say "grep", say "Search for content in files". Don't say "bash"; say what the worker will do with the shell, like "Find source code files", "Edit files", "Compile the Xcode project".
+        """
+
+    /// A `required_capabilities` parameter schema: the shared guidance, then what the CALLER can do
+    /// about the list. That differs by caller: Smith can template it and add to it later; a worker
+    /// creating a child task can do neither.
+    static func requiredCapabilitiesSchema(callerNote: String) -> AnyCodable {
+        .dictionary([
             "type": .string("array"),
             "items": .dictionary(["type": .string("string")]),
-            "description": .string("""
-                What the worker agent will need to be able to DO to complete the task, one capability per item. PROVIDE THIS for every task: the Security Agent chooses the worker's tools with special attention to this list, and a capability missing from it may leave the worker without a tool it needs. Never name a specific tool. For example, don't say "grep", say "Search for content in files". Don't say "bash"; say what the worker will do with the shell, like "Find source code files", "Edit files", "Compile the Xcode project". On a template, items may use {{input_name}} placeholders. If a running worker later turns out to lack something, add it with `add_required_capability` — never by editing the description.
-                """)
+            "description": .string("\(requiredCapabilitiesGuidance) \(callerNote)")
         ])
+    }
 
     public let parameters: [String: AnyCodable] = [
         "type": .string("object"),
@@ -189,7 +196,7 @@ public struct CreateTaskTool: AgentTool {
                 ]),
                 "acceptance_criteria": Self.acceptanceCriteriaSchema,
                 "steps": Self.stepsSchema,
-                "required_capabilities": Self.requiredCapabilitiesSchema,
+                "required_capabilities": Self.requiredCapabilitiesSchema(callerNote: "On a template, items may use {{input_name}} placeholders. If a running worker later turns out to lack something, add it with `add_required_capability` — never by editing the description."),
                 "requires_user_acceptance": .dictionary([
                     "type": .string("boolean"),
                     "description": .string("Optional, default false. When true, once every acceptance criterion settles (ACCEPT/WAIVE) the task does NOT complete on its own — it parks awaiting the user's explicit sign-off (accept, or reject with feedback, including by just replying in chat). Set it whenever the user said they want to review or approve the result themselves. Set it HERE rather than afterwards: a new task usually starts immediately, and once it is running the gate can no longer be changed. On a template it carries to every instance the template starts. When creating a successor or re-run of a task that had it, carry it over unless the user said otherwise.")
@@ -285,18 +292,17 @@ public struct CreateTaskTool: AgentTool {
         // Unknown IDs are returned as a tool failure so Smith re-issues create_task with
         // a corrected list rather than silently dropping the user's attachments.
         var resolvedAttachments: [Attachment] = []
-        if let raw = ToolArguments.optionalArray(arguments, "attachment_ids") {
-            let idStrings: [String] = raw.compactMap {
-                if case .string(let s) = $0 { return s }
-                return nil
+        switch ToolArguments.strictOptionalStringList(arguments, "attachment_ids") {
+        case .absent:
+            break
+        case .malformed(let problem):
+            return .failure("Task NOT created — \(problem)")
+        case .value(let idStrings):
+            let outcome = await context.resolveAttachments(idStrings)
+            if !outcome.rejected.isEmpty {
+                return .failure("create_task: unknown attachment_ids: \(outcome.rejected.joined(separator: ", ")). Use the EXACT id values from the `[filename](file://…) … id=<UUID>` markdown links in the user's message.")
             }
-            if !idStrings.isEmpty {
-                let outcome = await context.resolveAttachments(idStrings)
-                if !outcome.rejected.isEmpty {
-                    return .failure("create_task: unknown attachment_ids: \(outcome.rejected.joined(separator: ", ")). Use the EXACT id values from the `[filename](file://…) … id=<UUID>` markdown links in the user's message.")
-                }
-                resolvedAttachments = outcome.resolved
-            }
+            resolvedAttachments = outcome.resolved
         }
 
         var scheduledRunAt: Date?
@@ -394,8 +400,16 @@ public struct CreateTaskTool: AgentTool {
             templateInstanceTitleTemplate = nil
         }
 
-        let stepTexts = TaskCreationSupport.stepTexts(from: arguments)
-        let requiredCapabilities = TaskCreationSupport.requiredCapabilities(from: arguments, addedBy: .smith)
+        let stepTexts: [String]
+        switch TaskCreationSupport.stepTexts(from: arguments) {
+        case .success(let texts): stepTexts = texts
+        case .failure(let problem): return .failure("Task NOT created — \(problem.message)")
+        }
+        let requiredCapabilities: [RequiredCapability]
+        switch TaskCreationSupport.requiredCapabilities(from: arguments, addedBy: .smith) {
+        case .success(let capabilities): requiredCapabilities = capabilities
+        case .failure(let problem): return .failure("Task NOT created — \(problem.message)")
+        }
 
         // Every authored field is checked BEFORE anything is stored, so a template written with a
         // mistyped `{{placeholder}}` leaves nothing behind to clean up. The store re-checks each

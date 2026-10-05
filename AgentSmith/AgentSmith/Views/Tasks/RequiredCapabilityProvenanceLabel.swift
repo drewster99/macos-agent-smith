@@ -17,8 +17,6 @@ struct RequiredCapabilityProvenanceLabel: View {
     }
 
     private var caption: String {
-        let added = "Added later by \(addedBy.displayName), \(addedAt.formatted(date: .abbreviated, time: .shortened))"
-        guard let reason else { return added }
-        return "\(added) — \(reason)"
+        RequiredCapability.laterAdditionCaption(addedBy: addedBy, addedAt: addedAt, reason: reason)
     }
 }

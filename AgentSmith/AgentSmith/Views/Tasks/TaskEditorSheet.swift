@@ -102,47 +102,37 @@ struct TaskEditorSheet: View {
         }
     }
 
-    /// One editable ACTIVE step. Text is the only thing this sheet edits, but the row carries
-    /// the rest of the step so `save()` can write it back untouched — rebuilding steps from
-    /// text alone silently reset every status to `.pending`, dropped skip notes, and rewrote
-    /// Brown's and Smith's authorship to `.user`.
-    /// A required capability being edited. Carries the item's provenance so an edited row keeps
-    /// its author, date, origin and reason; only the text is editable here.
+    /// A required capability being edited: an item the task already has (`existing`, whose
+    /// provenance stays on show) or one this sheet adds. Only the text is editable; `save()` turns
+    /// the rows into edits against the list the sheet opened with.
     struct CapabilityRow: Identifiable {
         let id: UUID
         var text: String
-        let addedBy: TaskAuthorship
-        let addedAt: Date
-        let origin: RequiredCapability.Origin
-        let reason: String?
+        let existing: RequiredCapability?
 
-        /// A row the user adds: part of the task as written when the task is being created, a later
-        /// addition when it already exists.
-        init(origin: RequiredCapability.Origin) {
+        init() {
             self.id = UUID()
             self.text = ""
-            self.addedBy = .user
-            self.addedAt = Date()
-            self.origin = origin
-            self.reason = nil
+            self.existing = nil
         }
 
         init(capability: RequiredCapability) {
             self.id = capability.id
             self.text = capability.text
-            self.addedBy = capability.addedBy
-            self.addedAt = capability.addedAt
-            self.origin = capability.origin
-            self.reason = capability.reason
+            self.existing = capability
         }
 
-        func built() -> RequiredCapability? {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            return RequiredCapability(id: id, text: trimmed, addedBy: addedBy, addedAt: addedAt, origin: origin, reason: reason)
+        var draft: RequiredCapabilityDraft {
+            RequiredCapabilityDraft(existingID: existing?.id, text: text)
         }
+
+        var trimmedText: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
+    /// One editable ACTIVE step. Text is the only thing this sheet edits, but the row carries
+    /// the rest of the step so `save()` can write it back untouched — rebuilding steps from
+    /// text alone silently reset every status to `.pending`, dropped skip notes, and rewrote
+    /// Brown's and Smith's authorship to `.user`.
     struct StepRow: Identifiable, Equatable {
         let id: UUID
         var text: String
@@ -240,16 +230,11 @@ struct TaskEditorSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     definitionSection()
-                    TaskEditorCapabilitiesSection(capabilities: $capabilities, isCreate: isCreate,
-                                                  isEditable: canEditCapabilities)
+                    TaskEditorCapabilitiesSection(capabilities: $capabilities, lockReason: capabilitiesLockReason)
                     templateSection()
                     criteriaSection()
                     stepsSection()
-                    if let localError {
-                        Text(localError)
-                            .font(.caption)
-                            .foregroundStyle(AppColors.verdictError)
-                    }
+                    InlineProblemText(message: localError)
                 }
                 .padding(.trailing, 8)
             }
@@ -257,14 +242,16 @@ struct TaskEditorSheet: View {
         }
         .padding(20)
         .frame(width: 680, height: 720)
-        .onAppear {
-            // A prior failed action may have left an error on the view model whose alert lives on
-            // the sidebar BEHIND this sheet; clear it so it can't surface (looking like a failure)
-            // after we close on a successful save. This sheet reports its own problems inline.
-            if viewModel.taskActionError != nil {
-                DispatchQueue.main.async { viewModel.taskActionError = nil }
-            }
-        }
+        .onAppear(perform: clearStaleTaskActionError)
+    }
+
+    /// A prior failed action may have left an error on the view model whose alert is attached to a
+    /// window BEHIND this sheet (the sidebar, or Task Detail); clear it so it can't surface, looking
+    /// like a failure, after a successful save closes the sheet. This sheet reports its own problems
+    /// inline.
+    private func clearStaleTaskActionError() {
+        guard viewModel.taskActionError != nil else { return }
+        DispatchQueue.main.async { viewModel.taskActionError = nil }
     }
 
     private func header() -> some View {
@@ -315,12 +302,9 @@ struct TaskEditorSheet: View {
                             .textFieldStyle(.roundedBorder)
                         Toggle("Required", isOn: $row.required)
                             .toggleStyle(.checkbox)
-                        Button(action: {
+                        RemoveRowButton(title: "Remove input") {
                             inputs.removeAll { $0.id == row.id }
-                        }, label: {
-                            Image(systemName: "minus.circle")
-                        })
-                        .buttonStyle(.plain)
+                        }
                     }
                 }
 
@@ -378,12 +362,9 @@ struct TaskEditorSheet: View {
                     .textFieldStyle(.roundedBorder)
                 Toggle("Waivable", isOn: row.waivable)
                     .toggleStyle(.checkbox)
-                Button(action: {
+                RemoveRowButton(title: "Remove criterion") {
                     criteria.removeAll { $0.id == row.wrappedValue.id }
-                }, label: {
-                    Image(systemName: "minus.circle")
-                })
-                .buttonStyle(.plain)
+                }
             }
             VStack(alignment: .leading, spacing: 4) {
                 fieldLabel("Validation prompt")
@@ -446,12 +427,9 @@ struct TaskEditorSheet: View {
                 HStack {
                     TextField("Step", text: $row.text)
                         .textFieldStyle(.roundedBorder)
-                    Button(action: {
+                    RemoveRowButton(title: "Remove step") {
                         steps.removeAll { $0.id == row.id }
-                    }, label: {
-                        Image(systemName: "minus.circle")
-                    })
-                    .buttonStyle(.plain)
+                    }
                 }
                 .disabled(!canEditValidationContract)
             }
@@ -483,14 +461,14 @@ struct TaskEditorSheet: View {
         }
     }
 
-    /// A completed task's definition is history (`TaskStore.setRequiredCapabilities` refuses it).
-    /// Every other status may change: on a running task the change re-scopes its worker's tools.
-    private var canEditCapabilities: Bool {
+    /// Why the capabilities can't change now (`AgentTask.requiredCapabilitiesLockReason`, the rule
+    /// the store enforces); nil when they can. On a running task a change re-scopes its worker.
+    private var capabilitiesLockReason: RequiredCapabilitiesLockReason? {
         switch mode {
         case .create:
-            return true
+            return nil
         case .edit(let task):
-            return task.status != .completed
+            return task.requiredCapabilitiesLockReason
         }
     }
 
@@ -527,7 +505,7 @@ struct TaskEditorSheet: View {
             description: description,
             activeStepTexts: builtActiveSteps.map(\.text),
             criteria: builtCriteria,
-            requiredCapabilityTexts: builtCapabilities.map(\.text),
+            requiredCapabilityTexts: builtCapabilityTexts,
             definedNames: definedNames
         )
     }
@@ -573,15 +551,15 @@ struct TaskEditorSheet: View {
         steps.compactMap { $0.built() }
     }
 
-    /// The required capabilities this form would save, in order, empty rows dropped — shared with
-    /// the live placeholder warning so both number the same items.
-    private var builtCapabilities: [RequiredCapability] {
-        capabilities.compactMap { $0.built() }
+    /// The required-capability texts this form would save, in order, empty rows dropped — shared
+    /// with the live placeholder warning so both number the same items.
+    private var builtCapabilityTexts: [String] {
+        capabilities.map(\.trimmedText).filter { !$0.isEmpty }
     }
 
     private func save() {
         let inputDefinitions = builtInputs
-        let capabilitiesToSave = builtCapabilities
+        let capabilityTextsToSave = builtCapabilityTexts
         let criteriaToSave = builtCriteria
         // Tombstones go back on the end, matching the ordering convention `applyStepAction`'s
         // reorder/move use: active steps in plan order, then the removal record.
@@ -609,7 +587,7 @@ struct TaskEditorSheet: View {
                     acceptanceCriteria: criteriaToSave,
                     steps: builtSteps,
                     requiresUserAcceptance: requiresUserAcceptance,
-                    requiredCapabilities: capabilitiesToSave
+                    requiredCapabilityTexts: capabilityTextsToSave
                 )
             case .edit(let task):
                 // Written only when one of its fields changed: the definition is refused once the
@@ -648,9 +626,9 @@ struct TaskEditorSheet: View {
                         saved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
                     }
                 }
-                if saved && canEditCapabilities && capabilitiesToSave != task.requiredCapabilities {
-                    saved = await viewModel.setTaskRequiredCapabilities(
-                        id: task.id, capabilitiesToSave, editedFrom: task.requiredCapabilities)
+                let capabilityEdits = RequiredCapabilityEdit.edits(from: task.requiredCapabilities, to: capabilities.map(\.draft))
+                if saved && capabilitiesLockReason == nil && !capabilityEdits.isEmpty {
+                    saved = await viewModel.editTaskRequiredCapabilities(id: task.id, capabilityEdits)
                 }
             }
             if saved {
@@ -669,33 +647,41 @@ struct TaskEditorSheet: View {
 }
 
 /// The editor's required-capabilities list. A row added while creating is part of the task as
-/// written; one added to an existing task is a later addition.
+/// written; one added to an existing task is recorded as a later addition by the user.
 private struct TaskEditorCapabilitiesSection: View {
     @Binding var capabilities: [TaskEditorSheet.CapabilityRow]
-    let isCreate: Bool
-    let isEditable: Bool
+    let lockReason: RequiredCapabilitiesLockReason?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Required Capabilities").font(.headline)
-                Spacer()
-                Button(action: {
-                    capabilities.append(TaskEditorSheet.CapabilityRow(origin: isCreate ? .asWritten : .addedLater))
-                }, label: {
-                    Label("Add Capability", systemImage: "plus.circle")
-                })
-                .buttonStyle(.plain)
-            }
-            Text("What the worker must be able to do — abilities, not tool names. The security agent pays special attention to this list when it chooses the worker's tools.")
+            TaskEditorCapabilitiesHeader(isEditable: lockReason == nil,
+                                         onAdd: { capabilities.append(TaskEditorSheet.CapabilityRow()) })
+            Text(lockReason?.editorCaption ?? "What the worker must be able to do — abilities, not tool names. The security agent pays special attention to this list when it chooses the worker's tools.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach($capabilities) { $row in
                 CapabilityEditorRow(row: $row, onRemove: { capabilities.removeAll { $0.id == row.id } })
             }
+            .disabled(lockReason != nil)
         }
-        .disabled(!isEditable)
+    }
+}
+
+private struct TaskEditorCapabilitiesHeader: View {
+    let isEditable: Bool
+    let onAdd: () -> Void
+
+    var body: some View {
+        HStack {
+            Text("Required Capabilities").font(.headline)
+            Spacer()
+            Button(action: onAdd, label: {
+                Label("Add Capability", systemImage: "plus.circle")
+            })
+            .buttonStyle(.plain)
+            .disabled(!isEditable)
+        }
     }
 }
 
@@ -710,14 +696,25 @@ private struct CapabilityEditorRow: View {
             HStack {
                 TextField("e.g. Compile the Xcode project", text: $row.text)
                     .textFieldStyle(.roundedBorder)
-                Button(action: onRemove, label: {
-                    Image(systemName: "minus.circle")
-                })
-                .buttonStyle(.plain)
+                RemoveRowButton(title: "Remove capability", action: onRemove)
             }
-            if row.origin == .addedLater {
-                RequiredCapabilityProvenanceLabel(addedBy: row.addedBy, addedAt: row.addedAt, reason: row.reason)
+            if let existing = row.existing, existing.origin == .addedLater {
+                RequiredCapabilityProvenanceLabel(addedBy: existing.addedBy, addedAt: existing.addedAt, reason: existing.reason)
             }
+        }
+    }
+}
+
+extension RequiredCapabilitiesLockReason {
+    /// Why the editor shows the list read-only.
+    var editorCaption: String {
+        switch self {
+        case .completed:
+            return "This task is completed, so its required capabilities are history. Create a successor task for follow-up work."
+        case .validating:
+            return "Locked while validators judge the result. Editable again once validation ends."
+        case .notInActiveList:
+            return "This task is archived or deleted. Restore it to edit its required capabilities."
         }
     }
 }

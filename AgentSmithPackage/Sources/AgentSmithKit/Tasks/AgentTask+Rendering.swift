@@ -43,8 +43,8 @@ extension AgentTask {
     }
 
     /// The required capabilities as a bullet list, ONE rendering for every agent-facing reader
-    /// (worker briefing, `get_task_details`, tool scoping, per-call security review, validators)
-    /// and the PDF export. A later addition is marked with who added it, when, and why, so a
+    /// (worker briefing, `get_task_details`, tool scoping, per-call security review, validators).
+    /// People get `renderedRequiredCapabilitiesForPeople()`. A later addition is marked with who added it, when, and why, so a
     /// reader can tell the task as written from what was learned while running it. Nil when the
     /// task lists none.
     public func renderedRequiredCapabilities() -> String? {
@@ -55,8 +55,18 @@ extension AgentTask {
     /// The `requiredCapabilities` entry every `.taskCreated` banner carries, so the user sees what
     /// the worker was asked to be able to do where the task first appears. Empty when none.
     func taskCreatedBannerCapabilitiesMetadata() -> [String: AnyCodable] {
-        guard let capabilities = renderedRequiredCapabilities() else { return [:] }
+        guard let capabilities = renderedRequiredCapabilitiesForPeople() else { return [:] }
         return ["requiredCapabilities": .string(capabilities)]
+    }
+
+    /// The required capabilities as a bullet list for PEOPLE: the PDF export, Task Detail's copy
+    /// button, and the `.taskCreated` banner. Nil when the task lists none.
+    public func renderedRequiredCapabilitiesForPeople() -> String? {
+        guard !requiredCapabilities.isEmpty else { return nil }
+        return requiredCapabilities.map { capability in
+            guard let caption = capability.laterAdditionCaption else { return "- \(capability.text)" }
+            return "- \(capability.text) (\(caption))"
+        }.joined(separator: "\n")
     }
 
     /// The description as the Security Agent reviews a single tool call against it: the same
@@ -138,9 +148,13 @@ extension AgentTask {
         return blocks.joined(separator: "\n\n")
     }
 
+    /// Appended to every non-empty tool scope: the global policy is not on the task, so the lines
+    /// above cannot show its effect, and without this a Never tool read as granted.
+    static let toolScopeGlobalPolicyNote = "Not shown: the user's global tool policy (Settings) applies on top — a tool set to Never is withheld even if approved or turned on above; a tool set to Always is added unless turned off above."
+
     /// The per-task tool scope, rendered for `get_task_details`: the Security Agent's approved
-    /// worker toolset (`approvedTools`) followed by any persisted user overrides that force a tool
-    /// on or off (`userToolOverrides`). This reads the SAME per-task state the task-detail screen's
+    /// worker toolset (`approvedTools`) followed by any persisted user overrides that turn a tool
+    /// on or off (`userToolOverrides`), then `toolScopeGlobalPolicyNote`. This reads the SAME per-task state the task-detail screen's
     /// tool editor (`TaskToolOverrideEditor`) shows — a **record** of what was scoped for this task's
     /// worker, not the live enforcement gate (the running worker's `ToolRegistry` is authoritative,
     /// and always-available forced lifecycle tools are not listed). The global `ToolPolicy` is
@@ -158,18 +172,20 @@ extension AgentTask {
         }
         if let userToolOverrides, !userToolOverrides.isEmpty {
             // An override for a tool no worker can have is stored but never applied; reporting it
-            // as "forced on" told the reader the worker had a tool it did not.
+            // as turned on told the reader the worker had a tool it did not.
             let effective = userToolOverrides.filter { BrownBehavior.acceptsToolOverride(named: $0.key) }
             let ignored = userToolOverrides.keys.filter { !BrownBehavior.acceptsToolOverride(named: $0) }.sorted()
-            let forcedOn = effective.filter { $0.value }.keys.sorted()
-            let forcedOff = effective.filter { !$0.value }.keys.sorted()
+            let turnedOn = effective.filter { $0.value }.keys.sorted()
+            let turnedOff = effective.filter { !$0.value }.keys.sorted()
             var parts: [String] = []
-            if !forcedOn.isEmpty { parts.append("forced on: \(forcedOn.joined(separator: ", "))") }
-            if !forcedOff.isEmpty { parts.append("forced off: \(forcedOff.joined(separator: ", "))") }
+            if !turnedOn.isEmpty { parts.append("turned on: \(turnedOn.joined(separator: ", "))") }
+            if !turnedOff.isEmpty { parts.append("turned off: \(turnedOff.joined(separator: ", "))") }
             if !ignored.isEmpty { parts.append("ignored, not worker tools: \(ignored.joined(separator: ", "))") }
-            lines.append("User tool overrides — \(parts.joined(separator: "; "))")
+            lines.append("User tool overrides for this task — \(parts.joined(separator: "; "))")
         }
-        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+        guard !lines.isEmpty else { return nil }
+        lines.append(Self.toolScopeGlobalPolicyNote)
+        return lines.joined(separator: "\n")
     }
 
     /// The step list as a numbered list. Step N is its 1-based position among the ACTIVE

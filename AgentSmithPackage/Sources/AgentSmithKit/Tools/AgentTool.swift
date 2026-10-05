@@ -377,8 +377,12 @@ public struct ToolContext: Sendable {
     public let startChildTask: @Sendable (UUID) async -> Void
     /// Reports that the calling worker started (true) or stopped (false) waiting on its child tasks.
     public let setWaitingOnChildTasks: @Sendable (Bool) async -> Void
-    /// The most child tasks one task may create (Settings "Max child tasks per task").
-    public let maxChildTasksPerTask: @Sendable () async -> Int
+    /// The most child tasks one task may create (Settings "Max child tasks per task"). Nil when the
+    /// runtime is gone: refuse rather than assume a limit.
+    public let maxChildTasksPerTask: @Sendable () async -> Int?
+    /// Whether the Security Agent scopes a worker's tool set from its task (the resolved
+    /// orchestration setting). Decides what adding a required capability will change.
+    public let scopesToolSetOnTaskStart: @Sendable () async -> Bool
     /// The task ID that the current session was started/restarted for, if any.
     /// Used by `run_task` to prevent restart loops when Smith re-invokes it on the same task.
     public let currentResumingTaskID: UUID?
@@ -502,7 +506,8 @@ public struct ToolContext: Sendable {
         restartForNewTask: @escaping @Sendable (UUID, String?) async -> Void = { _, _ in },
         startChildTask: @escaping @Sendable (UUID) async -> Void = { _ in },
         setWaitingOnChildTasks: @escaping @Sendable (Bool) async -> Void = { _ in },
-        maxChildTasksPerTask: @escaping @Sendable () async -> Int = { OrchestrationRuntime.defaultMaxChildTasksPerTask },
+        maxChildTasksPerTask: @escaping @Sendable () async -> Int? = { nil },
+        scopesToolSetOnTaskStart: @escaping @Sendable () async -> Bool = { OrchestrationSettings.builtIn.scopeToolSetOnTaskStart },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
         summarizeCompletedTask: @escaping @Sendable (UUID) async -> Void = { _ in },
@@ -572,6 +577,7 @@ public struct ToolContext: Sendable {
         self.startChildTask = startChildTask
         self.setWaitingOnChildTasks = setWaitingOnChildTasks
         self.maxChildTasksPerTask = maxChildTasksPerTask
+        self.scopesToolSetOnTaskStart = scopesToolSetOnTaskStart
         self.currentResumingTaskID = currentResumingTaskID
         self.memoryStore = memoryStore
         self.summarizeCompletedTask = summarizeCompletedTask

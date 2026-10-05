@@ -29,13 +29,13 @@ struct EditTaskToolTests {
         #expect(unchanged?.userToolOverrides == nil)
     }
 
-    @Test("an empty or null tool_overrides is an absent optional, not a grant")
+    @Test("an empty tool_overrides of any shape is an absent optional, not a grant")
     func emptyToolOverridesIgnored() async throws {
         let store = TaskStore()
         let task = await store.addTask(title: "Original", description: "Keep me.")
         let context = TestToolContext.make(agentRole: .smith, taskStore: store)
 
-        for sentinel: AnyCodable in [.dictionary([:]), .null] {
+        for sentinel: AnyCodable in [.dictionary([:]), .null, .array([]), .string(""), .string("  ")] {
             let result = try await EditTaskTool().execute(
                 arguments: [
                     "task_id": .string(task.id.uuidString),

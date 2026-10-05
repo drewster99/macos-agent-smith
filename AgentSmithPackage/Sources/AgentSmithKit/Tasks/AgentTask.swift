@@ -137,8 +137,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// What the worker must be able to do, as a list in its own field — what the Security Agent's
     /// tool scoping pays special attention to, and where Smith records a running worker's unmet
     /// need (a later addition, with its reason) instead of granting a tool. See `RequiredCapability`.
-    /// Mutated only through `TaskStore` (`addTask`, `addRequiredCapability`,
-    /// `setRequiredCapabilities`, template instantiation).
+    /// Mutated only through `TaskStore`: written whole at creation (`addTask`, `addChildTask`,
+    /// template instantiation), changed afterwards only by `addRequiredCapability` and
+    /// `editRequiredCapabilities`, both gated by `requiredCapabilitiesLockReason`.
     public var requiredCapabilities: [RequiredCapability]
 
     /// The most recent set of tool names the security agent approved for the worker on this

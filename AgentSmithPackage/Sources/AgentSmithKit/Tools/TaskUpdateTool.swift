@@ -104,18 +104,17 @@ public struct TaskUpdateTool: AgentTool {
     ) async -> (attachments: [Attachment], failure: String?) {
         var collected: [Attachment] = []
 
-        if let raw = ToolArguments.optionalArray(arguments, "attachment_ids") {
-            let idStrings: [String] = raw.compactMap {
-                if case .string(let s) = $0 { return s }
-                return nil
+        switch ToolArguments.strictOptionalStringList(arguments, "attachment_ids") {
+        case .absent:
+            break
+        case .malformed(let problem):
+            return (collected, problem)
+        case .value(let idStrings):
+            let outcome = await context.resolveAttachments(idStrings)
+            if !outcome.rejected.isEmpty {
+                return (collected, "Unknown attachment_ids: \(outcome.rejected.joined(separator: ", ")). The IDs must come from a `[filename](file://…) … id=<UUID>` markdown link Smith or Brown previously saw — do not invent them.")
             }
-            if !idStrings.isEmpty {
-                let outcome = await context.resolveAttachments(idStrings)
-                if !outcome.rejected.isEmpty {
-                    return (collected, "Unknown attachment_ids: \(outcome.rejected.joined(separator: ", ")). The IDs must come from a `[filename](file://…) … id=<UUID>` markdown link Smith or Brown previously saw — do not invent them.")
-                }
-                collected.append(contentsOf: outcome.resolved)
-            }
+            collected.append(contentsOf: outcome.resolved)
         }
 
         if let raw = ToolArguments.optionalArray(arguments, "attachment_paths") {

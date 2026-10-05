@@ -36,7 +36,7 @@ struct CreateChildTaskTool: AgentTool {
                 "type": .string("string"),
                 "description": .string("Everything the child's worker needs to do the work. It sees nothing of your task or conversation except what you write here.")
             ]),
-            "required_capabilities": CreateTaskTool.requiredCapabilitiesSchema,
+            "required_capabilities": CreateTaskTool.requiredCapabilitiesSchema(callerNote: "You cannot add to this list once the child task exists, so include everything its worker will need. If that worker later lacks something, it asks Smith for help."),
             "acceptance_criteria": CreateTaskTool.acceptanceCriteriaSchema,
             "steps": CreateTaskTool.stepsSchema,
             "attachment_ids": .dictionary([
@@ -58,6 +58,9 @@ struct CreateChildTaskTool: AgentTool {
         guard let coordinator = await context.taskStore.taskForAgent(agentID: context.agentID) else {
             return .failure("You are not running a task, so there is nothing to create a child task for.")
         }
+        guard let childLimit = await context.maxChildTasksPerTask() else {
+            return .failure("Child task NOT created — the orchestration runtime is unavailable.")
+        }
         guard case .string(let rawTitle) = arguments["title"],
               !rawTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .failure("Child task NOT created — 'title' is required.")
@@ -70,11 +73,12 @@ struct CreateChildTaskTool: AgentTool {
         let description = rawDescription.trimmingCharacters(in: .whitespacesAndNewlines)
 
         var attachments: [Attachment] = []
-        let attachmentIDs = (ToolArguments.optionalArray(arguments, "attachment_ids") ?? []).compactMap { raw -> String? in
-            if case .string(let id) = raw { return id }
-            return nil
-        }
-        if !attachmentIDs.isEmpty {
+        switch ToolArguments.strictOptionalStringList(arguments, "attachment_ids") {
+        case .absent:
+            break
+        case .malformed(let problem):
+            return .failure("Child task NOT created — \(problem)")
+        case .value(let attachmentIDs):
             let outcome = await context.resolveAttachments(attachmentIDs)
             guard outcome.rejected.isEmpty else {
                 return .failure("Child task NOT created — unknown attachment_ids: \(outcome.rejected.joined(separator: ", ")).")
@@ -93,12 +97,20 @@ struct CreateChildTaskTool: AgentTool {
                 return .failure("Child task NOT created — the acceptance_criteria are invalid: \(problem.message)")
             }
         }
-        let steps = TaskCreationSupport.stepTexts(from: arguments).map { TaskStep(text: $0, origin: .worker) }
-        let capabilities = TaskCreationSupport.requiredCapabilities(from: arguments, addedBy: .worker)
+        let steps: [TaskStep]
+        switch TaskCreationSupport.stepTexts(from: arguments) {
+        case .success(let texts): steps = texts.map { TaskStep(text: $0, origin: .worker) }
+        case .failure(let problem): return .failure("Child task NOT created — \(problem.message)")
+        }
+        let capabilities: [RequiredCapability]
+        switch TaskCreationSupport.requiredCapabilities(from: arguments, addedBy: .worker) {
+        case .success(let read): capabilities = read
+        case .failure(let problem): return .failure("Child task NOT created — \(problem.message)")
+        }
 
         let creation = await context.taskStore.addChildTask(
             coordinatorTaskID: coordinator.id,
-            limit: await context.maxChildTasksPerTask(),
+            limit: childLimit,
             title: title,
             description: description,
             descriptionAttachments: attachments,

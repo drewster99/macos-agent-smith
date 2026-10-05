@@ -100,13 +100,8 @@ public struct EditTaskTool: AgentTool {
         // Removed from the schema 2026-10-05: Smith granting tools bypassed both the Security
         // Agent's scoping and the user's policy. A history that still shows the parameter could
         // make Smith pass it again, and an ignored key would report a grant that never happened.
-        // An empty object or null is a model emitting an absent optional, not a grant attempt.
-        switch arguments["tool_overrides"] {
-        case .none, .null?:
-            break
-        case .dictionary(let overrides)? where overrides.isEmpty:
-            break
-        default:
+        // An empty placeholder (null, "", [], {}) is a model emitting an absent optional, not a grant.
+        if ToolArguments.isSupplied(arguments, "tool_overrides") {
             return .failure("edit_task no longer changes a task's tools: the Security Agent scopes them and only the user can override them. Nothing was changed.")
         }
 

@@ -81,6 +81,25 @@ enum ToolArguments {
         return parsed == placeholderUUID ? .absent : .value(parsed)
     }
 
+    /// Whether an argument carries a value at all: false when it is absent, null, a blank string,
+    /// an empty array or an empty object; true for anything else, `false` and `0` included. For a
+    /// key a tool refuses whatever its value says (a retired parameter): a model that emits every
+    /// key it has seen sends the empty placeholder, which says nothing and must not be refused.
+    static func isSupplied(_ arguments: [String: AnyCodable], _ key: String) -> Bool {
+        switch arguments[key] {
+        case nil, .null?:
+            return false
+        case .string(let raw)?:
+            return !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .array(let values)?:
+            return !values.isEmpty
+        case .dictionary(let entries)?:
+            return !entries.isEmpty
+        case .bool?, .int?, .double?:
+            return true
+        }
+    }
+
     /// A non-empty array, or `nil` when the argument is absent, null, empty, or not an array.
     static func optionalArray(_ arguments: [String: AnyCodable], _ key: String) -> [AnyCodable]? {
         guard case .array(let values)? = arguments[key], !values.isEmpty else { return nil }
@@ -128,6 +147,47 @@ enum ToolArguments {
             }
         case let other?:
             return .malformed(String(describing: other))
+        }
+    }
+
+    /// How an optional list-of-strings argument read, when dropping part of it silently is unsafe.
+    /// Three outcomes for the same reason as `OptionalUUID`.
+    enum OptionalStringList: Equatable {
+        /// Not supplied — absent, null, a blank string, an empty array, or only blank items.
+        case absent
+        /// The non-blank items, trimmed, in order.
+        case value([String])
+        /// Supplied in a shape that can't be read as a list of strings. Carries the reason.
+        case malformed(String)
+    }
+
+    /// A list of strings whose malformed parts must be refused, not dropped: a step or required
+    /// capability that silently vanishes leaves a task without something its author asked for.
+    /// Blank items are no items (the placeholder reflex again). A single non-blank string is
+    /// refused rather than read as one item, since it may pack several. See `OptionalStringList`.
+    static func strictOptionalStringList(_ arguments: [String: AnyCodable], _ key: String) -> OptionalStringList {
+        switch arguments[key] {
+        case nil, .null?:
+            return .absent
+        case .string(let raw)?:
+            guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .absent }
+            return .malformed("'\(key)' must be an array of strings, not a single string — put each item in its own array element.")
+        case .array(let values)?:
+            var items: [String] = []
+            for (index, value) in values.enumerated() {
+                switch value {
+                case .null:
+                    continue
+                case .string(let text):
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty { items.append(trimmed) }
+                case .bool, .int, .double, .array, .dictionary:
+                    return .malformed("'\(key)' item \(index + 1) is not a string — every item must be a string.")
+                }
+            }
+            return items.isEmpty ? .absent : .value(items)
+        case .bool?, .int?, .double?, .dictionary?:
+            return .malformed("'\(key)' must be an array of strings.")
         }
     }
 

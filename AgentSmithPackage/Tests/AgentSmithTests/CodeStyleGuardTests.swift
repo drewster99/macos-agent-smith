@@ -551,7 +551,6 @@ struct CodeStyleGuardTests {
         "Views/TaskOverlay/TaskOverlayBar.swift": 1,
         "Views/TaskPDF/TaskPDFSaveSheet.swift": 1,
         "Views/TaskToolOverrideEditor.swift": 1,
-        "Views/Tasks/TaskEditorSheet.swift": 1,
         "Views/Tasks/TemplateRunInputSheet.swift": 1,
         "Views/ToolsSettingsView.swift": 1
     ]
@@ -563,7 +562,7 @@ struct CodeStyleGuardTests {
     /// filter redesign replaced `Views/Main/TranscriptFilterPopover.swift` (two oversized bodies)
     /// with views that fit the limit. Lowered from 127: the security-verdict popover's content in
     /// `ChannelLogView.swift` became its own view.
-    private static let oversizedBodyTotal = 126
+    private static let oversizedBodyTotal = 125
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.

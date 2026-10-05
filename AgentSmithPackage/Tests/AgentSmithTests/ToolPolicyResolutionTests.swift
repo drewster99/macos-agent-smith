@@ -76,3 +76,30 @@ struct ToolPolicyResolutionTests {
         #expect(result.isEmpty)
     }
 }
+
+/// Choosing "Default" for a tool whose built-in default is Never used to remove the entry, which put
+/// the built-in Never straight back: the picker snapped to Never and "defer to scoping" could not be
+/// expressed.
+@Suite("Recording a tool policy choice")
+struct ToolPolicyRecordingTests {
+    private let builtInNever = ReportInboundUserMessageTool.toolName
+
+    @Test("Default on a built-in-Never tool is stored, so it resolves to Default")
+    func defaultOnBuiltInNeverIsStored() {
+        var policies: [String: ToolPolicy] = ["other": .always]
+        ToolPolicy.recordUserChoice(.default, for: builtInNever, in: &policies)
+        #expect(policies == [builtInNever: .default, "other": .always])
+        #expect(ToolPolicy.effective(for: builtInNever, globalPolicies: policies) == .default)
+        ToolPolicy.recordUserChoice(.never, for: builtInNever, in: &policies)
+        #expect(policies == ["other": .always])
+    }
+
+    @Test("An ordinary tool's Default removes the entry; Always is stored")
+    func ordinaryTool() {
+        var policies: [String: ToolPolicy] = ["bash": .never]
+        ToolPolicy.recordUserChoice(.default, for: "bash", in: &policies)
+        #expect(policies.isEmpty)
+        ToolPolicy.recordUserChoice(.always, for: "bash", in: &policies)
+        #expect(policies == ["bash": .always])
+    }
+}

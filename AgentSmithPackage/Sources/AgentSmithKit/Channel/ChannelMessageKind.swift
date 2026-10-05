@@ -114,9 +114,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     case validationBlocked = "validation_blocked"
     /// The PRIVATE notice telling a worker its submission is parked for the same reason.
     ///
-    /// Load-bearing for control flow: `AgentActor.resumesParkedWorker` exempts this kind, and it
-    /// is the only private-to-worker message that must NOT pull a worker out of
-    /// `AgentActor.park`. Everything else addressed to a worker means "here is work back".
+    /// Load-bearing for control flow: it is in `AgentActor.parkedWorkerInformationalMessageKinds`,
+    /// so it never pulls a worker out of `AgentActor.park`, whatever the worker is parked on. Which
+    /// private messages resume a parked worker is decided in one place,
+    /// `AgentActor.resumesParkedWorker`; read the rule there.
     case validationBlockedWorkerNotice = "validation_blocked_worker_notice"
 
     /// A direct message from Smith to a task's worker (`notify_brown`).

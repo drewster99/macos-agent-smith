@@ -103,8 +103,8 @@ private func presentSections(_ task: AgentTask) -> [TaskDetailSectionKind] {
     orderedSections(for: task.status).filter { kind in
         switch kind {
         case .description:    return true
-        // Offered on any unfinished task, empty or not: it is where the user adds one live.
-        case .capabilities:   return !task.requiredCapabilities.isEmpty || (task.status != .completed && task.disposition == .active)
+        // Offered whenever the list can change, empty or not: it is where the user adds one live.
+        case .capabilities:   return !task.requiredCapabilities.isEmpty || task.requiredCapabilitiesLockReason == nil
         // Always offered: it is where a watch is added.
         case .watches:        return true
         case .error:          return task.status == .failed && !(task.result ?? "").isEmpty
@@ -394,7 +394,7 @@ private struct TaskDetailPresentations: ViewModifier {
     func body(content: Content) -> some View {
         content
             .alert(
-                "Cannot Run Task",
+                "Cannot Complete Action",
                 isPresented: $viewModel.hasTaskActionError,
                 actions: { Button("OK") { viewModel.taskActionError = nil } },
                 message: { Text(viewModel.taskActionError ?? "") }
@@ -624,7 +624,8 @@ private struct TaskDetailHeaderRow: View {
                 .textSelection(.enabled)
             Spacer()
             TaskDetailHeaderActions(
-                status: task.status, onEditTask: onEditTask, onStartTask: onStartTask,
+                status: task.status, isDefinitionEditable: task.isDefinitionEditable,
+                onEditTask: onEditTask, onStartTask: onStartTask,
                 onSavePDF: onSavePDF, onDone: onDone
             )
         }
@@ -1159,17 +1160,19 @@ private struct TaskDetailJumpChip: View {
     }
 }
 
-/// The window's action cluster. Takes the status rather than the task: which buttons are offered
-/// depends on nothing else.
+/// The window's action cluster. Takes the status and editability rather than the task: which
+/// buttons are offered depends on nothing else.
 private struct TaskDetailHeaderActions: View {
     let status: AgentTask.Status
+    /// `AgentTask.isDefinitionEditable`: an archived or deleted task's editor could only fail to save.
+    let isDefinitionEditable: Bool
     let onEditTask: () -> Void
     let onStartTask: () -> Void
     let onSavePDF: () -> Void
     let onDone: () -> Void
 
     var body: some View {
-        if status.isDescriptionEditable {
+        if isDefinitionEditable {
             Button(action: onEditTask, label: { Label("Edit", systemImage: "pencil") })
                 .help("Edit this task")
         }
@@ -1228,7 +1231,7 @@ private struct TaskDetailStepEditorRow: View {
                 TaskDetailStepStatusPicker(status: $row.status)
                 TextField("Step", text: $row.text, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
-                TaskDetailEditorDeleteButton(help: "Delete step", action: onDelete)
+                RemoveRowButton(title: "Delete step", action: onDelete)
             }
             if requiresNote {
                 TextField("Note — why was this skipped/removed?", text: $row.note)
@@ -1266,7 +1269,7 @@ private struct TaskDetailCriterionEditorRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 TextField("Display name", text: $row.name)
                     .textFieldStyle(.roundedBorder)
-                TaskDetailEditorDeleteButton(help: "Remove criterion", action: onDelete)
+                RemoveRowButton(title: "Remove criterion", action: onDelete)
             }
             TextField("Validation prompt — required LLM instructions",
                       text: $row.validationPrompt, axis: .vertical)
@@ -1281,18 +1284,6 @@ private struct TaskDetailCriterionEditorRow: View {
                 Spacer()
             }
         }
-    }
-}
-
-private struct TaskDetailEditorDeleteButton: View {
-    let help: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action, label: { Image(systemName: "minus.circle") })
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help(help)
     }
 }
 
@@ -1763,49 +1754,112 @@ private struct TaskDetailCapabilitiesSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TaskDetailSectionTitleRow(title: "Required Capabilities", copyText: task.renderedRequiredCapabilities())
-            ForEach(task.requiredCapabilities) { capability in
-                VStack(alignment: .leading, spacing: 2) {
-                    Label(capability.text, systemImage: "wrench.and.screwdriver")
-                        .textSelection(.enabled)
-                    if capability.origin == .addedLater {
-                        RequiredCapabilityProvenanceLabel(addedBy: capability.addedBy, addedAt: capability.addedAt, reason: capability.reason)
-                            .padding(.leading, 26)
-                    }
-                }
-            }
-            if task.status != .completed && task.disposition == .active {
-                TaskDetailAddCapabilityField(taskID: task.id, viewModel: viewModel)
-            }
+            TaskDetailSectionTitleRow(title: "Required Capabilities", copyText: task.renderedRequiredCapabilitiesForPeople())
+            ForEach(task.requiredCapabilities) { TaskDetailCapabilityRow(capability: $0) }
+            TaskDetailCapabilitiesFooter(task: task, viewModel: viewModel)
         }
         Divider()
     }
 }
 
+/// The add field while the list can change; otherwise why it can't (`requiredCapabilitiesLockReason`).
+private struct TaskDetailCapabilitiesFooter: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
+        if let lockReason = task.requiredCapabilitiesLockReason {
+            Text(lockReason.editorCaption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            TaskDetailAddCapabilityField(taskID: task.id, viewModel: viewModel)
+        }
+    }
+}
+
+private struct TaskDetailCapabilityRow: View {
+    let capability: RequiredCapability
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "wrench.and.screwdriver")
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(capability.text)
+                    .textSelection(.enabled)
+                if capability.origin == .addedLater {
+                    RequiredCapabilityProvenanceLabel(addedBy: capability.addedBy, addedAt: capability.addedAt, reason: capability.reason)
+                }
+            }
+        }
+    }
+}
+
 /// Adds a required capability to an unfinished task — including a running one, whose worker's tools
 /// are then re-scoped before its next turn.
+private enum TaskDetailAddCapabilityFeedback: Equatable {
+    case alreadyListed(existingText: String)
+    case refused(String)
+}
+
 private struct TaskDetailAddCapabilityField: View {
     let taskID: UUID
     let viewModel: AppViewModel
     @State private var text = ""
+    @State private var isAdding = false
+    @State private var feedback: TaskDetailAddCapabilityFeedback?
 
     var body: some View {
-        HStack {
-            TextField("Add a capability, e.g. Read the user's calendar", text: $text)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(add)
-            Button("Add", action: add)
-                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                TextField("Add a capability, e.g. Read the user's calendar", text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(add)
+                Button("Add", action: add)
+                    .disabled(isAdding || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            TaskDetailAddCapabilityFeedbackLine(feedback: feedback)
         }
     }
 
     private func add() {
         let capability = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !capability.isEmpty else { return }
+        guard !capability.isEmpty, !isAdding else { return }
+        isAdding = true
         Task {
-            if await viewModel.addTaskRequiredCapability(id: taskID, text: capability) {
-                text = ""
+            let outcome = await viewModel.addTaskRequiredCapability(id: taskID, text: capability)
+            isAdding = false
+            // Clear only what was submitted: the field stays editable during the await.
+            let fieldStillHoldsSubmission = text.trimmingCharacters(in: .whitespacesAndNewlines) == capability
+            switch outcome {
+            case .added:
+                if fieldStillHoldsSubmission { text = "" }
+                feedback = nil
+            case .alreadyListed(let existing):
+                if fieldStillHoldsSubmission { text = "" }
+                feedback = .alreadyListed(existingText: existing.text)
+            case .refused(let problem):
+                feedback = .refused(problem)
             }
+        }
+    }
+}
+
+private struct TaskDetailAddCapabilityFeedbackLine: View {
+    let feedback: TaskDetailAddCapabilityFeedback?
+
+    var body: some View {
+        switch feedback {
+        case .alreadyListed(let existingText)?:
+            Text("Already listed: “\(existingText)”")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .refused(let problem)?:
+            InlineProblemText(message: problem)
+        case nil:
+            EmptyView()
         }
     }
 }
@@ -1825,7 +1879,7 @@ private struct TaskDetailDescriptionSection: View {
     /// `awaitingReview` are read-only.
     /// An archived or recently-deleted task is outside the store's writable sets, so an edit would
     /// only be refused ("Task not found").
-    private var isEditable: Bool { task.disposition == .active && task.status.isDescriptionEditable }
+    private var isEditable: Bool { task.isDefinitionEditable }
 
     /// The composition every agent sees — `## Template inputs` above the prose.
     ///
@@ -2114,23 +2168,76 @@ private struct TaskDetailCoordinationRows: View {
 
     var body: some View {
         if let coordinatorID = task.coordinatorTaskID {
-            TaskDetailMetadataRow(label: "Created by", alignment: .firstTextBaseline) {
-                Text(viewModel.anyTask(id: coordinatorID)?.title ?? coordinatorID.uuidString)
-                    .textSelection(.enabled)
+            TaskDetailCoordinatorRow(coordinatorID: coordinatorID, viewModel: viewModel)
+        }
+        TaskDetailChildTaskRows(coordinatorTaskID: task.id, viewModel: viewModel)
+    }
+}
+
+private struct TaskDetailCoordinatorRow: View {
+    let coordinatorID: UUID
+    let viewModel: AppViewModel
+
+    var body: some View {
+        TaskDetailMetadataRow(label: "Created by", alignment: .firstTextBaseline) {
+            if let coordinator = viewModel.anyTask(id: coordinatorID) {
+                TaskDetailLinkedTaskButton(taskID: coordinator.id, title: coordinator.title, sessionID: viewModel.session.id)
+            } else {
+                Text(coordinatorID.uuidString).textSelection(.enabled)
             }
         }
-        let children = viewModel.coordinatedChildTasks(of: task.id)
+    }
+}
+
+/// Its own view so its inputs are the coordinator id and the task lists, not the task: a running
+/// coordinator's own updates no longer re-filter every bucket.
+private struct TaskDetailChildTaskRows: View {
+    let coordinatorTaskID: UUID
+    let viewModel: AppViewModel
+
+    var body: some View {
+        let children = viewModel.coordinatedChildTasks(of: coordinatorTaskID)
         if !children.isEmpty {
             TaskDetailMetadataRow(label: "Child tasks", alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(children, id: \.id) { child in
-                        Text("\(child.title) — \(child.status.displayName)")
-                            .foregroundStyle(TaskStatusBadge.color(for: child.status))
-                            .textSelection(.enabled)
+                        TaskDetailChildTaskLine(child: child, sessionID: viewModel.session.id)
                     }
                 }
             }
         }
+    }
+}
+
+private struct TaskDetailChildTaskLine: View {
+    let child: AgentTask
+    let sessionID: UUID
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TaskDetailLinkedTaskButton(taskID: child.id, title: child.title, sessionID: sessionID)
+            Text(child.status.displayName)
+                .foregroundStyle(TaskStatusBadge.color(for: child.status))
+        }
+    }
+}
+
+/// A task title that opens, or brings forward, that task's detail window.
+private struct TaskDetailLinkedTaskButton: View {
+    let taskID: UUID
+    let title: String
+    let sessionID: UUID
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button(title) {
+            AgentSmithApp.showOrOpenTaskDetail(
+                target: TaskDetailTarget(sessionID: sessionID, taskID: taskID),
+                openWindow: openWindow
+            )
+        }
+        .buttonStyle(.link)
+        .help("Open this task's details")
     }
 }
 

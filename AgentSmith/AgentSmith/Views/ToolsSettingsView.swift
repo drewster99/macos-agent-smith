@@ -112,13 +112,7 @@ struct ToolsSettingsView: View {
     private func policyBinding(_ tool: String) -> Binding<ToolPolicy> {
         Binding(
             get: { ToolPolicy.effective(for: tool, globalPolicies: shared.globalToolPolicies) },
-            set: { newValue in
-                if newValue == .default {
-                    shared.globalToolPolicies.removeValue(forKey: tool)
-                } else {
-                    shared.globalToolPolicies[tool] = newValue
-                }
-            }
+            set: { ToolPolicy.recordUserChoice($0, for: tool, in: &shared.globalToolPolicies) }
         )
     }
 
@@ -136,11 +130,7 @@ struct ToolsSettingsView: View {
                 guard let newValue else { return }
                 var policies = shared.globalToolPolicies
                 for key in keys {
-                    if newValue == .default {
-                        policies.removeValue(forKey: key)
-                    } else {
-                        policies[key] = newValue
-                    }
+                    ToolPolicy.recordUserChoice(newValue, for: key, in: &policies)
                 }
                 shared.globalToolPolicies = policies
             }

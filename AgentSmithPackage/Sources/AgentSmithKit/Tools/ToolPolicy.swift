@@ -37,7 +37,25 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
     /// The policy in force for `tool`: the user's global entry if there is one, else the built-in
     /// default, else `.default`. The one definition every reader (engine and UI) uses.
     public static func effective(for tool: String, globalPolicies: [String: ToolPolicy]) -> ToolPolicy {
-        globalPolicies[tool] ?? builtInDefaults[tool] ?? .default
+        globalPolicies[tool] ?? builtInDefault(for: tool)
+    }
+
+    /// The policy `tool` has when the user has not chosen one: its `builtInDefaults` entry, else `.default`.
+    public static func builtInDefault(for tool: String) -> ToolPolicy {
+        builtInDefaults[tool] ?? .default
+    }
+
+    /// Records the user's Settings choice for `tool`. An entry is kept only when the choice differs
+    /// from the tool's built-in default: "Default" on a tool whose built-in default is Never must be
+    /// stored explicitly, because removing the entry put the built-in Never straight back and the
+    /// picker snapped to Never. Choosing the built-in default removes the entry, so a later change
+    /// to a built-in default still reaches users who never overrode it.
+    public static func recordUserChoice(_ choice: ToolPolicy, for tool: String, in policies: inout [String: ToolPolicy]) {
+        if choice == builtInDefault(for: tool) {
+            policies.removeValue(forKey: tool)
+        } else {
+            policies[tool] = choice
+        }
     }
 
     /// The tools a worker is offered: `base` (the automatic verdict) with the global policy and the

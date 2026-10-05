@@ -237,7 +237,7 @@ struct ListTasksTool: AgentTool {
         return .success(Self.encode(ListTasksResponse(
             resultKind: "taskSummaryList",
             completeDetails: false,
-            note: "Descriptions and acceptance criteria are previews only. Use get_task_details for full task details.",
+            note: "Descriptions and acceptance criteria are previews only, and a list field that is empty is omitted. Use get_task_details for full task details.",
             filters: Self.renderFilters(arguments: arguments, dispositionFilter: dispositionFilter),
             pagination: Pagination(offset: offset, limit: limit, returned: pageTasks.count, totalMatching: totalMatching, hasMore: hasMore, nextOffset: hasMore ? rangeEnd : nil),
             tasks: pageTasks.map { Self.makeSummary(task: $0) }
@@ -346,19 +346,25 @@ struct ListTasksTool: AgentTool {
             parentTemplateID: task.parentTaskID?.uuidString,
             truncatedDescriptionPreview: description.text,
             descriptionWasTruncated: description.wasTruncated,
-            acceptanceCriteriaSummaries: task.acceptanceCriteria.map { AcceptanceCriterionSummary(name: $0.name, waivable: $0.waivable, hasInputEnumeratorPrompt: $0.inputEnumeratorPrompt != nil) },
+            acceptanceCriteriaSummaries: nonEmpty(task.acceptanceCriteria.map { AcceptanceCriterionSummary(name: $0.name, waivable: $0.waivable, hasInputEnumeratorPrompt: $0.inputEnumeratorPrompt != nil) }),
             acceptanceCriteriaCount: task.acceptanceCriteria.count,
-            templateInputDefinitionSummaries: task.templateInputDefinitions.map {
+            templateInputDefinitionSummaries: nonEmpty(task.templateInputDefinitions.map {
                 TemplateInputDefinitionSummary(name: $0.name, required: $0.required)
-            },
+            }),
             templateInputDefinitionCount: task.templateInputDefinitions.count,
             requiredTemplateInputCount: task.templateInputDefinitions.filter(\.required).count,
-            missingRequiredTemplateInputNames: task.missingRequiredTemplateInputNames,
+            missingRequiredTemplateInputNames: nonEmpty(task.missingRequiredTemplateInputNames),
             hasTemplateInputValues: !task.templateInputValues.isEmpty,
-            templateInputValueNames: task.templateInputValues.keys.sorted(),
+            templateInputValueNames: nonEmpty(task.templateInputValues.keys.sorted()),
             coordinatorTaskID: task.coordinatorTaskID?.uuidString,
-            requiredCapabilities: task.requiredCapabilities.map(\.renderedLine)
+            requiredCapabilities: nonEmpty(task.requiredCapabilities.map(\.renderedLine))
         )
+    }
+
+    /// A list for a summary row, or nil when it is empty, so the row omits the key: an empty list
+    /// repeated on every row of a page costs tokens and says nothing the response note doesn't.
+    private static func nonEmpty<Element>(_ list: [Element]) -> [Element]? {
+        list.isEmpty ? nil : list
     }
 
     private static func preview(_ text: String, limit: Int) -> (text: String, wasTruncated: Bool) {
@@ -413,19 +419,19 @@ struct ListTasksTool: AgentTool {
         let parentTemplateID: String?
         let truncatedDescriptionPreview: String
         let descriptionWasTruncated: Bool
-        let acceptanceCriteriaSummaries: [AcceptanceCriterionSummary]
+        let acceptanceCriteriaSummaries: [AcceptanceCriterionSummary]?
         let acceptanceCriteriaCount: Int
-        let templateInputDefinitionSummaries: [TemplateInputDefinitionSummary]
+        let templateInputDefinitionSummaries: [TemplateInputDefinitionSummary]?
         let templateInputDefinitionCount: Int
         let requiredTemplateInputCount: Int
-        let missingRequiredTemplateInputNames: [String]
+        let missingRequiredTemplateInputNames: [String]?
         let hasTemplateInputValues: Bool
-        let templateInputValueNames: [String]
+        let templateInputValueNames: [String]?
         /// For a child task, the task whose worker created it (`create_child_task`).
         let coordinatorTaskID: String?
         /// Each required capability as `RequiredCapability.renderedLine` — short, and a later
         /// addition is exactly what a reader scanning tasks needs to notice.
-        let requiredCapabilities: [String]
+        let requiredCapabilities: [String]?
     }
 
     private struct AcceptanceCriterionSummary: Encodable {

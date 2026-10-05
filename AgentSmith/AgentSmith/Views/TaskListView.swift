@@ -507,7 +507,7 @@ struct TaskRowButton: View {
         Button(action: { copyTaskIDToPasteboard(task.id) }, label: {
             Label("Copy Task ID", systemImage: "doc.on.doc")
         })
-        if task.status.isDescriptionEditable {
+        if task.isDefinitionEditable {
             Button(action: { taskEditorTask = task }, label: {
                 Label("Edit", systemImage: "pencil")
             })

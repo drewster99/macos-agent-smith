@@ -497,13 +497,6 @@ public actor MemoryStore {
         )), at: Date())
     }
 
-    /// Re-embeds any stored memory or task summary whose `embeddingModelID` differs from the current
-    /// engine's model identifier (including legacy `nil` rows). This is the migration hook for an
-    /// embedding-output change (model / quantization / pooling) where the vector *dimension* is
-    /// unchanged and so would otherwise go undetected. Per-entry failures are logged and skipped so
-    /// one bad row can't abort the pass. Fires `onChange()` once if anything changed so the caller's
-    /// persistence runs. Returns how many of each were re-embedded.
-    @discardableResult
     /// How many stored entries `reembedStaleEntries()` would re-embed — i.e. whose `embeddingModelID`
     /// differs from the engine's current model identifier (and have re-embeddable text). Cheap; runs
     /// no embeddings. Lets the caller decide whether to show a progress UI before starting.
@@ -519,6 +512,13 @@ public actor MemoryStore {
     /// migration resumes from where it left off instead of restarting from scratch each launch.
     private static let reembedCheckpointInterval = 32
 
+    /// Re-embeds any stored memory or task summary whose `embeddingModelID` differs from the current
+    /// engine's model identifier (including legacy `nil` rows). This is the migration hook for an
+    /// embedding-output change (model / quantization / pooling) where the vector *dimension* is
+    /// unchanged and so would otherwise go undetected. Per-entry failures are logged and skipped so
+    /// one bad row can't abort the pass. Fires `onChange()` once if anything changed so the caller's
+    /// persistence runs. Returns how many of each were re-embedded.
+    @discardableResult
     public func reembedStaleEntries() async -> (memories: Int, taskSummaries: Int, failed: Int) {
         let memSignature = memoryEmbeddingSignature
         let taskSignature = engine.model.identifier

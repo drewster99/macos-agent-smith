@@ -70,9 +70,30 @@ struct RequiredCapabilityTests {
             Issue.record("expected .refused, got \(outcome)")
             return
         }
-        let replacement = [RequiredCapability(text: "Edit files", addedBy: .user, origin: .addedLater)]
-        #expect(await store.setRequiredCapabilities(id: task.id, replacement, editedFrom: []) != nil)
+        #expect(await store.editRequiredCapabilities(id: task.id, [.add(text: "Edit files", reason: nil)], by: .user) != nil)
         #expect(await store.task(id: task.id)?.requiredCapabilities.isEmpty == true)
+    }
+
+    @Test("the lock is one rule: completed and validating lock, archived/deleted lock, everything else edits")
+    func lockReasonTable() {
+        for status in AgentTask.Status.allCases {
+            let task = AgentTask(title: "T", description: "d", status: status)
+            switch status {
+            case .completed: #expect(task.requiredCapabilitiesLockReason == .completed)
+            case .validating: #expect(task.requiredCapabilitiesLockReason == .validating)
+            case .pending, .starting, .running, .failed, .paused, .awaitingReview, .awaitingHelp, .interrupted, .scheduled:
+                #expect(task.requiredCapabilitiesLockReason == nil, "\(status) should be editable")
+            }
+            let archived = AgentTask(title: "T", description: "d", status: status, disposition: .archived)
+            #expect(archived.requiredCapabilitiesLockReason == .notInActiveList)
+            #expect(!archived.isDefinitionEditable)
+        }
+    }
+
+    @Test("a validating task's refusal tells Smith how the lock ends")
+    func validatingRefusalNamesTheWayOut() {
+        let refusal = RequiredCapabilitiesLockReason.validating.refusal(taskTitle: "T")
+        #expect(refusal.contains("after validation ends"))
     }
 
     @Test("a template refuses an undefined placeholder; an instance substitutes the run's values")
@@ -116,25 +137,54 @@ struct RequiredCapabilityTests {
         #expect(onInstance.text == "Notarize Foo")
     }
 
-    @Test("the user's wholesale edit keeps provenance and emits a change only when something changed")
-    func setWholesale() async throws {
+    @Test("a reword keeps identity and provenance, is recorded, and emits a change only when something changed")
+    func rewordKeepsProvenance() async throws {
         let store = TaskStore()
         let original = RequiredCapability(text: "Edit files", addedBy: .smith, origin: .asWritten)
         let task = await store.addTask(title: "T", description: "d", requiredCapabilities: [original])
         let events = EventCollector()
         await store.setEventObserver { events.append($0) }
 
-        #expect(await store.setRequiredCapabilities(id: task.id, [original], editedFrom: [original]) == nil)
+        #expect(await store.editRequiredCapabilities(id: task.id, [.reword(id: original.id, text: " Edit files ")], by: .user) == nil)
         #expect(events.values.isEmpty)
 
-        var edited = original
-        edited.text = "Edit Swift files"
-        #expect(await store.setRequiredCapabilities(id: task.id, [edited], editedFrom: [original]) == nil)
-        let stored = try #require(await store.task(id: task.id)?.requiredCapabilities.first)
-        #expect(stored.id == original.id)
-        #expect(stored.addedBy == .smith)
-        #expect(stored.text == "Edit Swift files")
+        #expect(await store.editRequiredCapabilities(id: task.id, [.reword(id: original.id, text: "Edit Swift files")], by: .user) == nil)
+        let stored = try #require(await store.task(id: task.id))
+        let item = try #require(stored.requiredCapabilities.first)
+        #expect(item.id == original.id)
+        #expect(item.addedBy == .smith)
+        #expect(item.origin == .asWritten)
+        #expect(item.text == "Edit Swift files")
+        #expect(stored.updates.last?.message == "Required capability reworded by the user: \"Edit files\" → \"Edit Swift files\"")
         #expect(events.values == [.requiredCapabilitiesChanged(taskID: task.id)])
+    }
+
+    @Test("an edit batch is atomic: a refused reword leaves the earlier removal unapplied")
+    func batchIsAtomic() async throws {
+        let store = TaskStore()
+        let first = RequiredCapability(text: "Edit files", addedBy: .smith, origin: .asWritten)
+        let second = RequiredCapability(text: "Browse the web", addedBy: .smith, origin: .asWritten)
+        let third = RequiredCapability(text: "Read mail", addedBy: .smith, origin: .asWritten)
+        let task = await store.addTask(title: "T", description: "d", requiredCapabilities: [first, second, third])
+
+        let refusal = await store.editRequiredCapabilities(
+            id: task.id,
+            [.remove(id: first.id), .reword(id: second.id, text: "read MAIL")],
+            by: .user
+        )
+        #expect(refusal?.contains("already listed") == true)
+        #expect(await store.task(id: task.id)?.requiredCapabilities == [first, second, third])
+    }
+
+    @Test("a user addition through the editor is a later addition by the user")
+    func editorAdditionIsLater() async throws {
+        let store = TaskStore()
+        let task = await store.addTask(title: "T", description: "d")
+        #expect(await store.editRequiredCapabilities(id: task.id, [.add(text: "Read mail", reason: nil)], by: .user) == nil)
+        let item = try #require(await store.task(id: task.id)?.requiredCapabilities.first)
+        #expect(item.origin == .addedLater)
+        #expect(item.addedBy == .user)
+        #expect(item.reason == nil)
     }
 
     @Test("an item added while the editor was open survives the editor's save; a deleted one stays deleted")
@@ -151,8 +201,69 @@ struct RequiredCapabilityTests {
             Issue.record("addition failed")
             return
         }
-        #expect(await store.setRequiredCapabilities(id: task.id, [kept], editedFrom: opened) == nil)
+        let edits = RequiredCapabilityEdit.edits(from: opened, to: [RequiredCapabilityDraft(existingID: kept.id, text: kept.text)])
+        #expect(edits == [.remove(id: removed.id)])
+        #expect(await store.editRequiredCapabilities(id: task.id, edits, by: .user) == nil)
         #expect(await store.task(id: task.id)?.requiredCapabilities.map(\.id) == [kept.id, meanwhile.id])
+        #expect(await store.task(id: task.id)?.updates.last?.message == "Required capability removed by the user: Browse the web")
+    }
+
+    @Test("a reword of an item removed meanwhile is refused; a removal of one is a no-op")
+    func editsAgainstVanishedItems() async throws {
+        let store = TaskStore()
+        let item = RequiredCapability(text: "Edit files", addedBy: .smith, origin: .asWritten)
+        let task = await store.addTask(title: "T", description: "d", requiredCapabilities: [item])
+        #expect(await store.editRequiredCapabilities(id: task.id, [.remove(id: item.id)], by: .user) == nil)
+        #expect(await store.editRequiredCapabilities(id: task.id, [.remove(id: item.id)], by: .user) == nil)
+        #expect(await store.editRequiredCapabilities(id: task.id, [.reword(id: item.id, text: "Edit Swift files")], by: .user)?.contains("removed while you were editing") == true)
+    }
+
+    // MARK: - The editor's diff
+
+    @Test("the editor's diff: removals first, then rewords, then additions; blanks are no items")
+    func editsDiff() {
+        let a = RequiredCapability(text: "Edit files", addedBy: .smith, origin: .asWritten)
+        let b = RequiredCapability(text: "Browse the web", addedBy: .smith, origin: .asWritten)
+        let c = RequiredCapability(text: "Read mail", addedBy: .smith, origin: .asWritten)
+        let drafts = [
+            RequiredCapabilityDraft(existingID: a.id, text: " Edit files "),       // unchanged (trim)
+            RequiredCapabilityDraft(existingID: b.id, text: "Browse docs"),        // reword
+            RequiredCapabilityDraft(existingID: c.id, text: "   "),                // cleared → removal
+            RequiredCapabilityDraft(existingID: nil, text: "Send mail"),           // addition
+            RequiredCapabilityDraft(existingID: nil, text: "")                     // blank new row → nothing
+        ]
+        #expect(RequiredCapabilityEdit.edits(from: [a, b, c], to: drafts) == [
+            .remove(id: c.id),
+            .reword(id: b.id, text: "Browse docs"),
+            .add(text: "Send mail", reason: nil)
+        ])
+        #expect(RequiredCapabilityEdit.edits(from: [a], to: [RequiredCapabilityDraft(existingID: a.id, text: a.text)]).isEmpty)
+    }
+
+    @Test("items as written are trimmed, blanks dropped, duplicates dropped keeping the first spelling")
+    func makeAsWritten() {
+        let items = RequiredCapability.makeAsWritten(["  Edit files ", "", "edit  FILES", "Read mail"], addedBy: .worker)
+        #expect(items.map(\.text) == ["Edit files", "Read mail"])
+        #expect(items.allSatisfy { $0.origin == .asWritten && $0.addedBy == .worker })
+    }
+
+    @Test("an instance item that renders blank (only an omitted optional input) is dropped")
+    func blankInstanceItemDropped() async throws {
+        let store = TaskStore()
+        let template = await store.addTask(
+            title: "Build", description: "Build it.",
+            isTemplate: true,
+            templateInputDefinitions: [TemplateInputDefinition(name: "extra", description: "Extra need", required: false)],
+            requiredCapabilities: [
+                RequiredCapability(text: "Compile the project", addedBy: .smith, origin: .asWritten),
+                RequiredCapability(text: "{{extra}}", addedBy: .smith, origin: .asWritten)
+            ]
+        )
+        guard case .success(let instance) = await store.instantiateTemplate(templateID: template.id, inputValues: [:]) else {
+            Issue.record("instantiation failed")
+            return
+        }
+        #expect(instance.requiredCapabilities.map(\.text) == ["Compile the project"])
     }
 
     // MARK: - Persistence
@@ -215,6 +326,25 @@ struct RequiredCapabilityTests {
         let task = try #require(await store.allTasks().first)
         #expect(task.requiredCapabilities.map(\.text) == ["Compile the Xcode project", "Edit files"])
         #expect(task.requiredCapabilities.allSatisfy { $0.origin == .asWritten && $0.addedBy == .smith })
+    }
+
+    @Test("create_task refuses a malformed list instead of dropping part of it, creating nothing")
+    func createTaskRefusesMalformedList() async throws {
+        let store = TaskStore()
+        let context = TestToolContext.make(agentRole: .smith, taskStore: store)
+        for arguments: [String: AnyCodable] in [
+            ["required_capabilities": .string("Compile, sign")],
+            ["required_capabilities": .array([.string("Compile"), .int(2)])],
+            ["steps": .array([.dictionary(["text": .string("Build")])])],
+            ["attachment_ids": .string("not-an-array")]
+        ] {
+            var full = arguments
+            full["title"] = .string("Build")
+            full["description"] = .string("Build the app.")
+            let result = try await CreateTaskTool().execute(arguments: full, context: context)
+            #expect(!result.succeeded, "\(arguments) was accepted")
+        }
+        #expect(await store.allTasks().isEmpty)
     }
 
     @Test("create_task refuses a template capability with an undefined placeholder, creating nothing")

@@ -5291,7 +5291,10 @@ public actor OrchestrationRuntime {
                 await self?.setWorkerWaitingOnChildTasks(agentID: agentID, waiting: waiting)
             },
             maxChildTasksPerTask: { [weak self] in
-                await self?.maxChildTasksPerTask ?? Self.defaultMaxChildTasksPerTask
+                await self?.maxChildTasksPerTask
+            },
+            scopesToolSetOnTaskStart: { [weak self] in
+                await self?.orchestrationSettings.scopeToolSetOnTaskStart ?? OrchestrationSettings.builtIn.scopeToolSetOnTaskStart
             },
             currentResumingTaskID: currentResumingTaskID,
             memoryStore: memoryStore,

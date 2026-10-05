@@ -1771,9 +1771,10 @@ final class AppViewModel {
         acceptanceCriteria: [AcceptanceCriterion],
         steps: [TaskStep],
         requiresUserAcceptance: Bool,
-        requiredCapabilities: [RequiredCapability]
+        requiredCapabilityTexts: [String]
     ) async -> Bool {
         guard let taskStore else { return false }
+        let requiredCapabilities = RequiredCapability.makeAsWritten(requiredCapabilityTexts, addedBy: .user)
         if isTemplate, let problem = TemplateInputValidation.validateDefinitions(templateInputDefinitions) {
             taskActionError = problem
             return false
@@ -1982,38 +1983,30 @@ final class AppViewModel {
         }
     }
 
-    /// Replaces a task's step list from the task-detail editor (same gating). The user
-    /// holds full authority over the plan — unlike the worker, edits here may delete
-    /// steps outright rather than tombstoning them.
-    @discardableResult
     /// Adds one required capability as the user, marked as a later addition. On a task a worker is
-    /// running, the store's change event re-scopes that worker's tools before its next turn.
-    func addTaskRequiredCapability(id: UUID, text: String) async -> Bool {
-        guard let taskStore else { return false }
-        switch await taskStore.addRequiredCapability(id: id, text: text, addedBy: .user, reason: nil) {
-        case .added, .alreadyListed:
-            return true
-        case .refused(let problem):
-            taskActionError = problem
-            return false
-        }
+    /// running, the store's change event re-scopes that worker's tools before its next turn. The
+    /// outcome goes back to the field it came from, which shows it inline.
+    func addTaskRequiredCapability(id: UUID, text: String) async -> RequiredCapabilityAddition {
+        guard let taskStore else { return .refused("The session's tasks haven't loaded yet.") }
+        return await taskStore.addRequiredCapability(id: id, text: text, addedBy: .user, reason: nil)
     }
 
-    /// Writes the user's edit of a task's required capabilities. On a task a worker is running,
-    /// the store's change event re-scopes that worker's tools.
-    func setTaskRequiredCapabilities(
-        id: UUID,
-        _ capabilities: [RequiredCapability],
-        editedFrom original: [RequiredCapability]
-    ) async -> Bool {
+    /// Writes the user's edit of a task's required capabilities — the editor's diff
+    /// (`RequiredCapabilityEdit.edits(from:to:)`), so an item Smith added while the editor was open
+    /// survives. On a task a worker is running, the store's change event re-scopes its tools.
+    func editTaskRequiredCapabilities(id: UUID, _ edits: [RequiredCapabilityEdit]) async -> Bool {
         guard let taskStore else { return false }
-        if let problem = await taskStore.setRequiredCapabilities(id: id, capabilities, editedFrom: original) {
+        if let problem = await taskStore.editRequiredCapabilities(id: id, edits, by: .user) {
             taskActionError = problem
             return false
         }
         return true
     }
 
+    /// Replaces a task's step list from the task-detail editor (same gating). The user
+    /// holds full authority over the plan — unlike the worker, edits here may delete
+    /// steps outright rather than tombstoning them.
+    @discardableResult
     func setTaskSteps(id: UUID, steps: [TaskStep]) async -> Bool {
         guard let taskStore else { return false }
         guard let task = await taskStore.taskOrLibraryTemplate(id: id), task.status.isValidationContractEditable else {
@@ -3005,12 +2998,15 @@ final class AppViewModel {
             + shared.archivedTasks.filter { $0.parentTaskID == taskID }
     }
 
-    /// The child tasks a coordinator task's worker created (`create_child_task`), oldest first,
-    /// across the active and archived buckets.
+    /// The child tasks a coordinator task's worker created (`create_child_task`), across the
+    /// active and archived buckets, in `AgentTask.coordinationOrder`.
     func coordinatedChildTasks(of coordinatorTaskID: UUID) -> [AgentTask] {
-        (activeTaskList.filter { $0.coordinatorTaskID == coordinatorTaskID }
-            + shared.archivedTasks.filter { $0.coordinatorTaskID == coordinatorTaskID })
-            .sorted { $0.createdAt < $1.createdAt }
+        // The buckets are mirrored by separate hops (this session's store, the global inactive store),
+        // so a task being archived can briefly sit in both; the active copy, listed first, wins.
+        var seen = Set<UUID>()
+        return [activeTaskList, shared.archivedTasks].joined()
+            .filter { $0.coordinatorTaskID == coordinatorTaskID && seen.insert($0.id).inserted }
+            .sorted(by: AgentTask.coordinationOrder)
     }
 
     // MARK: - Library group operations (forward to the shared global library)
