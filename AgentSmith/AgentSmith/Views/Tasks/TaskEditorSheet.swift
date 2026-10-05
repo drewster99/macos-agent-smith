@@ -49,20 +49,20 @@ struct TaskEditorSheet: View {
     /// replaces the step array wholesale and an active-only array erases the append-only record
     /// that acceptance validators are promised.
     @State private var preservedTombstones: [TaskStep]
-    /// What this form would save for the task exactly as it opened (`Mode.edit`'s task) — built by
-    /// the same builders `save()` uses, so an untouched part compares equal even where the builders
-    /// normalize (they park tombstones after the active steps and fill an empty prompt from the
-    /// name). Save writes a part only when it differs from this, because the contract and steps are
-    /// refused once the task is running and an untouched part must not block a change that is
-    /// allowed.
+    /// The form as it opened for `Mode.edit`'s task. Save writes a part only when it differs from
+    /// this, because the contract and steps are refused once the task is running and an untouched
+    /// part must not block a change that is allowed (a capability edit). Criteria and steps compare
+    /// the RAW rows: the builders normalize (an empty prompt takes the name, tombstones go last), so
+    /// comparing built output both invents changes and hides real ones — typing a prompt equal to
+    /// the name switches a criterion from the default validator to a custom one.
     struct OpenedForm {
         let title: String
         let description: String
         let isTemplate: Bool
         let inputs: [TemplateInputDefinition]
         let instanceTitleTemplate: String
-        let criteria: [AcceptanceCriterion]
-        let steps: [TaskStep]
+        let criterionRows: [CriterionRow]
+        let stepRows: [StepRow]
     }
     @State private var localError: String?
 
@@ -80,7 +80,7 @@ struct TaskEditorSheet: View {
         }
     }
 
-    struct CriterionRow: Identifiable {
+    struct CriterionRow: Identifiable, Equatable {
         let id: UUID
         var name: String
         var validationPrompt: String
@@ -143,7 +143,7 @@ struct TaskEditorSheet: View {
         }
     }
 
-    struct StepRow: Identifiable {
+    struct StepRow: Identifiable, Equatable {
         let id: UUID
         var text: String
         let status: TaskStep.Status
@@ -229,8 +229,8 @@ struct TaskEditorSheet: View {
             isTemplate: task.isTemplate,
             inputs: builtInputs(from: inputRows(of: task)),
             instanceTitleTemplate: (task.templateInstanceTitleTemplate ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-            criteria: builtCriteria(from: criterionRows(of: task)),
-            steps: builtActiveSteps(from: stepRows(of: task)) + task.steps.filter { !$0.isActive }
+            criterionRows: criterionRows(of: task),
+            stepRows: stepRows(of: task)
         )
     }
 
@@ -549,10 +549,8 @@ struct TaskEditorSheet: View {
     /// dropped, and an empty name falls back to the prompt — which is also the name the store
     /// quotes back in a placeholder refusal, so the live warning has to be built from exactly this
     /// list or it names a different criterion than the save does.
-    private var builtCriteria: [AcceptanceCriterion] { Self.builtCriteria(from: criteria) }
-
-    private static func builtCriteria(from rows: [CriterionRow]) -> [AcceptanceCriterion] {
-        rows.compactMap { row -> AcceptanceCriterion? in
+    private var builtCriteria: [AcceptanceCriterion] {
+        criteria.compactMap { row -> AcceptanceCriterion? in
             let name = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let prompt = row.validationPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty || !prompt.isEmpty else { return nil }
@@ -571,10 +569,8 @@ struct TaskEditorSheet: View {
     /// The ACTIVE steps this form would save, in plan order. Empty rows are dropped HERE, exactly
     /// as they are on save, so the position a placeholder problem names is the position `setSteps`
     /// names.
-    private var builtActiveSteps: [TaskStep] { Self.builtActiveSteps(from: steps) }
-
-    private static func builtActiveSteps(from rows: [StepRow]) -> [TaskStep] {
-        rows.compactMap { $0.built() }
+    private var builtActiveSteps: [TaskStep] {
+        steps.compactMap { $0.built() }
     }
 
     /// The required capabilities this form would save, in order, empty rows dropped — shared with
@@ -644,11 +640,11 @@ struct TaskEditorSheet: View {
                     // Like the definition above, each part is written only when it changed: the
                     // contract and steps are refused once the task is running, and an unchanged part
                     // must not block a change that is allowed (a capability edit).
-                    if gateChange != nil || criteriaToSave != opened.criteria {
+                    if gateChange != nil || criteria != opened.criterionRows {
                         saved = await viewModel.editTaskAcceptanceContract(
                             id: task.id, criteria: criteriaToSave, requiresUserAcceptance: gateChange)
                     }
-                    if saved && builtSteps != opened.steps {
+                    if saved && steps != opened.stepRows {
                         saved = await viewModel.setTaskSteps(id: task.id, steps: builtSteps)
                     }
                 }
