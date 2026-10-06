@@ -657,7 +657,11 @@ public actor OrchestrationRuntime {
         // change landing earlier is seen here, and one landing later finds the breaker to release.
         guard isCurrentModel(of: .brown, in: outage) else {
             // This worker still holds the task's slot; the drain its self-termination runs starts
-            // the task again, through the queue a coordinator's child is also taken from.
+            // the task again, through the queue a coordinator's child is also taken from. Its
+            // working state is saved first: once unassigned, its exit can no longer find the task.
+            if let worker = supervisor.handlesByID[agentID]?.agent {
+                await saveBrownContextToTask(brownID: agentID, brown: worker)
+            }
             await taskStore.unassignAgent(taskID: task.id, agentID: agentID)
             providerRecoveredQueue.append(held)
             await taskStore.addUpdate(id: task.id, message: "Restarting on the worker's new model — the previous model '\(outage.modelID)' could not be used: \(outage.kind.displayDescription).")
@@ -712,6 +716,9 @@ public actor OrchestrationRuntime {
         }
         // A task that isn't there goes on to the start, which reports it as not found.
         guard let task = await taskStore.task(id: taskID) else { return true }
+        // Re-checked after that suspension: a model change during it released the outage (and the
+        // held starts with it), and a start held now would be held by nothing.
+        guard let standing = workerOutage, isCurrentModel(of: .brown, in: standing) else { return true }
         // Told once per task: a retried start of a task already waiting adds nothing.
         guard holdStart(HeldStart(taskID: taskID, statusRevision: task.statusRevision)) else { return false }
         await channel.post(ChannelMessage(
@@ -723,11 +730,15 @@ public actor OrchestrationRuntime {
         return false
     }
 
-    /// Holds a start until the worker's outage is released. Returns whether the task was newly held;
-    /// a task already held keeps its original entry.
+    /// Holds a start until the worker's outage is released. Returns whether the task was newly held.
+    /// A task already held keeps its place but takes the new revision: this start request is the
+    /// latest word on it (a task the user paused, then asked Smith to resume, is wanted again).
     @discardableResult
     private func holdStart(_ held: HeldStart) -> Bool {
-        guard !startsHeldByWorkerOutage.contains(where: { $0.taskID == held.taskID }) else { return false }
+        if let index = startsHeldByWorkerOutage.firstIndex(where: { $0.taskID == held.taskID }) {
+            startsHeldByWorkerOutage[index] = held
+            return false
+        }
         startsHeldByWorkerOutage.append(held)
         return true
     }
@@ -1155,11 +1166,11 @@ public actor OrchestrationRuntime {
         case .tooSmall:
             return "Smith's context is already compact — nothing was changed."
         case .deferredToTurnEnd:
-            return "Smith is mid-turn — the summary is ready and will be applied as soon as that turn ends."
+            return "Smith is busy — the summary is ready and will be applied when its turn ends (or discarded, if its context is cleared first)."
         case .historyChanged:
             return "Smith's context changed while it was being summarized (cleared, pruned, switched model, or compacted by another summary), so the summary was discarded. Its context is unchanged."
         case .superseded:
-            return "A newer summary of Smith's context replaced this one before it was applied."
+            return "Another summary of Smith's context, covering more of it, is being applied instead of this one."
         }
     }
 

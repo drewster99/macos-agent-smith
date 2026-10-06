@@ -21,10 +21,9 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
     /// 429 is transient — only by `afterRetriesExhausted(on:)`.
     case rateLimitExhausted
 
-    /// The kind of `error` from `providerID`, or nil when it is not an account/model problem. A
-    /// malformed request, a content-policy refusal or a context overflow belongs to ONE
-    /// conversation, not the model.
-    public static func of(_ error: Error, providerID: String) -> ProviderUnavailableKind? {
+    /// The kind of `error`, or nil when it is not an account/model problem. A malformed request,
+    /// a content-policy refusal or a context overflow belongs to ONE conversation, not the model.
+    public static func of(_ error: Error) -> ProviderUnavailableKind? {
         guard let providerError = error as? LLMProviderError,
               case .httpError(let statusCode, let body, _, _) = providerError else { return nil }
         if let limit = CodexLimit.parse(statusCode: statusCode, body: body) {
@@ -41,10 +40,10 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
         // not of the account — and says so in typed fields of its error object.
         case 403 where isModerationRefusal(body: body): return nil
         case 403: return .forbidden
-        // OpenRouter answers 404 "No endpoints found that support …" when the REQUEST needs what
-        // the model can't do (image input, a tool_choice value) — one conversation's problem. Its
-        // unknown-model answer is a 400. Keyed on the provider, never the message.
-        case 404 where providerID == BuiltInProviders.ID.openRouter: return nil
+        // OpenRouter also answers 404 when a REQUEST needs what the model can't do ("No endpoints
+        // found that support image input") — but equally when the model has no provider left. Only
+        // the message tells them apart, so both trip the breaker: held tasks wait visibly for the
+        // user, where a missed dead model would fail every task started on it in turn.
         case 404: return .modelNotFound
         default: return nil
         }

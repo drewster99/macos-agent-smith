@@ -18,8 +18,8 @@ struct ProviderOutageTests {
 
     @Test("account and model failures are recognized by status; a request's own failures are not")
     func classification() {
-        func kind(_ status: Int, from providerID: String = "test") -> ProviderUnavailableKind? {
-            ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: status, body: "{}"), providerID: providerID)
+        func kind(_ status: Int) -> ProviderUnavailableKind? {
+            ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: status, body: "{}"))
         }
         #expect(kind(401) == .unauthorized)
         #expect(kind(402) == .paymentRequired)
@@ -28,17 +28,15 @@ struct ProviderOutageTests {
         for status in [400, 408, 413, 422, 429, 500, 503] {
             #expect(kind(status) == nil, "HTTP \(status) is not an account or model problem")
         }
-        #expect(ProviderUnavailableKind.of(URLError(.timedOut), providerID: "test") == nil)
+        #expect(ProviderUnavailableKind.of(URLError(.timedOut)) == nil)
     }
 
-    /// OpenRouter's 404 means the REQUEST needed something the model can't do ("No endpoints found
-    /// that support image input"), not that the model is unknown — one conversation's problem.
-    @Test("an OpenRouter 404 is not an outage; another provider's 404 is")
+    /// OpenRouter answers 404 both when a request needs what the model can't do and when the model
+    /// has no provider left; only the message tells them apart, so both are treated as the model.
+    @Test("an OpenRouter 404 trips the breaker like any 404")
     func openRouter404() {
         let body = #"{"error":{"message":"No endpoints found that support image input","code":404}}"#
-        let error = LLMProviderError.httpError(statusCode: 404, body: body)
-        #expect(ProviderUnavailableKind.of(error, providerID: BuiltInProviders.ID.openRouter) == nil)
-        #expect(ProviderUnavailableKind.of(error, providerID: BuiltInProviders.ID.openai) == .modelNotFound)
+        #expect(ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 404, body: body)) == .modelNotFound)
     }
 
     /// OpenRouter answers 403 when moderation flags the input: a refusal of that conversation, not
@@ -46,7 +44,7 @@ struct ProviderOutageTests {
     @Test("an OpenRouter moderation 403 is not an account problem; a plain 403 is")
     func moderationForbidden() {
         func kind(_ body: String) -> ProviderUnavailableKind? {
-            ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 403, body: body), providerID: "test")
+            ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 403, body: body))
         }
         let moderation = #"{"error":{"code":403,"message":"Your chosen model requires moderation and your input was flagged","metadata":{"reasons":["violence"],"flagged_input":"…"}}}"#
         #expect(kind(moderation) == nil)
@@ -59,7 +57,7 @@ struct ProviderOutageTests {
     @Test("Codex limits map by their typed fields")
     func codexLimits() {
         func kind(_ body: String) -> ProviderUnavailableKind? {
-            ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 429, body: body), providerID: BuiltInProviders.ID.codexChatGPT)
+            ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 429, body: body))
         }
         #expect(kind(#"{"error":{"rate_limit_reached_type":"workspace_owner_credits_depleted"}}"#) == .paymentRequired)
         #expect(kind(#"{"error":{"spend_control_reached":true}}"#) == .spendLimitReached)
@@ -77,7 +75,7 @@ struct ProviderOutageTests {
         #expect(kind(500) == nil)
         #expect(kind(408) == nil)
         #expect(ProviderUnavailableKind.afterRetriesExhausted(on: URLError(.timedOut)) == nil)
-        #expect(ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 429, body: "{}"), providerID: "test") == nil,
+        #expect(ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 429, body: "{}")) == nil,
                 "a single 429 is transient")
     }
 
@@ -291,18 +289,24 @@ struct ProviderOutageTests {
     /// task the user paused while it waited has moved on, and stays paused.
     @Test("held starts are kept by revision: a paused task Smith resumed starts, a task the user paused does not")
     func heldStartsKeptByRevision() async throws {
-        try await withRuntime(brownProvider: PaymentRequiredProvider(), capacity: 3) { runtime, store in
+        try await withRuntime(brownProvider: PaymentRequiredProvider(), capacity: 4) { runtime, store in
             let trigger = await store.addTask(title: "Trigger", description: "d")
             let resumedBySmith = await store.addTask(title: "Resumed by Smith", description: "d")
             let pausedByUser = await store.addTask(title: "Paused by the user", description: "d")
+            let pausedThenResumed = await store.addTask(title: "Paused, then resumed", description: "d")
             #expect(await store.driveStatus(id: resumedBySmith.id, to: .paused))
             await runtime.restartForNewTask(taskID: trigger.id, origin: .explicitUser)
             try await settle(runtime, stopLines: 1)
 
             await runtime.restartForNewTask(taskID: resumedBySmith.id, origin: .smithTool)
             await runtime.restartForNewTask(taskID: pausedByUser.id, origin: .smithTool)
+            await runtime.restartForNewTask(taskID: pausedThenResumed.id, origin: .smithTool)
             await runtime.waitForPendingRestarts()
             #expect(await store.driveStatus(id: pausedByUser.id, to: .paused))
+            // Paused by the user, then started again: the latest request wins.
+            #expect(await store.driveStatus(id: pausedThenResumed.id, to: .paused))
+            await runtime.restartForNewTask(taskID: pausedThenResumed.id, origin: .smithTool)
+            await runtime.waitForPendingRestarts()
 
             await switchWorkerToWorkingModel(runtime)
             let resumedTaskStarted = try await waitUntil { await store.task(id: resumedBySmith.id)?.status == .running }
@@ -312,7 +316,9 @@ struct ProviderOutageTests {
             await runtime.waitForPendingRestarts()
             #expect(await store.task(id: pausedByUser.id)?.status == .paused, "a task the user paused was started")
             let release = await runtime.channel.allMessages().first { $0.content.hasPrefix("The worker's model was changed.") }
-            #expect(release?.content.contains("Starting 2 waiting task(s)") == true)
+            #expect(release?.content.contains("Starting 3 waiting task(s)") == true)
+            let resumedAgain = try await waitUntil { await store.task(id: pausedThenResumed.id)?.status == .running }
+            #expect(resumedAgain, "a task paused and then started again lost its start")
         }
     }
 

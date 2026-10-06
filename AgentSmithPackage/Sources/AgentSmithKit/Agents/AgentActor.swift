@@ -2223,7 +2223,7 @@ public actor AgentActor {
                     // An account or model problem (not this conversation's): reported BEFORE the
                     // stop, so the runtime pauses this agent's task instead of the self-terminate
                     // path failing it, and stops starting tasks on a model that can't run them.
-                    let kind = failureWasProviderCall ? ProviderUnavailableKind.of(error, providerID: configuration.llmConfig.providerID) : nil
+                    let kind = failureWasProviderCall ? ProviderUnavailableKind.of(error) : nil
                     let handling = await reportProviderUnavailable(kind, error: error)
                     // A worker stopped by its model's outage leaves its task on hold, not failed —
                     // say what actually happened to it, rather than a stop that reads as its failure.
