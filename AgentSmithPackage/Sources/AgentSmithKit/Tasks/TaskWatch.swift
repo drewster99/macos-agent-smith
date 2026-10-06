@@ -104,7 +104,7 @@ public enum TaskWatchTrigger: String, Codable, Sendable, CaseIterable, Hashable 
         case .sessionShutdown, .sessionDeletion:
             // The user quitting or deleting the session is not an event to notify about (decision 9).
             return nil
-        case .capacityShed, .startAbandoned:
+        case .capacityShed, .startAbandoned, .providerUnavailable:
             // Lowering capacity parks the task for an automatic resume as soon as a slot frees, and
             // a resume refused at capacity goes back onto its queue the same way: an internal
             // deferral, not an interruption anyone should react to (or chain on).

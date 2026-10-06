@@ -97,6 +97,10 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     // MARK: Runtime
     /// The user lowered worker capacity and this task's worker was stopped to free a slot.
     case capacityShed
+    /// The worker's model can't be used (out of credits, rejected key, model not in the plan —
+    /// `ProviderUnavailableKind`): the task is paused rather than failed, and resumes when the
+    /// worker's model changes or the user presses Play.
+    case providerUnavailable
     /// A scheduled task action (pause / interrupt) fired.
     case scheduledAction(TaskActionKind)
     /// A scheduled task's run time arrived.
@@ -134,6 +138,8 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
         switch self {
         case .startClaimed:
             return from.isRunnable && to == .starting
+        case .providerUnavailable:
+            return from == .running && to == .interrupted
         case .startAbandoned:
             // `.interrupted` only for a refused resume going back onto its resume queue.
             return from == .starting && (to == .pending || to == .interrupted)
@@ -223,7 +229,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
              .workerStartedAtRuntimeStart, .submittedForValidation, .validationPassed,
              .validationFailedNoProgress, .validationReleased, .rejectionsReturned, .helpRequested,
              .helpProvided, .userPaused, .userStopped, .userAccepted, .userAcceptanceGranted, .userFailed,
-             .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed, .scheduledAction, .scheduledTimeReached,
+             .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed, .providerUnavailable, .scheduledAction, .scheduledTimeReached,
              .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus, .orphanRecovered, .resetForRun,
              .reopenedForRun, .templateLauncherNormalized, .coldBootRecovery, .coldBootSpawnAbandoned,
              .coldBootRevalidate, .sessionShutdown, .sessionDeletion:
@@ -241,7 +247,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
              .workerStartedAtRuntimeStart, .submittedForValidation, .validationPassed,
              .validationFailedNoProgress, .validationEscalated, .userAcceptanceRequested, .validationBlocked,
              .validationReleased, .rejectionsReturned, .helpRequested, .helpProvided, .userPaused,
-             .userStopped, .userFailed, .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed, .scheduledAction,
+             .userStopped, .userFailed, .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed, .providerUnavailable, .scheduledAction,
              .scheduledTimeReached, .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus,
              .orphanRecovered, .resetForRun, .reopenedForRun, .templateLauncherNormalized,
              .coldBootRecovery, .coldBootSpawnAbandoned, .coldBootRevalidate, .sessionShutdown, .sessionDeletion:

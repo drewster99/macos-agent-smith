@@ -71,8 +71,9 @@ public enum CoordinatorTaskBriefing {
         case .smithTerminatedWorker: return "stopped — Smith ended its worker"
         case .workerSelfTerminated: return "INTERRUPTED — its worker ended itself"
         case .orphanRecovered: return "INTERRUPTED — its worker was lost"
-        // Resumes on its own (`capacityShed`), or every worker is going down with it.
-        case .capacityShed, .sessionShutdown, .sessionDeletion, .coldBootRecovery:
+        // Resumes on its own (`capacityShed`, `providerUnavailable`), or every worker is going
+        // down with it.
+        case .capacityShed, .providerUnavailable, .sessionShutdown, .sessionDeletion, .coldBootRecovery:
             return nil
         // Never moves a task to paused or interrupted.
         case .scheduledAction(.run), .scheduledAction(.summarize), .startClaimed, .startAbandoned,

@@ -2142,6 +2142,18 @@ public actor AgentActor {
                 // across ~90 minutes while the account sat empty. Telling the user promptly and
                 // stopping is strictly more useful than continuing to hammer a billing block.
                 if isPersistentClientError {
+                    // An account or model problem (not this conversation's): reported BEFORE the
+                    // stop, so the runtime pauses this agent's task instead of the self-terminate
+                    // path failing it, and stops starting tasks on a model that can't run them.
+                    if failureWasProviderCall, let kind = ProviderUnavailableKind.of(error) {
+                        await toolContext.reportProviderUnavailable(ProviderOutage(
+                            role: configuration.role,
+                            providerID: configuration.llmConfig.providerID,
+                            modelID: configuration.llmConfig.model,
+                            kind: kind,
+                            detail: error.localizedDescription
+                        ))
+                    }
                     await toolContext.post(ChannelMessage(
                         sender: .system,
                         content: "Agent \(configuration.role.displayName) stopped — this error cannot be resolved by retrying: \(error.localizedDescription)",

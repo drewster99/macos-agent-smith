@@ -20,6 +20,9 @@ public enum TaskStartOrigin: Codable, Sendable, Equatable {
     case launchResume
     /// A task stopped when the user lowered capacity resumed once a slot freed.
     case capacityResume
+    /// A task paused because the worker's model was unusable (`ProviderOutage`), resumed once the
+    /// worker's model changed or the user pressed Play on a paused task.
+    case providerRecovered
     /// A `startTask` watch fired.
     case watchSatisfied(watchID: UUID)
 

@@ -383,6 +383,10 @@ public struct ToolContext: Sendable {
     /// The interrupted child tasks the runtime resumes on its own
     /// (`OrchestrationRuntime.automaticallyResumingChildTaskIDs`). Nil when the runtime is gone.
     public let automaticallyResumingChildTaskIDs: @Sendable () async -> Set<UUID>?
+    /// Reports that the calling agent's model can't be used (`ProviderOutage`), BEFORE the agent
+    /// stops: a worker's task is paused rather than failed, and no task starts on that model until
+    /// it changes or the user retries.
+    public let reportProviderUnavailable: @Sendable (ProviderOutage) async -> Void
     /// Whether the Security Agent scopes a worker's tool set from its task (the resolved
     /// orchestration setting). Decides what adding a required capability will change.
     public let scopesToolSetOnTaskStart: @Sendable () async -> Bool
@@ -510,6 +514,7 @@ public struct ToolContext: Sendable {
         maxChildTasksPerTask: @escaping @Sendable () async -> Int? = { nil },
         automaticallyResumingChildTaskIDs: @escaping @Sendable () async -> Set<UUID>? = { nil },
         scopesToolSetOnTaskStart: @escaping @Sendable () async -> Bool = { OrchestrationSettings.builtIn.scopeToolSetOnTaskStart },
+        reportProviderUnavailable: @escaping @Sendable (ProviderOutage) async -> Void = { _ in },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
         reconcileMemory: @escaping @Sendable (MemoryReconciliationRequest) async -> MemoryReconciliation = { _ in
@@ -580,6 +585,7 @@ public struct ToolContext: Sendable {
         self.maxChildTasksPerTask = maxChildTasksPerTask
         self.automaticallyResumingChildTaskIDs = automaticallyResumingChildTaskIDs
         self.scopesToolSetOnTaskStart = scopesToolSetOnTaskStart
+        self.reportProviderUnavailable = reportProviderUnavailable
         self.currentResumingTaskID = currentResumingTaskID
         self.memoryStore = memoryStore
         self.reconcileMemory = reconcileMemory

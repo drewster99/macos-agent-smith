@@ -156,7 +156,7 @@ public struct TaskStatusTransition: Sendable, Equatable {
     `.validationPassed(validationWasRun:)`, `.validationFailedNoProgress`, `.validationEscalated`,
     `.userAcceptanceRequested(validationWasRun:)`, `.userAcceptanceGranted(validationWasRun:)`,
     `.rejectionsReturned`, `.userPaused`, `.userStopped`, `.userAccepted`, `.userFailed`,
-    `.userRevalidated`, `.signOffContractChanged`, `.userSentBack`, `.capacityShed`, `.scheduledAction(TaskActionKind)`,
+    `.userRevalidated`, `.signOffContractChanged`, `.userSentBack`, `.capacityShed`, `.providerUnavailable`, `.scheduledAction(TaskActionKind)`,
     `.scheduledTimeReached`, `.helpRequested`, `.helpProvided`, `.workerSelfTerminated`,
     `.orphanRecovered`, `.smithSetStatus`, `.resetForRun`, `.reopenedForRun`,
     `.validationBlocked`, `.validationReleased`, `.templateLauncherNormalized`,
@@ -230,6 +230,7 @@ public struct TaskStatusTransition: Sendable, Equatable {
 | `.helpRequested` / `.helpProvided` | → awaitingHelp / → running | needs help / — | as today | — |
 | `.user*` (paused, stopped, accepted, failed, revalidated, sentBack) | per action | completed / failed / interrupted when reached | as today | `.userTaskAction` row |
 | `.capacityShed` | running → paused | — | as today | capacity row |
+| `.providerUnavailable` | running → interrupted (2026-10-06) | **no** (resumes on its own, like `.capacityShed`) | **yes** (paused, not failed; don't restart it) | the user-facing outage advisory, once per outage |
 | `.scheduledAction` / `.scheduledTimeReached` | per action / scheduled → pending | interrupted when reached | as today | — |
 | `.workerSelfTerminated` / `.orphanRecovered` | running → interrupted/failed | interrupted / failed | as today (`.agentLifecycle` row) | — |
 | `.smithSetStatus` | per `update_task`, never out of awaitingReview (2026-10-02), never validating → completed (2026-10-04) | per state reached | — (Smith did it) | — |
