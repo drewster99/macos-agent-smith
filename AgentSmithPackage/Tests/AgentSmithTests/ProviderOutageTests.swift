@@ -124,7 +124,9 @@ struct ProviderOutageTests {
 
     @Test("several workers failing on the same model tell the user once")
     func oneAdvisoryPerOutage() async throws {
-        let runtime = try makeRuntime(brownProvider: PaymentRequiredProvider())
+        // Both workers' calls fail together. If the first failed before the second Play reached the
+        // start gate, that Play would (rightly) retry the model and earn its own notice.
+        let runtime = try makeRuntime(brownProvider: JointlyRefusingProvider(arrivals: CallArrivals(), refuseAfter: 2))
         await configure(runtime, capacity: 2)
         await runtime.start()
         let store = await runtime.taskStore
@@ -228,6 +230,55 @@ struct ProviderOutageTests {
 
     // MARK: - Helpers
 
+    @Test("only a 429 that outlasted every retry is attributed to the model")
+    func retryExhaustionClassification() {
+        func kind(_ status: Int) -> ProviderUnavailableKind? {
+            ProviderUnavailableKind.afterRetriesExhausted(on: LLMProviderError.httpError(statusCode: status, body: "{}"))
+        }
+        #expect(kind(429) == .rateLimitExhausted)
+        #expect(kind(503) == nil, "a server fault says nothing about the account")
+        #expect(kind(500) == nil)
+        #expect(kind(408) == nil)
+        #expect(ProviderUnavailableKind.afterRetriesExhausted(on: URLError(.timedOut)) == nil)
+        #expect(ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 429, body: "{}")) == nil,
+                "a single 429 is transient")
+    }
+
+    @Test("a worker whose 429s outlast its retries pauses its task and holds other starts, never fails it")
+    func rateLimitExhaustionPauses() async throws {
+        let runtime = try makeRuntime(brownProvider: UsageLimitProvider())
+        await configure(runtime, capacity: 2)
+        await runtime.start()
+        let store = await runtime.taskStore
+        let first = await store.addTask(title: "First", description: "d")
+        let second = await store.addTask(title: "Second", description: "d")
+        await runtime.restartForNewTask(taskID: first.id, origin: .explicitUser)
+
+        // Cut the 50-attempt budget down so the exhaustion path runs in seconds.
+        #expect(try await waitUntil { await runtime.liveWorkerID(taskID: first.id) != nil })
+        let workerID = try #require(await runtime.liveWorkerID(taskID: first.id))
+        let worker = try #require(await runtime.liveAgent(id: workerID))
+        await worker.limitRetryAttemptsForTesting(to: 2)
+
+        #expect(try await waitUntil(timeout: .seconds(30)) { await store.task(id: first.id)?.status == .interrupted },
+                "the task was not paused")
+        #expect(await store.task(id: first.id)?.status != .failed)
+        let outage = try #require(await runtime.workerProviderOutage())
+        #expect(outage.kind == .rateLimitExhausted)
+        let messages = await runtime.channel.allMessages()
+        let stopLine = messages.first { $0.kind == .agentLifecycle && $0.content.contains("HTTP 429") }
+        #expect(stopLine?.content.contains("Its task is paused") == true)
+        #expect(stopLine?.severity == .warning)
+        #expect(messages.contains { $0.content.contains("once the provider's limit resets") },
+                "the advisory names the right way to retry")
+
+        // Another start waits on the outage instead of burning its own 50 retries.
+        await runtime.restartForNewTask(taskID: second.id, origin: .smithTool)
+        await runtime.waitForPendingRestarts()
+        #expect(await store.task(id: second.id)?.status == .pending)
+        await runtime.stopAll()
+    }
+
     private func configure(_ runtime: OrchestrationRuntime, capacity: Int) async {
         await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(
             autoRunNextTask: false,
@@ -249,6 +300,34 @@ struct ProviderOutageTests {
     /// Every call is refused with HTTP 402, as Ollama answers for a model outside the plan.
     private struct PaymentRequiredProvider: LLMProvider {
         func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
+            throw LLMProviderError.httpError(statusCode: 402, body: #"{"error":{"message":"This model is not in the Free plan."}}"#)
+        }
+    }
+
+    /// Every call is refused with HTTP 429 and no stated delay, as Ollama answers once a free-plan
+    /// usage limit is reached.
+    private struct UsageLimitProvider: LLMProvider {
+        func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
+            throw LLMProviderError.httpError(statusCode: 429, body: #"{"error":"You reached the Free usage limit."}"#)
+        }
+    }
+
+    private actor CallArrivals {
+        private(set) var count = 0
+        func arrive() { count += 1 }
+    }
+
+    /// Refuses with HTTP 402, but only once `refuseAfter` calls have arrived, so concurrent workers
+    /// all fail on the same outage.
+    private struct JointlyRefusingProvider: LLMProvider {
+        let arrivals: CallArrivals
+        let refuseAfter: Int
+
+        func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
+            await arrivals.arrive()
+            while await arrivals.count < refuseAfter {
+                try await Task.sleep(for: .milliseconds(10))
+            }
             throw LLMProviderError.httpError(statusCode: 402, body: #"{"error":{"message":"This model is not in the Free plan."}}"#)
         }
     }

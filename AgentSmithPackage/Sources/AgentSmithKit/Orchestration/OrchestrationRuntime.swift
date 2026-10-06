@@ -643,7 +643,7 @@ public actor OrchestrationRuntime {
             restartForNewTask(taskID: task.id, origin: .providerRecovered)
             return
         }
-        await taskStore.addUpdate(id: task.id, message: "Paused: the worker's model '\(outage.modelID)' can't be used — \(outage.kind.displayDescription). The task resumes when the worker's model is changed, or when you press Play after fixing the account.")
+        await taskStore.addUpdate(id: task.id, message: "Paused: the worker's model '\(outage.modelID)' can't be used — \(outage.kind.displayDescription). The task resumes when the worker's model is changed, or when you press Play \(outage.kind.retryCondition).")
         waitOnProvider(task.id, role: .brown)
         await recordWorkerOutage(outage)
     }
@@ -657,8 +657,8 @@ public actor OrchestrationRuntime {
 
     private func postProviderOutageAdvisory(_ outage: ProviderOutage) async {
         let consequence = outage.role == .brown
-            ? "No task will start on it until it is fixed. Tasks it stopped are paused, not failed, and resume on their own when you change the worker's model in Settings — or press Play on a paused task after fixing the account."
-            : "\(outage.role.displayName) stopped and can't work until it is fixed: change its model in Settings, or fix the account."
+            ? "No task will start on it until it is fixed. Tasks it stopped are paused, not failed, and resume on their own when you change the worker's model in Settings — or press Play on a paused task \(outage.kind.retryCondition)."
+            : "\(outage.role.displayName) stopped and can't work until it is fixed: change its model in Settings, or start it again \(outage.kind.retryCondition)."
         await channel.post(ChannelMessage(
             sender: .system,
             recipient: .user,
@@ -4573,6 +4573,9 @@ public actor OrchestrationRuntime {
         // never reused after this.
         if !preserveObserverCallbacks {
             await wakeScheduler?.stop()
+            // Not on a task start's cold path: that keeps this runtime and its store, so a summary
+            // in progress still lands.
+            await cancelBackgroundSummaries()
         }
         // A stop ends background summarizer work too: an auto-compaction would keep calling (and
         // billing) the Summarizer for a Smith being torn down.
@@ -5414,35 +5417,94 @@ public actor OrchestrationRuntime {
     /// Task summaries in progress (`summarizeAndEmbedTask`), so overlapping ones report busy once.
     private var summariesInFlight = 0
 
+    /// Background summaries in progress, keyed by a per-run token (a task can be summarized twice,
+    /// e.g. reopened and completed again), so a full Stop can cancel them and name each one.
+    private var backgroundSummaries: [UUID: BackgroundSummary] = [:]
+    /// Summaries a Stop cancelled and is waiting on, and whether each still wrote its summary.
+    private var stoppingSummaryTokens: Set<UUID> = []
+    private var stoppedSummaryWritten: [UUID: Bool] = [:]
+
+    private struct BackgroundSummary {
+        let taskID: UUID
+        let work: Task<Void, Never>
+    }
+
     /// Starts `summarizeAndEmbedTask` without waiting for it. Every automatic summary goes this way.
     func summarizeAndEmbedTaskInBackground(taskID: UUID) {
-        Task { [weak self] in
-            await self?.summarizeAndEmbedTask(taskID: taskID)
+        let token = UUID()
+        // The body's first step needs this actor, which is busy until this method returns — so the
+        // entry below is always recorded before `finishBackgroundSummary` looks for it.
+        let work = Task { [weak self] in
+            let written = await self?.summarizeAndEmbedTask(taskID: taskID) ?? false
+            await self?.finishBackgroundSummary(token, written: written)
+        }
+        backgroundSummaries[token] = BackgroundSummary(taskID: taskID, work: work)
+    }
+
+    private func finishBackgroundSummary(_ token: UUID, written: Bool) {
+        guard backgroundSummaries.removeValue(forKey: token) == nil else { return }
+        if stoppingSummaryTokens.contains(token) { stoppedSummaryWritten[token] = written }
+    }
+
+    /// A full Stop ends summaries still running: they would keep calling (and billing) the Summarizer
+    /// after the user stopped the session, and land on a task store the next Start retires. Each one
+    /// gets a moment to unwind — one already saving its result still lands — and each that wrote
+    /// nothing is named, since that task's summary is then never written.
+    private func cancelBackgroundSummaries() async {
+        let stopped = backgroundSummaries
+        backgroundSummaries.removeAll()
+        guard !stopped.isEmpty else { return }
+        stoppingSummaryTokens.formUnion(stopped.keys)
+        for summary in stopped.values { summary.work.cancel() }
+        let deadline = ContinuousClock.now.advanced(by: Self.stoppedSummaryUnwindLimit)
+        while stopped.keys.contains(where: { stoppedSummaryWritten[$0] == nil }), ContinuousClock.now < deadline {
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                break
+            }
+        }
+        stoppingSummaryTokens.subtract(stopped.keys)
+        for (token, summary) in stopped {
+            // Not finished within the limit counts as not written: it was cancelled, and its store
+            // is about to be dropped.
+            guard stoppedSummaryWritten.removeValue(forKey: token) != true else { continue }
+            let title = await taskStore.task(id: summary.taskID)?.title ?? summary.taskID.uuidString
+            await channel.post(ChannelMessage(
+                sender: .system,
+                recipient: .user,
+                content: "Stopped before the summary of \"\(title)\" was written. It won't come up as prior work in memory search.",
+                metadata: ["messageKind": .kind(.advisory), "taskID": .string(summary.taskID.uuidString), "severity": .severity(.warning)],
+                taskID: summary.taskID
+            ))
         }
     }
 
+    /// How long a Stop waits for cancelled summaries to unwind before reporting them unwritten.
+    private static let stoppedSummaryUnwindLimit: Duration = .seconds(2)
+
     /// Summarizes a completed or failed task and saves the embedding to the memory store. Errors are
-    /// posted to the channel.
-    public func summarizeAndEmbedTask(taskID: UUID) async {
-        guard let task = await taskStore.task(id: taskID) else { return }
-        guard task.status == .completed || (task.status == .failed && !task.updates.isEmpty) else { return }
+    /// posted to the channel. Returns whether a summary was written.
+    @discardableResult
+    public func summarizeAndEmbedTask(taskID: UUID) async -> Bool {
+        guard let task = await taskStore.task(id: taskID) else { return false }
+        guard task.status == .completed || (task.status == .failed && !task.updates.isEmpty) else { return false }
 
         // Summarization disabled: complete the task without writing a summary. Nothing is embedded,
         // so prior-task search simply won't surface this task. The call graph is unchanged.
-        guard orchestrationSettings.summarizeCompletedTasks else { return }
+        guard orchestrationSettings.summarizeCompletedTasks else { return false }
 
-        if let summarizer = taskSummarizer {
-            // Summaries run in the background and can overlap: the card shows busy until the LAST
-            // one ends, not the first.
-            summariesInFlight += 1
-            if summariesInFlight == 1 { await notifyProcessingStateChange(role: .summarizer, isProcessing: true) }
-            let summary = await summarizer.summarizeAndEmbed(task: task)
-            summariesInFlight -= 1
-            if summariesInFlight == 0 { await notifyProcessingStateChange(role: .summarizer, isProcessing: false) }
-            if let summary {
-                await taskStore.setSummary(id: taskID, summary: summary)
-            }
-        }
+        guard let summarizer = taskSummarizer else { return false }
+        // Summaries run in the background and can overlap: the card shows busy until the LAST one
+        // ends, not the first.
+        summariesInFlight += 1
+        if summariesInFlight == 1 { await notifyProcessingStateChange(role: .summarizer, isProcessing: true) }
+        let summary = await summarizer.summarizeAndEmbed(task: task)
+        summariesInFlight -= 1
+        if summariesInFlight == 0 { await notifyProcessingStateChange(role: .summarizer, isProcessing: false) }
+        guard let summary else { return false }
+        await taskStore.setSummary(id: taskID, summary: summary)
+        return true
     }
 
     /// Tells Smith the user acted on a task from the app UI (pause, stop, delete, Retry, Run Again).

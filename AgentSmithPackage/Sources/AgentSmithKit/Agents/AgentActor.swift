@@ -194,6 +194,14 @@ public actor AgentActor {
     /// unrelated 5xx cannot cut short a quota wait that was going to succeed.
     private var retryWindowBudget = LLMRetryPolicy.standardBudget
     private static let maxConsecutiveErrors = LLMRetryPolicy.maxAttempts
+    /// Tests only: ends a retry streak after this many attempts instead of the budget's, so the
+    /// exhaustion path can be exercised without waiting out a real budget.
+    private var retryAttemptLimitForTesting: Int?
+
+    /// Tests only: see `retryAttemptLimitForTesting`.
+    func limitRetryAttemptsForTesting(to attempts: Int) {
+        retryAttemptLimitForTesting = attempts
+    }
     /// A server-supplied `Retry-After` is always honored, but one at or above this is flagged
     /// in the transcript as unusually long so a multi-hour/day wait doesn't look like a hang
     /// and the user can intervene.
@@ -2194,13 +2202,29 @@ public actor AgentActor {
                     break
                 }
 
-                if consecutiveErrors >= retryWindowBudget.maxAttempts
+                if consecutiveErrors >= min(retryWindowBudget.maxAttempts, retryAttemptLimitForTesting ?? .max)
                     || retryWindowElapsed >= retryWindowBudget.maxElapsedSeconds {
+                    // A 429 that outlasted every retry is a limit only a person can lift: reported
+                    // BEFORE the stop like any unusable model, so a worker's task is PAUSED (and no
+                    // other task starts on that model) instead of the self-terminate path failing it.
+                    let providerUnavailable = failureWasProviderCall ? ProviderUnavailableKind.afterRetriesExhausted(on: error) : nil
+                    if let kind = providerUnavailable {
+                        await toolContext.reportProviderUnavailable(ProviderOutage(
+                            role: configuration.role,
+                            providerID: configuration.llmConfig.providerID,
+                            modelID: configuration.llmConfig.model,
+                            kind: kind,
+                            detail: error.localizedDescription
+                        ))
+                    }
                     // Name which bound fired, and what it usually means. A 429 that never states a
                     // delay and never clears is far more often an exhausted quota or an unpaid
                     // balance than a brief throttle — and that is something only the user can fix.
+                    let workerTaskPaused = providerUnavailable != nil && configuration.role == .brown
                     let stopReason: String
-                    if retryWindowElapsed >= retryWindowBudget.maxElapsedSeconds {
+                    if workerTaskPaused {
+                        stopReason = "stopped: the provider kept answering HTTP 429 (a rate or usage limit) through \(consecutiveErrors) attempts over \(Self.formatRetryDelay(retryWindowElapsed)). Its task is paused until the worker's model can be used."
+                    } else if retryWindowElapsed >= retryWindowBudget.maxElapsedSeconds {
                         stopReason = isRateLimited
                             ? "stopped: the provider returned HTTP 429 for \(Self.formatRetryDelay(retryWindowElapsed)) and never said when the limit resets. That is usually an exhausted quota or an unpaid balance rather than a brief throttle — check the provider account, or switch this agent's model, then re-run the task."
                             : "stopped after retrying for \(Self.formatRetryDelay(retryWindowElapsed)) without success."
@@ -2210,7 +2234,7 @@ public actor AgentActor {
                     await toolContext.post(ChannelMessage(
                         sender: .system,
                         content: "Agent \(configuration.role.displayName) \(stopReason)",
-                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
+                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(workerTaskPaused ? .warning : .error), "agentRole": .string(configuration.role.rawValue)]
                     ))
                     isRunning = false
                     break

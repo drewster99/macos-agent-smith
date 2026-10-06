@@ -16,6 +16,10 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
     case forbidden
     /// HTTP 404: the provider doesn't know this model.
     case modelNotFound
+    /// HTTP 429 through an agent's whole retry budget: a rate or usage limit that did not lift
+    /// (Ollama's free-plan usage limit, an exhausted quota). Never returned by `of(_:)` — a single
+    /// 429 is transient — only by `afterRetriesExhausted(on:)`.
+    case rateLimitExhausted
 
     /// The kind of `error`, or nil when it is not an account/model problem. A malformed request,
     /// a content-policy refusal or a context overflow belongs to ONE conversation, not the model.
@@ -41,6 +45,16 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
         }
     }
 
+    /// The kind of an agent's LAST error when its retry budget ran out, or nil when running out of
+    /// retries says nothing about the model. A 429 that outlasted every retry is a limit only a
+    /// person can lift; any other transient fault (a 5xx, a timeout) is not attributed to the model.
+    public static func afterRetriesExhausted(on error: Error) -> ProviderUnavailableKind? {
+        guard let providerError = error as? LLMProviderError,
+              case .httpError(let statusCode, _, _, _) = providerError,
+              statusCode == 429 else { return nil }
+        return .rateLimitExhausted
+    }
+
     /// Whether a 403's error object carries OpenRouter's moderation metadata (`error.metadata.reasons`
     /// or `error.metadata.flagged_input`). Keyed on the field names, never the message text. A body
     /// that isn't such an object reads as not a moderation refusal.
@@ -57,6 +71,14 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
         return metadata["reasons"] != nil || metadata["flagged_input"] != nil
     }
 
+    /// What the user does before pressing Play, finishing "press Play on a paused task …".
+    public var retryCondition: String {
+        switch self {
+        case .rateLimitExhausted: return "once the provider's limit resets"
+        case .paymentRequired, .spendLimitReached, .unauthorized, .forbidden, .modelNotFound: return "after fixing the account"
+        }
+    }
+
     /// A few words for messages.
     public var displayDescription: String {
         switch self {
@@ -65,6 +87,7 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
         case .unauthorized: return "the API key was rejected"
         case .forbidden: return "the account isn't allowed to use this model"
         case .modelNotFound: return "the provider doesn't know this model"
+        case .rateLimitExhausted: return "the provider kept refusing with HTTP 429 (a rate or usage limit) through every retry"
         }
     }
 }
