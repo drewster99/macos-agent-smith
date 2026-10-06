@@ -1170,7 +1170,7 @@ public actor OrchestrationRuntime {
         case .historyChanged:
             return "Smith's context changed while it was being summarized (cleared, pruned, switched model, or compacted by another summary), so the summary was discarded. Its context is unchanged."
         case .superseded:
-            return "Another summary of Smith's context, covering more of it, is being applied instead of this one."
+            return "Another summary of Smith's context, covering at least as much of it, is being applied instead of this one."
         }
     }
 

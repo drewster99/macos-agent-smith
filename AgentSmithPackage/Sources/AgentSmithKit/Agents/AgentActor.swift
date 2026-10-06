@@ -1145,8 +1145,8 @@ public actor AgentActor {
         /// cleared, pruned, or rewritten for a model switch since the summary's snapshot — so the
         /// summary no longer describes what it would replace, and is discarded.
         case historyChanged
-        /// Another summary for the same boundary covers more of the history; that one is applied
-        /// instead.
+        /// Another summary for the same boundary covers at least as much of the history; that one is
+        /// applied instead.
         case superseded
     }
 
@@ -2221,7 +2221,7 @@ public actor AgentActor {
                 // stopping is strictly more useful than continuing to hammer a billing block.
                 if isPersistentClientError {
                     // An account or model problem (not this conversation's): reported BEFORE the
-                    // stop, so the runtime pauses this agent's task instead of the self-terminate
+                    // stop, so the runtime puts this agent's task on hold instead of the self-terminate
                     // path failing it, and stops starting tasks on a model that can't run them.
                     let kind = failureWasProviderCall ? ProviderUnavailableKind.of(error) : nil
                     let handling = await reportProviderUnavailable(kind, error: error)
@@ -2240,7 +2240,7 @@ public actor AgentActor {
                 if consecutiveErrors >= min(retryWindowBudget.maxAttempts, retryAttemptLimitForTesting ?? .max)
                     || retryWindowElapsed >= retryWindowBudget.maxElapsedSeconds {
                     // A 429 that outlasted every retry is a limit only a person can lift: reported
-                    // BEFORE the stop like any unusable model, so a worker's task is PAUSED (and no
+                    // BEFORE the stop like any unusable model, so a worker's task is put ON HOLD (and no
                     // other task starts on that model) instead of the self-terminate path failing it.
                     let kind = failureWasProviderCall ? ProviderUnavailableKind.afterRetriesExhausted(on: error) : nil
                     let handling = await reportProviderUnavailable(kind, error: error)
