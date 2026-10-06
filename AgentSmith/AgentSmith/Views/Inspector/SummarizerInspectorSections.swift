@@ -77,10 +77,23 @@ private struct SummarizerProblemHistory: View {
     let messages: [ChannelMessage]
 
     var body: some View {
-        let problems = Array(messages.filter { $0.severity >= .warning }.prefix(20))
-        if !problems.isEmpty {
-            InspectorSection(title: "Errors and retries — all runs (newest \(problems.count))") {
-                ForEach(problems) { message in
+        // Errors and retry warnings are capped separately: a single retry storm posts up to 50
+        // warnings, and the card's "New error" link opens this list — the error must be in it.
+        let errors = Array(messages.filter { $0.severity >= .error }.prefix(20))
+        let retries = Array(messages.filter { $0.severity == .warning }.prefix(20))
+        SummarizerProblemSection(title: "Errors — all runs (newest \(errors.count))", messages: errors)
+        SummarizerProblemSection(title: "Retries and warnings — all runs (newest \(retries.count))", messages: retries)
+    }
+}
+
+private struct SummarizerProblemSection: View {
+    let title: String
+    let messages: [ChannelMessage]
+
+    var body: some View {
+        if !messages.isEmpty {
+            InspectorSection(title: title) {
+                ForEach(messages) { message in
                     SummarizerActivityRow(message: message)
                 }
             }

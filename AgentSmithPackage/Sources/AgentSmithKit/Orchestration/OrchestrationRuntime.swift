@@ -940,6 +940,8 @@ public actor OrchestrationRuntime {
         guard orchestrationSettings.summarizeForContextCompaction else { return }
         let result = await compactSmithContext(trigger: .auto)
         stopLogger.notice("Auto-compact after task termination: \(result, privacy: .public)")
+        // Stopped mid-call: a Stop is not a compaction failure to report.
+        guard !Task.isCancelled else { return }
         await channel.post(ChannelMessage(
             sender: .system,
             content: "Automatic context maintenance: \(result)",
@@ -971,9 +973,8 @@ public actor OrchestrationRuntime {
         guard snapshot.count > Self.compactionRecentTurnsKept + 3 else {
             return "Smith's context is only \(snapshot.count) message(s) — nothing to compact."
         }
-        let summarizerRole: AgentRole = .summarizer
-        guard let provider = llmProviders[summarizerRole], let config = llmConfigs[summarizerRole] else {
-            return "No Summarizer model is assigned, so Smith's context can't be compacted. Assign one in the Agents inspector; until then automatic pruning keeps Smith's context bounded."
+        guard llmProviders[.summarizer] != nil, llmConfigs[.summarizer] != nil else {
+            return Self.noSummarizerForCompactionLine
         }
 
         let transcript = Self.renderTranscriptForCompaction(snapshot)
@@ -995,34 +996,63 @@ public actor OrchestrationRuntime {
             .user(transcript)
         ]
 
-        // Billed to whichever role's model made the call, so it is inspected under that role too.
-        let inspectorRef: AgentInstanceRef = summarizerRole == .summarizer
-            ? summarizerInspectorRef
-            : AgentInstanceRef(role: .smith, instanceID: smithHandle.id)
         let annotation = LLMCallAnnotation(operation: .contextCompaction)
-        let response: LLMResponse
-        let callStart = Date()
-        do {
-            response = try await provider.send(
-                messages: messages,
-                tools: [],
-                overrides: LLMCallOverrides(maxOutputTokens: 5000)
-            )
-        } catch {
-            onLLMCallRecorded?(inspectorRef, .failed(LLMCallFailureRecord(
-                error: error, startedAt: callStart, modelID: config.model, providerID: config.providerID,
-                annotation: annotation)))
-            return "Compaction failed — the summary call errored: \(error.localizedDescription). Smith's context is unchanged."
+        // Retried through the one retry policy, its waits published on the board like every other
+        // LLM caller's. The provider and model are read per attempt, so a model change during a
+        // wait retries on the new model.
+        let streakStartedAt = Date()
+        var attempt = 0
+        var answered: (response: LLMResponse, config: ModelConfiguration, callStart: Date)?
+        while answered == nil {
+            attempt += 1
+            guard let provider = llmProviders[.summarizer], let config = llmConfigs[.summarizer] else {
+                return Self.noSummarizerForCompactionLine
+            }
+            let modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .summarizer)
+            let callStart = Date()
+            do {
+                let response = try await provider.send(
+                    messages: messages,
+                    tools: [],
+                    overrides: LLMCallOverrides(maxOutputTokens: 5000)
+                )
+                answered = (response, config, callStart)
+            } catch {
+                // A Stop cancelled the call: not a failure, and nothing to retry.
+                if Task.isCancelled { return Self.compactionStoppedLine }
+                onLLMCallRecorded?(summarizerInspectorRef, .failed(LLMCallFailureRecord(
+                    error: error, startedAt: callStart, modelID: config.model, providerID: config.providerID,
+                    annotation: annotation)))
+                guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
+                      attempt < LLMRetryPolicy.maxAttempts else {
+                    return "Compaction failed — the summary call errored: \(error.localizedDescription). Smith's context is unchanged."
+                }
+                let delay = LLMRetryPolicy.delay(attempt: attempt, retryAfter: retryAfter)
+                let wait = ProviderWait(
+                    holder: ProviderWaitHolder(role: .summarizer, purpose: .contextCompaction),
+                    reason: LLMRetryPolicy.waitReason(for: error),
+                    providerID: config.providerID,
+                    modelID: config.model,
+                    streakStartedAt: streakStartedAt,
+                    resumesAt: Date().addingTimeInterval(delay),
+                    attempt: attempt
+                )
+                switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait, modelEpochAtAttempt: modelEpochAtAttempt) {
+                case .elapsed, .wokenForModelChange: continue
+                case .cancelled: return Self.compactionStoppedLine
+                }
+            }
         }
+        guard let (response, config, callStart) = answered else { return Self.compactionStoppedLine }
         let compactionLatencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
-        onLLMCallRecorded?(inspectorRef, .completed(LLMTurnRecord(
+        onLLMCallRecorded?(summarizerInspectorRef, .completed(LLMTurnRecord(
             inputDelta: [],
             response: response,
             totalMessageCount: messages.count,
             contextSnapshot: messages,
             latencyMs: compactionLatencyMs,
             modelID: config.model,
-            providerType: providerAPITypes[summarizerRole]?.rawValue ?? "",
+            providerType: providerAPITypes[.summarizer]?.rawValue ?? "",
             providerID: config.providerID,
             temperature: config.temperature,
             maxOutputTokens: 5000,
@@ -1034,10 +1064,10 @@ public actor OrchestrationRuntime {
         await UsageRecorder.record(
             response: response,
             context: LLMCallContext(
-                agentRole: summarizerRole,
+                agentRole: .summarizer,
                 taskID: nil,
                 modelID: config.model,
-                providerType: providerAPITypes[summarizerRole]?.rawValue ?? "",
+                providerType: providerAPITypes[.summarizer]?.rawValue ?? "",
                 providerID: config.providerID,
                 configuration: config,
                 sessionID: currentSessionID
@@ -1064,6 +1094,9 @@ public actor OrchestrationRuntime {
         return Self.compactionResultLine(outcome)
     }
 
+    private static let noSummarizerForCompactionLine = "No Summarizer model is assigned, so Smith's context can't be compacted. Assign one in the Agents inspector; until then automatic pruning keeps Smith's context bounded."
+    private static let compactionStoppedLine = "Compaction stopped before the summary was written. Smith's context is unchanged."
+
     /// The user-facing line for a compaction outcome.
     private static func compactionResultLine(_ outcome: AgentActor.CompactionOutcome) -> String {
         switch outcome {
@@ -1074,7 +1107,7 @@ public actor OrchestrationRuntime {
         case .deferredToTurnEnd:
             return "Smith is mid-turn — the summary is ready and will be applied as soon as that turn ends."
         case .historyChanged:
-            return "Smith's context changed while it was being summarized (cleared, pruned, or switched model), so the summary was discarded. Its context is unchanged."
+            return "Smith's context changed while it was being summarized (cleared, pruned, switched model, or compacted by another summary), so the summary was discarded. Its context is unchanged."
         case .superseded:
             return "A newer summary of Smith's context replaced this one before it was applied."
         }
@@ -1100,7 +1133,7 @@ public actor OrchestrationRuntime {
         if let snapshots { captureCompaction(snapshots, trigger: trigger) }
         await channel.post(ChannelMessage(
             sender: .system,
-            content: "Context maintenance (applied after Smith's turn): \(Self.compactionResultLine(outcome))",
+            content: "Context maintenance (after Smith's turn): \(Self.compactionResultLine(outcome))",
             metadata: ["messageKind": .kind(.contextManagement)]
         ))
     }
@@ -3587,6 +3620,7 @@ public actor OrchestrationRuntime {
         guard !aborted, !stopRequested else { return }
         startInProgress = true
         defer { startInProgress = false }
+        acceptsBackgroundSummaries = true
 
         // Mint a fresh session ID for this run. Propagated to every agent, evaluator,
         // and summarizer so their UsageRecords carry it, and published to the
@@ -5432,8 +5466,22 @@ public actor OrchestrationRuntime {
         let work: Task<Void, Never>
     }
 
+    /// False from a full Stop until the next start: a completion that lands while Stop runs (its
+    /// lifecycle step queued behind the Stop) must not start a summary nobody will cancel.
+    private var acceptsBackgroundSummaries = true
+
     /// Starts `summarizeAndEmbedTask` without waiting for it. Every automatic summary goes this way.
     func summarizeAndEmbedTaskInBackground(taskID: UUID) {
+        guard acceptsBackgroundSummaries else {
+            Task { [weak self] in await self?.postSummaryNotWritten(taskID: taskID, certain: true) }
+            return
+        }
+        // A newer run for the same task (reopened or retried and finished again) supersedes an
+        // older one still running, which would otherwise overwrite it with an older snapshot.
+        for (earlierToken, earlier) in backgroundSummaries where earlier.taskID == taskID {
+            earlier.work.cancel()
+            backgroundSummaries.removeValue(forKey: earlierToken)
+        }
         let token = UUID()
         // The body's first step needs this actor, which is busy until this method returns — so the
         // entry below is always recorded before `finishBackgroundSummary` looks for it.
@@ -5453,6 +5501,7 @@ public actor OrchestrationRuntime {
     /// after the user stopped the session, and land on a task store the next Start retires. Returns
     /// the cancelled ones for `reportUnwrittenSummaries`.
     private func cancelBackgroundSummaries() -> [UUID: BackgroundSummary] {
+        acceptsBackgroundSummaries = false
         let stopped = backgroundSummaries
         backgroundSummaries.removeAll()
         stoppingSummaryTokens.formUnion(stopped.keys)
@@ -5462,6 +5511,8 @@ public actor OrchestrationRuntime {
 
     /// Gives each cancelled summary a moment to unwind — one already saving its result still
     /// lands — and names each that wrote nothing, since that task's summary is then never written.
+    /// One still unwinding at the limit is named as possibly unwritten: a save already under way
+    /// (the embedding ignores cancellation) can still land after it.
     private func reportUnwrittenSummaries(_ stopped: [UUID: BackgroundSummary]) async {
         guard !stopped.isEmpty else { return }
         let deadline = ContinuousClock.now.advanced(by: Self.stoppedSummaryUnwindLimit)
@@ -5474,18 +5525,25 @@ public actor OrchestrationRuntime {
         }
         stoppingSummaryTokens.subtract(stopped.keys)
         for (token, summary) in stopped {
-            // Not finished within the limit counts as not written: it was cancelled, and its store
-            // is about to be dropped.
-            guard stoppedSummaryWritten.removeValue(forKey: token) != true else { continue }
-            let title = await taskStore.task(id: summary.taskID)?.title ?? summary.taskID.uuidString
-            await channel.post(ChannelMessage(
-                sender: .system,
-                recipient: .user,
-                content: "Stopped before the summary of \"\(title)\" was written. It won't come up as prior work in memory search.",
-                metadata: ["messageKind": .kind(.advisory), "taskID": .string(summary.taskID.uuidString), "severity": .severity(.warning)],
-                taskID: summary.taskID
-            ))
+            switch stoppedSummaryWritten.removeValue(forKey: token) {
+            case true?: continue
+            case false?: await postSummaryNotWritten(taskID: summary.taskID, certain: true)
+            case nil: await postSummaryNotWritten(taskID: summary.taskID, certain: false)
+            }
         }
+    }
+
+    private func postSummaryNotWritten(taskID: UUID, certain: Bool) async {
+        let title = await taskStore.task(id: taskID)?.title ?? taskID.uuidString
+        await channel.post(ChannelMessage(
+            sender: .system,
+            recipient: .user,
+            content: certain
+                ? "Stopped before the summary of \"\(title)\" was written. It won't come up as prior work in memory search."
+                : "Stopped while the summary of \"\(title)\" was being written. It may not come up as prior work in memory search.",
+            metadata: ["messageKind": .kind(.advisory), "taskID": .string(taskID.uuidString), "severity": .severity(.warning)],
+            taskID: taskID
+        ))
     }
 
     /// How long a Stop waits for cancelled summaries to unwind before reporting them unwritten.

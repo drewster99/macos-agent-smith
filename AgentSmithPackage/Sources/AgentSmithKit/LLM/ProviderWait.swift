@@ -39,6 +39,8 @@ public enum ProviderWaitPurpose: Sendable, Hashable {
     case memoryReconciliation
     /// The summarizer extracting an answer from fetched web content.
     case webContentExtraction
+    /// The summarizer compacting Smith's context.
+    case contextCompaction
 }
 
 /// Who is waiting.

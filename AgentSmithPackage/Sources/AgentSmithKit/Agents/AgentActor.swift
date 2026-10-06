@@ -119,9 +119,18 @@ public actor AgentActor {
     /// written after `handleResponse` returns.
     private var turnToolExecutionMs: Int = 0
     private var turnToolResultChars: Int = 0
-    /// Set after context pruning to prevent re-using stale token counts from `llmTurns`.
-    /// Cleared on the next successful LLM response.
+    /// Set whenever the history is rewritten (prune, compaction splice, `/clear`) to prevent
+    /// re-using stale token counts from `llmTurns`. Cleared on the next successful LLM response —
+    /// unless the history was rewritten again while that call was in flight
+    /// (`historyRewriteCount`), since its usage then describes the history before the rewrite.
     private var lastUsageStale = false
+    /// Counts history rewrites (`markHistoryRewritten`).
+    private var historyRewriteCount = 0
+
+    private func markHistoryRewritten() {
+        lastUsageStale = true
+        historyRewriteCount += 1
+    }
 
     /// How long the idle loop waits between checks. Mutable so the user can adjust at runtime.
     private var pollInterval: TimeInterval
@@ -1100,6 +1109,7 @@ public actor AgentActor {
             conversationHistory.append(.user(orientation))
         }
         lastTurnMessageCount = conversationHistory.count
+        markHistoryRewritten()
         toolFailureStreaks.removeAll()
         toolFailureWarnedTools.removeAll()
         lastToolCallSignature = nil
@@ -1135,7 +1145,8 @@ public actor AgentActor {
         /// cleared, pruned, or rewritten for a model switch since the summary's snapshot — so the
         /// summary no longer describes what it would replace, and is discarded.
         case historyChanged
-        /// A newer summary arrived while this one was held; the newer one is applied instead.
+        /// Another summary for the same boundary covers more of the history; that one is applied
+        /// instead.
         case superseded
     }
 
@@ -1152,7 +1163,7 @@ public actor AgentActor {
     }
 
     /// A summary that arrived mid-tool-turn, waiting for the loop top (`applyPendingCompaction`).
-    /// A newer one replaces it: it covers at least as much.
+    /// Of two for one boundary, the one whose snapshot covers more is kept.
     private var pendingCompaction: PendingCompaction?
 
     /// Whether a summary is waiting for the loop top — so no second summary is started over a
@@ -1187,19 +1198,28 @@ public actor AgentActor {
         captureSnapshots: Bool = false,
         onDeferredApplication: DeferredCompactionReport? = nil
     ) -> CompactionOutcome {
-        // Single-writer: never splice while the run loop is mid-tool-turn.
-        guard !isProcessingToolTurn else {
-            if let replaced = pendingCompaction {
-                let report = replaced.report
-                Task { await report?(.superseded, nil) }
-            }
-            pendingCompaction = PendingCompaction(
+        // Single-writer: never splice while the run loop is mid-tool-turn — nor ahead of a `/clear`
+        // or a held summary already waiting for the loop top (between a turn's end and the loop
+        // top, `isProcessingToolTurn` is already false). Held, it meets them in order there.
+        guard !isProcessingToolTurn, !pendingResetRequested, pendingCompaction == nil else {
+            let arriving = PendingCompaction(
                 summaryText: summaryText,
                 summarizedSnapshot: summarizedSnapshot,
                 keepingRecentTurns: keepingRecentTurns,
                 captureSnapshots: captureSnapshots,
                 report: onDeferredApplication
             )
+            // Two summaries for one boundary: keep the one that covers more (they can finish out of
+            // order — a manual /compact started before an automatic one can finish after it).
+            if let held = pendingCompaction,
+               held.summarizedSnapshot.count > arriving.summarizedSnapshot.count {
+                return .superseded
+            }
+            if let replaced = pendingCompaction {
+                let report = replaced.report
+                Task { await report?(.superseded, nil) }
+            }
+            pendingCompaction = arriving
             return .deferredToTurnEnd
         }
         return spliceCompaction(
@@ -1240,12 +1260,8 @@ public actor AgentActor {
         // system + summary + tail must actually shrink the history to be worth it.
         guard summarizedSnapshot.count > keepingRecentTurns + 3 else { return .tooSmall }
 
-        // Where the kept tail starts, measured on the SNAPSHOT (skipping `.tool` results so a
-        // tool_use/tool_result pair is never split).
+        // Where the kept tail starts, measured on the SNAPSHOT.
         var tailStart = max(1, summarizedSnapshot.count - keepingRecentTurns)
-        while tailStart < summarizedSnapshot.count, summarizedSnapshot[tailStart].role == .tool {
-            tailStart += 1
-        }
         // Only `[1..<tailStart]` is replaced by the summary, so only that span must still be what
         // was summarized. The system prompt (`[0]`, which a prompt edit replaces) and the tail
         // (whose last user turn a newly drained message may be merged into) are kept from the
@@ -1253,6 +1269,14 @@ public actor AgentActor {
         guard count >= tailStart,
               conversationHistory[1..<tailStart].elementsEqual(summarizedSnapshot[1..<tailStart]) else {
             return .historyChanged
+        }
+        // Never start the tail on a tool result: move back onto the assistant turn that owns it,
+        // so a tool_use/tool_result pair is never split. Backwards, never forwards — skipping
+        // forward could pass the snapshot's end and keep results whose call was summarized away
+        // (a snapshot taken mid-turn ends in results; the rest of them arrive after it), which
+        // providers reject. The span shrinks, so it stays verified.
+        while tailStart > 1, tailStart < count, conversationHistory[tailStart].role == .tool {
+            tailStart -= 1
         }
 
         var compacted: [LLMMessage] = [conversationHistory[0]]
@@ -1269,6 +1293,7 @@ public actor AgentActor {
         pendingPreResetTokens = llmTurns.last?.usage?.inputTokens
         conversationHistory = compacted
         lastTurnMessageCount = conversationHistory.count
+        markHistoryRewritten()
         pushLiveContext()
         return .compacted(before: count, after: compacted.count)
     }
@@ -1824,6 +1849,7 @@ public actor AgentActor {
                 let messagesForLLM = conversationHistory
 
                 let llmStartTime = Date()
+                let historyRewriteCountAtCall = historyRewriteCount
                 // Read before the call: a model change that lands while it is in flight must end
                 // a retry sleep this attempt's failure would otherwise start (`ProviderWaitBoard`).
                 modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: configuration.role)
@@ -1863,7 +1889,9 @@ public actor AgentActor {
                 consecutiveContextOverflows = 0
                 consecutiveServerMemoryExhaustions = 0
                 consecutivePruneRebuilds = 0
-                lastUsageStale = false
+                // This call's usage measures the history it was sent; a rewrite during the call
+                // (a compaction landing, a `/clear`) makes it stale for the shorter history.
+                if historyRewriteCount == historyRewriteCountAtCall { lastUsageStale = false }
                 // Defensive clamp: every site that reassigns `conversationHistory` resets
                 // `lastTurnMessageCount` synchronously, so today it can't exceed the count —
                 // but this actor is re-entrant, and a partial-range slice would trap. An
@@ -4805,7 +4833,7 @@ public actor AgentActor {
         newHistory.append(contentsOf: conversationHistory[keepFromIndex...])
         conversationHistory = newHistory
         lastTurnMessageCount = conversationHistory.count
-        lastUsageStale = true
+        markHistoryRewritten()
         pushLiveContext()
 
         let roleName = configuration.role.displayName
@@ -4884,7 +4912,7 @@ public actor AgentActor {
         newHistory.append(contentsOf: conversationHistory[keepFromIndex...])
         conversationHistory = newHistory
         lastTurnMessageCount = conversationHistory.count
-        lastUsageStale = true
+        markHistoryRewritten()
         // The pruned slice may or may not have included Brown's last task_update;
         // either way, post-prune counts start fresh against the kept slice.
         if configuration.role == .brown {
@@ -5012,7 +5040,7 @@ public actor AgentActor {
 
         lastTurnMessageCount = conversationHistory.count
         llmTurns.removeAll()
-        lastUsageStale = true
+        markHistoryRewritten()
         hasUnprocessedInput = true
         pushLiveContext()
 

@@ -172,6 +172,8 @@ actor TaskSummarizer {
         do {
             response = try await provider.send(messages: messages, tools: [])
         } catch {
+            // A call cancelled by a Stop did not fail; it is not recorded as one.
+            if Task.isCancelled { throw error }
             onLLMCallRecorded?(.failed(LLMCallFailureRecord(
                 error: error,
                 startedAt: callStart,
@@ -258,6 +260,9 @@ actor TaskSummarizer {
             do {
                 summary = try await generateSummary(for: task, annotation: annotation.forCall(attempt))
             } catch {
+                // Cancelled (a Stop): a cancelled transfer throws URLError.cancelled, which reads as
+                // transient, so leave before it is classified and announced as a retry.
+                if Task.isCancelled { break }
                 lastError = error
                 if case SummarizerError.emptyResponse = error { emptyResponses += 1 }
                 guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
@@ -291,6 +296,9 @@ actor TaskSummarizer {
             return nil
         }
 
+        // Cancelled after the summary came back: nothing has been saved yet, so leave it unsaved —
+        // the caller reports it as not written, and that must be true.
+        if Task.isCancelled { return nil }
         do {
             try await memoryStore.saveTaskSummary(task: task, summary: summary, status: task.status)
         } catch {
