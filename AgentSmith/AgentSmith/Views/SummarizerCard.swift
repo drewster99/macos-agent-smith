@@ -18,6 +18,8 @@ struct SummarizerCard: View {
     let executingTools: [String]
     /// Soonest resumption first.
     let providerWaits: [ProviderWait]
+    /// Newest first (`SummarizerCardData.unseenErrors`).
+    let unseenErrors: [ChannelMessage]
     let currentSystemPrompt: String
     let pollInterval: TimeInterval
     let maxToolCalls: Int
@@ -45,6 +47,13 @@ struct SummarizerCard: View {
                 onOpenWindow: openInspector,
                 onShowConfig: { showingConfig = true }
             )
+
+            SummarizerUnseenErrorsLine(errors: unseenErrors, onOpen: { [viewModel] in
+                // The window may already be open (its `onAppear` won't fire again): clicking the
+                // line is itself seeing the errors.
+                viewModel.acknowledgeSummarizerErrors()
+                openInspector()
+            })
 
             HStack(spacing: 6) {
                 Text("Session")
@@ -80,6 +89,35 @@ struct SummarizerCard: View {
 
     private func openInspector() {
         openWindow(value: AgentInspectorTarget(sessionID: viewModel.session.id, role: .summarizer))
+    }
+}
+
+/// "N new errors — <the newest>", until the user opens the Summarizer inspector. Renders nothing
+/// when there are none.
+private struct SummarizerUnseenErrorsLine: View {
+    let errors: [ChannelMessage]
+    let onOpen: () -> Void
+
+    var body: some View {
+        if let newest = errors.first {
+            Button(action: onOpen, label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundStyle(AppColors.inspectorCallFailed)
+                    Text(errors.count == 1 ? "New error: \(newest.content)" : "\(errors.count) new errors — latest: \(newest.content)")
+                        .lineLimit(2)
+                        .foregroundStyle(AppColors.inspectorCallFailed)
+                    Spacer(minLength: 0)
+                }
+                .font(AppFonts.inspectorLabel)
+                .contentShape(Rectangle())
+            })
+            .buttonStyle(.plain)
+            .help("Open the Summarizer inspector")
+            .padding(.leading, 28)
+            .padding(.trailing, 12)
+            .padding(.bottom, 4)
+        }
     }
 }
 

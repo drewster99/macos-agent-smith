@@ -302,6 +302,16 @@ final class AppViewModel {
     /// Roles of agents that are currently waiting for an LLM response.
     var processingRoles: Set<AgentRole> = []
 
+    /// The Summarizer's errors up to this moment have been seen: its card flags only newer ones,
+    /// until the user opens the Summarizer inspector (`acknowledgeSummarizerErrors`). Starts when
+    /// this session's view model is created — errors from earlier runs are history, listed in the
+    /// inspector, not news.
+    private(set) var summarizerErrorsSeenThrough = Date()
+
+    func acknowledgeSummarizerErrors() {
+        summarizerErrorsSeenThrough = Date()
+    }
+
     /// True while the Security Agent is doing ANY LLM work — evaluating a tool call, or scoping a
     /// task's tools. Two genuinely different operations, each with exactly one source: evaluations
     /// come from the registry `SecurityEvaluator` writes, scoping from its own processing signal.

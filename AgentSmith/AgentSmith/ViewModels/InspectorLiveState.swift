@@ -232,7 +232,10 @@ final class InspectorLiveState {
             isProcessing: viewModel.processingRoles.contains(.summarizer),
             executingTools: Self.executingToolNames(viewModel.toolExecutingByRole[.summarizer]),
             providerWaits: providerWaits,
-            messages: bucketed[.summarizer] ?? []
+            messages: bucketed[.summarizer] ?? [],
+            unseenErrors: Array((bucketed[.summarizer] ?? [])
+                .filter { $0.severity >= .error && $0.timestamp > viewModel.summarizerErrorsSeenThrough }
+                .reversed())
         )
     }
 
@@ -538,6 +541,9 @@ struct SummarizerCardData: Equatable {
     /// The summarizer's calls sleeping on their provider, soonest resumption first.
     let providerWaits: [ProviderWait]
     let messages: [ChannelMessage]
+    /// Errors the Summarizer posted since the user last opened its inspector, newest first. The
+    /// card flags them: a failed summary or memory merge otherwise scrolled away in the transcript.
+    let unseenErrors: [ChannelMessage]
 }
 
 /// One live task: its title + stage, its Brown's micro-state, and its recent tool calls.

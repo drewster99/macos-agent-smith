@@ -131,20 +131,27 @@ private struct SummarizerAgentCardContent: View {
             isProcessing: data.isProcessing,
             executingTools: data.executingTools,
             providerWaits: data.providerWaits,
+            unseenErrors: data.unseenErrors,
             currentSystemPrompt: data.currentSystemPrompt,
             pollInterval: data.pollInterval,
             maxToolCalls: data.maxToolCalls,
             speechController: viewModel.shared.speechController,
-            onUpdateSystemPrompt: { [viewModel] prompt in
-                Task { await viewModel.updateSystemPrompt(for: .summarizer, prompt: prompt) }
-            },
-            onUpdatePollInterval: { [viewModel] interval in
-                Task { await viewModel.updatePollInterval(for: .summarizer, interval: interval) }
-            },
-            onUpdateMaxToolCalls: { [viewModel] count in
-                Task { await viewModel.updateMaxToolCalls(for: .summarizer, count: count) }
-            }
+            onUpdateSystemPrompt: updateSystemPrompt,
+            onUpdatePollInterval: updatePollInterval,
+            onUpdateMaxToolCalls: updateMaxToolCalls
         )
+    }
+
+    private func updateSystemPrompt(_ prompt: String) {
+        Task { [viewModel] in await viewModel.updateSystemPrompt(for: .summarizer, prompt: prompt) }
+    }
+
+    private func updatePollInterval(_ interval: TimeInterval) {
+        Task { [viewModel] in await viewModel.updatePollInterval(for: .summarizer, interval: interval) }
+    }
+
+    private func updateMaxToolCalls(_ count: Int) {
+        Task { [viewModel] in await viewModel.updateMaxToolCalls(for: .summarizer, count: count) }
     }
 }
 

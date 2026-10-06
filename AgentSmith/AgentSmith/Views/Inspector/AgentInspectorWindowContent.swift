@@ -31,6 +31,15 @@ struct AgentInspectorWindowContent: View {
             SummarizerInspectorSections(
                 callLog: viewModel.inspectorStore.callLogsByRole[.summarizer],
                 recentMessages: Array(roleMessages.reversed()), expandedCallIDs: $expandedCallIDs)
+                // Opening the inspector is seeing the errors: clear the card's flag. Deferred out
+                // of the lifecycle closure (project rule for state writes there).
+                .onAppear { [viewModel] in
+                    DispatchQueue.main.async { viewModel.acknowledgeSummarizerErrors() }
+                }
+                // Errors that arrived while the window was open were seen too.
+                .onDisappear { [viewModel] in
+                    DispatchQueue.main.async { viewModel.acknowledgeSummarizerErrors() }
+                }
         }
     }
 }
