@@ -1127,6 +1127,8 @@ public actor AgentActor {
         /// cleared, pruned, or rewritten for a model switch since the summary's snapshot — so the
         /// summary no longer describes what it would replace, and is discarded.
         case historyChanged
+        /// A newer summary arrived while this one was held; the newer one is applied instead.
+        case superseded
     }
 
     /// Reports how a compaction deferred to the end of a tool turn went: the outcome, and the
@@ -1144,6 +1146,10 @@ public actor AgentActor {
     /// A summary that arrived mid-tool-turn, waiting for the loop top (`applyPendingCompaction`).
     /// A newer one replaces it: it covers at least as much.
     private var pendingCompaction: PendingCompaction?
+
+    /// Whether a summary is waiting for the loop top — so no second summary is started over a
+    /// history that is about to be compacted (it would always end `.historyChanged`).
+    public var hasPendingCompaction: Bool { pendingCompaction != nil }
 
     /// Full before/after message arrays from the most recent compaction, stashed only when
     /// `compactConversationHistory(…, captureSnapshots: true)` requested it (compaction-diff
@@ -1175,6 +1181,10 @@ public actor AgentActor {
     ) -> CompactionOutcome {
         // Single-writer: never splice while the run loop is mid-tool-turn.
         guard !isProcessingToolTurn else {
+            if let replaced = pendingCompaction {
+                let report = replaced.report
+                Task { await report?(.superseded, nil) }
+            }
             pendingCompaction = PendingCompaction(
                 summaryText: summaryText,
                 summarizedSnapshot: summarizedSnapshot,
@@ -1197,6 +1207,12 @@ public actor AgentActor {
     private func applyPendingCompaction() async {
         guard let pending = pendingCompaction else { return }
         pendingCompaction = nil
+        // A `/clear` deferred to this same boundary wipes the history right after; a summary
+        // spliced first would be reported as applied and then erased.
+        guard !pendingResetRequested else {
+            await pending.report?(.historyChanged, nil)
+            return
+        }
         let outcome = spliceCompaction(
             summaryText: pending.summaryText,
             summarizedSnapshot: pending.summarizedSnapshot,
@@ -1213,13 +1229,22 @@ public actor AgentActor {
         captureSnapshots: Bool
     ) -> CompactionOutcome {
         let count = conversationHistory.count
-        guard conversationHistory.starts(with: summarizedSnapshot) else { return .historyChanged }
         // system + summary + tail must actually shrink the history to be worth it.
         guard summarizedSnapshot.count > keepingRecentTurns + 3 else { return .tooSmall }
 
+        // Where the kept tail starts, measured on the SNAPSHOT (skipping `.tool` results so a
+        // tool_use/tool_result pair is never split).
         var tailStart = max(1, summarizedSnapshot.count - keepingRecentTurns)
-        while tailStart < count, conversationHistory[tailStart].role == .tool {
+        while tailStart < summarizedSnapshot.count, summarizedSnapshot[tailStart].role == .tool {
             tailStart += 1
+        }
+        // Only `[1..<tailStart]` is replaced by the summary, so only that span must still be what
+        // was summarized. The system prompt (`[0]`, which a prompt edit replaces) and the tail
+        // (whose last user turn a newly drained message may be merged into) are kept from the
+        // CURRENT history, so edits there are carried over rather than discarding the summary.
+        guard count >= tailStart,
+              conversationHistory[1..<tailStart].elementsEqual(summarizedSnapshot[1..<tailStart]) else {
+            return .historyChanged
         }
 
         var compacted: [LLMMessage] = [conversationHistory[0]]
@@ -2145,7 +2170,8 @@ public actor AgentActor {
                     // An account or model problem (not this conversation's): reported BEFORE the
                     // stop, so the runtime pauses this agent's task instead of the self-terminate
                     // path failing it, and stops starting tasks on a model that can't run them.
-                    if failureWasProviderCall, let kind = ProviderUnavailableKind.of(error) {
+                    let providerUnavailable = failureWasProviderCall ? ProviderUnavailableKind.of(error) : nil
+                    if let kind = providerUnavailable {
                         await toolContext.reportProviderUnavailable(ProviderOutage(
                             role: configuration.role,
                             providerID: configuration.llmConfig.providerID,
@@ -2154,10 +2180,15 @@ public actor AgentActor {
                             detail: error.localizedDescription
                         ))
                     }
+                    // A worker stopped by its model's outage leaves its task paused, not failed —
+                    // say that, rather than a stop that reads as the task's failure.
+                    let workerTaskPaused = providerUnavailable != nil && configuration.role == .brown
                     await toolContext.post(ChannelMessage(
                         sender: .system,
-                        content: "Agent \(configuration.role.displayName) stopped — this error cannot be resolved by retrying: \(error.localizedDescription)",
-                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(.error), "agentRole": .string(configuration.role.rawValue)]
+                        content: workerTaskPaused
+                            ? "Agent \(configuration.role.displayName) stopped; its task is paused until the worker's model can be used."
+                            : "Agent \(configuration.role.displayName) stopped — this error cannot be resolved by retrying: \(error.localizedDescription)",
+                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(workerTaskPaused ? .warning : .error), "agentRole": .string(configuration.role.rawValue)]
                     ))
                     isRunning = false
                     break

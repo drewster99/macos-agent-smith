@@ -29,6 +29,13 @@ enum TaskCreationSupport {
         }
     }
 
+    /// The sentence a start tool returns instead of "starting" while the worker's model can't be used
+    /// (`ProviderOutage`): the start waits, and Smith must not retry or recreate it. Nil otherwise.
+    static func outageHoldNote(context: ToolContext) async -> String? {
+        guard let outage = await context.workerProviderOutage() else { return nil }
+        return "Queued, not started: the worker's model '\(outage.modelID)' can't be used (\(outage.kind.displayDescription)). It starts on its own when the user changes the worker's model or presses Play on a paused task. Do NOT call `run_task` on it again or recreate it."
+    }
+
     /// Retrieves memories and prior tasks relevant to a new (non-template) task, attaches them, and
     /// returns the sentence the tool result uses to say what was attached ("" when nothing was).
     static func attachRelevantContext(to task: AgentTask, context: ToolContext) async -> String {

@@ -321,6 +321,20 @@ struct SmithContextManagementTests {
         }
     }
 
+    /// Only the summarized middle is replaced, so an edit to what the splice keeps — the system
+    /// prompt, or a message merged into the last user turn — must not discard the summary.
+    @Test("an edit to the system prompt during the summary does not discard it")
+    func compactSurvivesSystemPromptEdit() async {
+        let agent = makeTestAgent()
+        for index in 1...12 { await agent.appendUserMessage("message \(index)") }
+        await agent.drainPendingInjectedMessages()
+        let summarized = await agent.contextSnapshot()
+        await agent.updateSystemPrompt("A NEW SYSTEM PROMPT")
+        let outcome = await agent.compactConversationHistory(summaryText: "S", summarizing: summarized, keepingRecentTurns: 3)
+        #expect(outcome == .compacted(before: 13, after: 5))
+        #expect(await agent.contextSnapshot().first?.content.textValue == "A NEW SYSTEM PROMPT", "the edited prompt must be kept")
+    }
+
     @Test("a summary whose snapshot is no longer the start of the history is discarded")
     func compactDiscardsWhenHistoryChanged() async {
         let agent = makeTestAgent()

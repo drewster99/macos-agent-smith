@@ -308,6 +308,9 @@ struct RunTaskTool: AgentTool {
 
         await context.restartForNewTask(startTaskID, nil)
 
+        if let held = await TaskCreationSupport.outageHoldNote(context: context) {
+            return .success("Task '\(task.title)' (ID: \(startTaskID)).\(templateInstanceNote)\(amendmentNote) \(held)")
+        }
         let autoNote = autoResolved
             ? " (auto-resolved task_id because it was omitted from the call and only one task was eligible)"
             : ""

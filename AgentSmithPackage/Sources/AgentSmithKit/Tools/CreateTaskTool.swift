@@ -536,6 +536,9 @@ public struct CreateTaskTool: AgentTool {
         }
         if slotHolders.count < capacity {
             await context.restartForNewTask(task.id, nil)
+            if let held = await TaskCreationSupport.outageHoldNote(context: context) {
+                return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) \(held)")
+            }
             return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) A worker is being spawned to begin work on it now.")
         }
 

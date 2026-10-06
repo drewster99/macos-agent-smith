@@ -4,7 +4,7 @@ import SwiftLLMKit
 /// Why a role's model can't be used at all — an account or model problem only a person can fix,
 /// as opposed to a fault in one request. Read from the typed failure (HTTP status, the Codex
 /// backend's typed limit), never from the provider's prose.
-public enum ProviderUnavailableKind: String, Sendable, Codable, Equatable {
+public enum ProviderUnavailableKind: Sendable, Equatable {
     /// HTTP 402, or the Codex backend's depleted-credits limit: the balance or plan doesn't cover
     /// this model (Ollama answers 402 for a model outside the account's plan).
     case paymentRequired
@@ -32,10 +32,29 @@ public enum ProviderUnavailableKind: String, Sendable, Codable, Equatable {
         switch statusCode {
         case 401: return .unauthorized
         case 402: return .paymentRequired
+        // OpenRouter answers 403 when moderation flags the INPUT — a refusal of this conversation,
+        // not of the account — and says so in typed fields of its error object.
+        case 403 where isModerationRefusal(body: body): return nil
         case 403: return .forbidden
         case 404: return .modelNotFound
         default: return nil
         }
+    }
+
+    /// Whether a 403's error object carries OpenRouter's moderation metadata (`error.metadata.reasons`
+    /// or `error.metadata.flagged_input`). Keyed on the field names, never the message text. A body
+    /// that isn't such an object reads as not a moderation refusal.
+    static func isModerationRefusal(body: String) -> Bool {
+        let parsed: Any
+        do {
+            parsed = try JSONSerialization.jsonObject(with: Data(body.utf8))
+        } catch {
+            return false
+        }
+        guard let root = parsed as? [String: Any],
+              let errorObject = root["error"] as? [String: Any],
+              let metadata = errorObject["metadata"] as? [String: Any] else { return false }
+        return metadata["reasons"] != nil || metadata["flagged_input"] != nil
     }
 
     /// A few words for messages.

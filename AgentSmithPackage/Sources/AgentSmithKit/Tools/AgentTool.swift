@@ -387,6 +387,9 @@ public struct ToolContext: Sendable {
     /// stops: a worker's task is paused rather than failed, and no task starts on that model until
     /// it changes or the user retries.
     public let reportProviderUnavailable: @Sendable (ProviderOutage) async -> Void
+    /// The worker model's outage, if one stands (`OrchestrationRuntime.workerProviderOutage`): a
+    /// start then waits instead of running, and the tools must not claim otherwise.
+    public let workerProviderOutage: @Sendable () async -> ProviderOutage?
     /// Whether the Security Agent scopes a worker's tool set from its task (the resolved
     /// orchestration setting). Decides what adding a required capability will change.
     public let scopesToolSetOnTaskStart: @Sendable () async -> Bool
@@ -515,6 +518,7 @@ public struct ToolContext: Sendable {
         automaticallyResumingChildTaskIDs: @escaping @Sendable () async -> Set<UUID>? = { nil },
         scopesToolSetOnTaskStart: @escaping @Sendable () async -> Bool = { OrchestrationSettings.builtIn.scopeToolSetOnTaskStart },
         reportProviderUnavailable: @escaping @Sendable (ProviderOutage) async -> Void = { _ in },
+        workerProviderOutage: @escaping @Sendable () async -> ProviderOutage? = { nil },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
         reconcileMemory: @escaping @Sendable (MemoryReconciliationRequest) async -> MemoryReconciliation = { _ in
@@ -586,6 +590,7 @@ public struct ToolContext: Sendable {
         self.automaticallyResumingChildTaskIDs = automaticallyResumingChildTaskIDs
         self.scopesToolSetOnTaskStart = scopesToolSetOnTaskStart
         self.reportProviderUnavailable = reportProviderUnavailable
+        self.workerProviderOutage = workerProviderOutage
         self.currentResumingTaskID = currentResumingTaskID
         self.memoryStore = memoryStore
         self.reconcileMemory = reconcileMemory

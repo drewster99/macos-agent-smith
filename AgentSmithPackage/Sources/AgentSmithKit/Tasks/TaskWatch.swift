@@ -105,9 +105,10 @@ public enum TaskWatchTrigger: String, Codable, Sendable, CaseIterable, Hashable 
             // The user quitting or deleting the session is not an event to notify about (decision 9).
             return nil
         case .capacityShed, .startAbandoned, .providerUnavailable:
-            // Lowering capacity parks the task for an automatic resume as soon as a slot frees, and
-            // a resume refused at capacity goes back onto its queue the same way: an internal
-            // deferral, not an interruption anyone should react to (or chain on).
+            // Lowering capacity parks the task for an automatic resume as soon as a slot frees; a
+            // resume refused at capacity goes back onto its queue the same way; and a worker model
+            // that can't be used pauses the task until it is fixed, then resumes it. Each is an
+            // internal deferral, not an interruption anyone should react to (or chain on).
             return nil
         default:
             break

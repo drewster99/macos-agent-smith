@@ -277,6 +277,7 @@ struct PersistentClientErrorSurfaceTests {
         await Self.waitUntil(deadline: 1.0) {
             let msgs = await channel.allMessages()
             return msgs.contains { $0.content.contains("out of credits") }
+                && msgs.contains { $0.kind == .agentLifecycle && $0.content.contains("stopped") }
         }
         await agent.stop()
 
@@ -292,9 +293,10 @@ struct PersistentClientErrorSurfaceTests {
             #expect(!banner.content.contains("retrying in"))
         }
 
-        // The agent stops rather than spending its 50-attempt budget on a billing block.
+        // The agent stops rather than spending its 50-attempt budget on a billing block. A
+        // worker's 402 is a provider outage, so its stop line says the task is paused, not failed.
         let stopped = await channel.allMessages().first {
-            $0.content.contains("cannot be resolved by retrying")
+            $0.kind == .agentLifecycle && $0.content.contains("its task is paused until the worker's model can be used")
         }
         #expect(stopped != nil, "a permanent client error must stop the agent, not schedule a retry")
         let running = await agent.running
