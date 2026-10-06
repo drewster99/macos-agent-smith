@@ -750,10 +750,37 @@ public actor OrchestrationRuntime {
     /// output preserves the judgment. Manual `/compact` works at any size.
     private static let smithAutoCompactMessageThreshold = 50
 
+    /// The automatic compaction in progress, if any (`startAutoCompactionIfNeeded`).
+    private var autoCompactionTask: Task<Void, Never>?
+    /// A task terminated while a compaction was running: check again when it finishes.
+    private var autoCompactionRequestedWhileRunning = false
+
+    /// Starts the task-boundary compaction WITHOUT waiting for it, one at a time. It used to be
+    /// awaited by the serialized task-event consumer, so for the 20–30 s of its summarizer call
+    /// every later briefing, child-task note and slot refill waited behind it. A request that
+    /// arrives while one runs is coalesced into one more check afterwards.
+    private func startAutoCompactionIfNeeded() {
+        guard autoCompactionTask == nil else {
+            autoCompactionRequestedWhileRunning = true
+            return
+        }
+        autoCompactionTask = Task { [weak self] in
+            await self?.runAutoCompactions()
+        }
+    }
+
+    private func runAutoCompactions() async {
+        repeat {
+            autoCompactionRequestedWhileRunning = false
+            await autoCompactSmithIfNeeded()
+        } while autoCompactionRequestedWhileRunning && !aborted && !stopRequested
+        autoCompactionTask = nil
+    }
+
     /// Task-boundary automatic compaction for the long-lived Smith (Phase 2). Runs from
-    /// the task-terminated hook; a no-op below the threshold, during abort/stop, or with
-    /// no live Smith. The notice is posted with the `context_management` kind so both
-    /// agent filters drop it — context maintenance is user-visible but agent-invisible.
+    /// the task-terminated hook (`startAutoCompactionIfNeeded`); a no-op below the threshold,
+    /// during abort/stop, or with no live Smith. The notice is posted with the `context_management`
+    /// kind so both agent filters drop it — context maintenance is user-visible but agent-invisible.
     func autoCompactSmithIfNeeded() async {
         guard !aborted, !stopRequested else { return }
         guard let smithAgent = supervisor.firstHandle(role: .smith)?.agent else { return }
@@ -873,28 +900,58 @@ public actor OrchestrationRuntime {
         guard let summary = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty else {
             return "Compaction failed — the summary came back empty. Smith's context is unchanged."
         }
-        switch await smith.compactConversationHistory(
+        let outcome = await smith.compactConversationHistory(
             summaryText: summary,
+            summarizing: snapshot,
             keepingRecentTurns: Self.compactionRecentTurnsKept,
-            captureSnapshots: captureThisCompaction
-        ) {
-        case .compacted(let before, let after):
-            if captureThisCompaction, let snapshots = await smith.takeLastCompactionSnapshots() {
-                onCompactionCaptured?(CompactionDiffCapture(
-                    id: UUID(),
-                    capturedAt: Date(),
-                    agentRole: .smith,
-                    trigger: trigger,
-                    before: snapshots.before,
-                    after: snapshots.after
-                ))
+            captureSnapshots: captureThisCompaction,
+            onDeferredApplication: { [weak self] outcome, snapshots in
+                await self?.reportDeferredCompaction(outcome, snapshots: snapshots, trigger: trigger)
             }
+        )
+        if case .compacted = outcome, captureThisCompaction, let snapshots = await smith.takeLastCompactionSnapshots() {
+            captureCompaction(snapshots, trigger: trigger)
+        }
+        return Self.compactionResultLine(outcome)
+    }
+
+    /// The user-facing line for a compaction outcome.
+    private static func compactionResultLine(_ outcome: AgentActor.CompactionOutcome) -> String {
+        switch outcome {
+        case .compacted(let before, let after):
             return "Smith's context compacted: \(before) → \(after) messages."
         case .tooSmall:
             return "Smith's context is already compact — nothing was changed."
-        case .toolTurnInFlight:
-            return "Smith is mid-task — compaction was skipped to avoid corrupting an in-flight tool call. Try /compact again once Smith is idle."
+        case .deferredToTurnEnd:
+            return "Smith is mid-turn — the summary is ready and will be applied as soon as that turn ends."
+        case .historyChanged:
+            return "Smith's context changed while it was being summarized (cleared, pruned, or switched model), so the summary was discarded. Its context is unchanged."
         }
+    }
+
+    private func captureCompaction(_ snapshots: (before: [LLMMessage], after: [LLMMessage]), trigger: CompactionDiffCapture.Trigger) {
+        onCompactionCaptured?(CompactionDiffCapture(
+            id: UUID(),
+            capturedAt: Date(),
+            agentRole: .smith,
+            trigger: trigger,
+            before: snapshots.before,
+            after: snapshots.after
+        ))
+    }
+
+    /// How a compaction held until Smith's turn ended was applied — posted like the immediate case.
+    private func reportDeferredCompaction(
+        _ outcome: AgentActor.CompactionOutcome,
+        snapshots: (before: [LLMMessage], after: [LLMMessage])?,
+        trigger: CompactionDiffCapture.Trigger
+    ) async {
+        if let snapshots { captureCompaction(snapshots, trigger: trigger) }
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "Context maintenance (applied after Smith's turn): \(Self.compactionResultLine(outcome))",
+            metadata: ["messageKind": .kind(.contextManagement)]
+        ))
     }
 
     /// Debug one-shot: force a compaction of Smith's context right now and capture its diff,
@@ -1579,7 +1636,7 @@ public actor OrchestrationRuntime {
             // Through the coalescing driver, so a drain request arriving while this one is busy
             // (a coordinator parking) is serviced rather than lost.
             await advanceAfterFreedWorkerSlot()
-            await autoCompactSmithIfNeeded()
+            startAutoCompactionIfNeeded()
         case .effectsReady:
             await deliverReadyTaskEffects()
 
@@ -5168,6 +5225,13 @@ public actor OrchestrationRuntime {
     /// Summarizes a completed or failed task and saves the embedding to the memory store.
     ///
     /// Runs as a fire-and-forget operation — errors are posted to the channel.
+    /// Starts `summarizeAndEmbedTask` without waiting for it. Every automatic summary goes this way.
+    func summarizeAndEmbedTaskInBackground(taskID: UUID) {
+        Task { [weak self] in
+            await self?.summarizeAndEmbedTask(taskID: taskID)
+        }
+    }
+
     public func summarizeAndEmbedTask(taskID: UUID) async {
         guard let task = await taskStore.task(id: taskID) else { return }
         guard task.status == .completed || (task.status == .failed && !task.updates.isEmpty) else { return }
@@ -5511,10 +5575,6 @@ public actor OrchestrationRuntime {
             },
             currentResumingTaskID: currentResumingTaskID,
             memoryStore: memoryStore,
-            summarizeCompletedTask: { [weak self] taskID in
-                guard let self else { return }
-                await self.summarizeAndEmbedTask(taskID: taskID)
-            },
             reconcileMemory: { [weak self] request in
                 guard let self else {
                     return .unavailable(errorDescription: "the orchestration runtime has shut down")
@@ -5725,10 +5785,7 @@ Message:
             // inside the store.
             let didFail = await taskStore.updateStatus(id: task.id, ifCurrentlyEquals: .running, to: .failed, cause: .workerSelfTerminated)
             if didFail && !task.updates.isEmpty {
-                Task.detached { [weak self] in
-                    guard let self else { return }
-                    await self.summarizeAndEmbedTask(taskID: task.id)
-                }
+                summarizeAndEmbedTaskInBackground(taskID: task.id)
             }
         }
 

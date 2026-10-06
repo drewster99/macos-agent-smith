@@ -281,7 +281,8 @@ struct SmithContextManagementTests {
         // the way the run loop would, so the 12 messages are actually in history to compact.
         await agent.drainPendingInjectedMessages()
 
-        let outcome = await agent.compactConversationHistory(summaryText: "THE SUMMARY", keepingRecentTurns: 3)
+        let summarized = await agent.contextSnapshot()
+        let outcome = await agent.compactConversationHistory(summaryText: "THE SUMMARY", summarizing: summarized, keepingRecentTurns: 3)
         #expect(outcome == .compacted(before: 13, after: 5), "system + summary + 3 recent turns")
 
         let snapshot = await agent.contextSnapshot()
@@ -296,8 +297,40 @@ struct SmithContextManagementTests {
         let agent = makeTestAgent()
         await agent.appendUserMessage("only one")
         await agent.drainPendingInjectedMessages()
-        let outcome = await agent.compactConversationHistory(summaryText: "S", keepingRecentTurns: 6)
+        let outcome = await agent.compactConversationHistory(summaryText: "S", summarizing: await agent.contextSnapshot(), keepingRecentTurns: 6)
         #expect(outcome == .tooSmall)
+    }
+
+    /// The summarizer call takes 20–30 s; Smith keeps working meanwhile. The summary covers only
+    /// the snapshot it was made from, so everything appended since must survive the splice —
+    /// measuring the kept tail from the CURRENT end silently dropped those messages.
+    @Test("compaction keeps every message added while the summary was being written")
+    func compactKeepsMessagesAddedDuringSummary() async {
+        let agent = makeTestAgent()
+        for index in 1...12 { await agent.appendUserMessage("message \(index)") }
+        await agent.drainPendingInjectedMessages()
+        let summarized = await agent.contextSnapshot()
+        for index in 13...16 { await agent.appendUserMessage("message \(index)") }
+        await agent.drainPendingInjectedMessages()
+
+        let outcome = await agent.compactConversationHistory(summaryText: "S", summarizing: summarized, keepingRecentTurns: 3)
+        #expect(outcome == .compacted(before: 17, after: 9), "system + summary + 3 summarized-tail + 4 added")
+        let texts = await agent.contextSnapshot().compactMap { $0.content.textValue }
+        for index in 10...16 {
+            #expect(texts.contains("message \(index)"), "message \(index) was dropped")
+        }
+    }
+
+    @Test("a summary whose snapshot is no longer the start of the history is discarded")
+    func compactDiscardsWhenHistoryChanged() async {
+        let agent = makeTestAgent()
+        for index in 1...12 { await agent.appendUserMessage("message \(index)") }
+        await agent.drainPendingInjectedMessages()
+        let summarized = await agent.contextSnapshot()
+        await agent.resetConversationHistory(orientation: "fresh start")
+        let outcome = await agent.compactConversationHistory(summaryText: "S", summarizing: summarized, keepingRecentTurns: 3)
+        #expect(outcome == .historyChanged)
+        #expect(await agent.contextSnapshot().count == 2, "the reset history was left alone")
     }
 
     @Test("clearSmithContext resets a live Smith and re-briefs task state")

@@ -391,8 +391,6 @@ public struct ToolContext: Sendable {
     public let currentResumingTaskID: UUID?
     /// Semantic memory store for saving and searching memories and task summaries.
     public let memoryStore: MemoryStore
-    /// Triggers summarization and embedding of a completed or failed task.
-    public let summarizeCompletedTask: @Sendable (UUID) async -> Void
     /// Decides whether a new memory should merge into a similar existing one, and if so
     /// produces the reconciled text (newer info wins conflicts). The LLM is the decider; any
     /// failure is reported as its own non-merge outcome. The runtime attaches the calling agent's
@@ -514,7 +512,6 @@ public struct ToolContext: Sendable {
         scopesToolSetOnTaskStart: @escaping @Sendable () async -> Bool = { OrchestrationSettings.builtIn.scopeToolSetOnTaskStart },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
-        summarizeCompletedTask: @escaping @Sendable (UUID) async -> Void = { _ in },
         reconcileMemory: @escaping @Sendable (MemoryReconciliationRequest) async -> MemoryReconciliation = { _ in
             .unavailable(errorDescription: "no memory reconciler is configured")
         },
@@ -585,7 +582,6 @@ public struct ToolContext: Sendable {
         self.scopesToolSetOnTaskStart = scopesToolSetOnTaskStart
         self.currentResumingTaskID = currentResumingTaskID
         self.memoryStore = memoryStore
-        self.summarizeCompletedTask = summarizeCompletedTask
         self.reconcileMemory = reconcileMemory
         self.extractWebContent = extractWebContent
         self.autoAdvanceEnabled = autoAdvanceEnabled

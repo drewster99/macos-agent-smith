@@ -151,6 +151,12 @@ struct LLMTurnDisclosureRow: View, Equatable {
                 .font(AppFonts.inspectorBody.weight(.semibold))
                 .foregroundStyle(.primary)
 
+            // What kind of call this was (task summary, context compaction, …), visible without
+            // expanding the row.
+            if let operation = turn.annotation?.operation {
+                LLMCallOperationBadge(operation: operation)
+            }
+
             if !turn.modelID.isEmpty {
                 Text(turn.modelID)
                     .font(AppFonts.microMonoBadge)

@@ -1387,8 +1387,8 @@ extension OrchestrationRuntime {
     }
 
     /// Everything after a claimed completion — machine or user: worker teardown, scratch cleanup, the
-    /// Task Completed banner, releasing the held effects, summarization. The terminated hook then
-    /// drives auto-advance and Smith's context compaction.
+    /// Task Completed banner, releasing the held effects, then summarization in the background. The
+    /// terminated hook then drives auto-advance and Smith's context compaction.
     private func finishCompletion(taskID: UUID, effects: TransitionEffectTicket, validationWasRun: Bool) async {
         guard let completed = await taskStore.task(id: taskID) else {
             await taskStore.releaseEffects(effects)
@@ -1417,7 +1417,10 @@ extension OrchestrationRuntime {
         // that can take arbitrarily long (retries) and would otherwise hold every completion watch
         // and Smith's note hostage, and trip the held-effect watchdog.
         await taskStore.releaseEffects(effects)
-        await summarizeAndEmbedTask(taskID: taskID)
+        // In the background: the summary is a seconds-long LLM call (longer with retries) that
+        // nothing here depends on, and awaiting it held up whoever completed the task — the user's
+        // Accept and Smith's `respond_to_user_acceptance` turn included.
+        summarizeAndEmbedTaskInBackground(taskID: taskID)
     }
 
     /// Rejections with rounds remaining: the punch list goes DIRECTLY to the worker —

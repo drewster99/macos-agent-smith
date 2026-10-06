@@ -71,13 +71,15 @@ private struct SummarizerOperationTallyRow: View {
 }
 
 /// The Summarizer's warnings and errors from the transcript — retry notices and final failures.
+/// Read from the saved transcript, so it spans earlier runs too (the call log above covers only
+/// this run); each row is dated, and the heading says so.
 private struct SummarizerProblemHistory: View {
     let messages: [ChannelMessage]
 
     var body: some View {
         let problems = Array(messages.filter { $0.severity >= .warning }.prefix(20))
         if !problems.isEmpty {
-            InspectorSection(title: "Errors and retries (newest \(problems.count))") {
+            InspectorSection(title: "Errors and retries — all runs (newest \(problems.count))") {
                 ForEach(problems) { message in
                     SummarizerActivityRow(message: message)
                 }

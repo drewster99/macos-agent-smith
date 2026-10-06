@@ -126,11 +126,13 @@ struct SummarizerActivityRow: View {
                             .monospacedDigit()
                     }
 
-                    if !isExpanded {
-                        Text(message.timestamp, style: .time)
-                            .font(AppFonts.inspectorBody)
-                            .foregroundStyle(.tertiary)
-                    }
+                    // Dated unless it is from today: these rows come from the saved transcript, so
+                    // an error from an earlier run must not read as one from this run.
+                    Text(message.timestamp.formatted(
+                        date: Calendar.current.isDateInToday(message.timestamp) ? .omitted : .abbreviated,
+                        time: .shortened))
+                        .font(AppFonts.inspectorBody)
+                        .foregroundStyle(.tertiary)
                 }
 
                 if isExpanded, let taskID {

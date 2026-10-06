@@ -1116,12 +1116,34 @@ public actor AgentActor {
         case compacted(before: Int, after: Int)
         /// History is already at or below the compaction floor — nothing worth splicing.
         case tooSmall
-        /// A tool turn is in flight (the run loop is parked between an assistant `tool_calls`
-        /// message and its results). Splicing now could drop the in-flight assistant turn and
-        /// orphan the results appended when the loop resumes — the same 400 class the
-        /// single-writer invariant exists to prevent. The caller should retry once Smith is idle.
-        case toolTurnInFlight
+        /// A tool turn was in flight (splicing then could orphan the results appended when the
+        /// loop resumes — the 400 class the single-writer invariant exists to prevent), so the
+        /// summary is HELD and spliced at the top of the run loop's next iteration, where the turn
+        /// is complete. How that went is reported through the caller's `onDeferredApplication`.
+        /// Throwing the finished summary away instead wasted every compaction that finished while
+        /// Smith was busy — about half of them, since a task completing wakes Smith.
+        case deferredToTurnEnd
+        /// The messages the summary covers are no longer the start of the history — it was
+        /// cleared, pruned, or rewritten for a model switch since the summary's snapshot — so the
+        /// summary no longer describes what it would replace, and is discarded.
+        case historyChanged
     }
+
+    /// Reports how a compaction deferred to the end of a tool turn went: the outcome, and the
+    /// before/after histories when the caller asked to capture them.
+    public typealias DeferredCompactionReport = @Sendable (CompactionOutcome, (before: [LLMMessage], after: [LLMMessage])?) async -> Void
+
+    private struct PendingCompaction {
+        let summaryText: String
+        let summarizedSnapshot: [LLMMessage]
+        let keepingRecentTurns: Int
+        let captureSnapshots: Bool
+        let report: DeferredCompactionReport?
+    }
+
+    /// A summary that arrived mid-tool-turn, waiting for the loop top (`applyPendingCompaction`).
+    /// A newer one replaces it: it covers at least as much.
+    private var pendingCompaction: PendingCompaction?
 
     /// Full before/after message arrays from the most recent compaction, stashed only when
     /// `compactConversationHistory(…, captureSnapshots: true)` requested it (compaction-diff
@@ -1129,38 +1151,80 @@ public actor AgentActor {
     /// so the debug artifact never lingers in a normal run's memory.
     private var lastCompactionSnapshots: (before: [LLMMessage], after: [LLMMessage])?
 
-    /// Splices the conversation down to `[system prompt] + [summary marker] + recent
-    /// tail` — the user-facing `/compact`. The summary text is produced by the caller
-    /// (runtime → summarizer LLM); this method is a deterministic actor-local splice.
-    /// The tail start skips leading `.tool` results so a tool_use/tool_result pair is
-    /// never separated (both halves land in the compacted region together).
+    /// Splices the conversation down to `[system prompt] + [summary marker] + recent tail +
+    /// everything added since` — the user-facing `/compact` and the automatic task-boundary
+    /// compaction. The summary text is produced by the caller (runtime → summarizer LLM) from
+    /// `summarizedSnapshot`, the history as it read when the call started; this method is a
+    /// deterministic actor-local splice.
+    ///
+    /// The summary replaces only what it covers: the tail kept verbatim is measured from the END OF
+    /// THE SNAPSHOT, so every message appended during the summarizer call survives. (Measuring from
+    /// the current end dropped those messages unsummarized.) The snapshot must still be the start
+    /// of the history, else `.historyChanged`. The tail start skips leading `.tool` results so a
+    /// tool_use/tool_result pair is never separated. Mid-tool-turn the splice is deferred to the
+    /// next loop iteration (`.deferredToTurnEnd`) and reported through `onDeferredApplication`.
     ///
     /// When `captureSnapshots` is true, stashes the exact pre- and post-splice histories for
-    /// `takeLastCompactionSnapshots()`. Capturing HERE (not from a caller-side snapshot) is what
-    /// makes a compaction-diff accurate: the caller's earlier snapshot goes stale across its
-    /// summarizer `await`, during which the agent may append more turns.
+    /// `takeLastCompactionSnapshots()` (or hands them to `onDeferredApplication`).
     public func compactConversationHistory(
         summaryText: String,
+        summarizing summarizedSnapshot: [LLMMessage],
         keepingRecentTurns: Int,
-        captureSnapshots: Bool = false
+        captureSnapshots: Bool = false,
+        onDeferredApplication: DeferredCompactionReport? = nil
     ) -> CompactionOutcome {
-        // Single-writer: never splice while the run loop is mid-tool-turn. The caller reaches this
-        // after an `await` (its summarizer LLM call), by which point Smith may have started a new
-        // tool turn; splicing then could orphan results appended when that turn resumes.
-        guard !isProcessingToolTurn else { return .toolTurnInFlight }
+        // Single-writer: never splice while the run loop is mid-tool-turn.
+        guard !isProcessingToolTurn else {
+            pendingCompaction = PendingCompaction(
+                summaryText: summaryText,
+                summarizedSnapshot: summarizedSnapshot,
+                keepingRecentTurns: keepingRecentTurns,
+                captureSnapshots: captureSnapshots,
+                report: onDeferredApplication
+            )
+            return .deferredToTurnEnd
+        }
+        return spliceCompaction(
+            summaryText: summaryText,
+            summarizedSnapshot: summarizedSnapshot,
+            keepingRecentTurns: keepingRecentTurns,
+            captureSnapshots: captureSnapshots
+        )
+    }
 
+    /// Applies a compaction held from mid-tool-turn. Called at the top of the run loop, where the
+    /// previous turn is complete.
+    private func applyPendingCompaction() async {
+        guard let pending = pendingCompaction else { return }
+        pendingCompaction = nil
+        let outcome = spliceCompaction(
+            summaryText: pending.summaryText,
+            summarizedSnapshot: pending.summarizedSnapshot,
+            keepingRecentTurns: pending.keepingRecentTurns,
+            captureSnapshots: pending.captureSnapshots
+        )
+        await pending.report?(outcome, pending.captureSnapshots ? takeLastCompactionSnapshots() : nil)
+    }
+
+    private func spliceCompaction(
+        summaryText: String,
+        summarizedSnapshot: [LLMMessage],
+        keepingRecentTurns: Int,
+        captureSnapshots: Bool
+    ) -> CompactionOutcome {
         let count = conversationHistory.count
+        guard conversationHistory.starts(with: summarizedSnapshot) else { return .historyChanged }
         // system + summary + tail must actually shrink the history to be worth it.
-        guard count > keepingRecentTurns + 3 else { return .tooSmall }
+        guard summarizedSnapshot.count > keepingRecentTurns + 3 else { return .tooSmall }
 
-        var tailStart = max(1, count - keepingRecentTurns)
+        var tailStart = max(1, summarizedSnapshot.count - keepingRecentTurns)
         while tailStart < count, conversationHistory[tailStart].role == .tool {
             tailStart += 1
         }
 
         var compacted: [LLMMessage] = [conversationHistory[0]]
         compacted.append(.user("""
-            [Context compacted at the user's request. Summary of the conversation so far:]
+            [Context compacted. Summary of the conversation so far:]
             \(summaryText)
             """))
         compacted.append(contentsOf: conversationHistory[tailStart...])
@@ -1572,6 +1636,9 @@ public actor AgentActor {
             // boundary where the previous turn is complete — so no turn ever spans two
             // configurations, and the prune below already budgets against the new context window.
             await applyPendingModelChange()
+            // A context compaction that finished while the previous turn was mid-tool-call lands
+            // here, now that the turn is complete.
+            await applyPendingCompaction()
 
             // Re-inject deferred messages (e.g. task_complete held back from a previous batch)
             // so they get their own focused LLM turn.
