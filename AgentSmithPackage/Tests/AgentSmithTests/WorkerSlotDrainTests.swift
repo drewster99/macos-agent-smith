@@ -15,12 +15,8 @@ import SemanticSearch
 /// Reproduced 11 times in 12 runs before the fix. The kick now lives in `terminateAgent`, so it
 /// covers every terminal transition rather than the one someone remembered to annotate.
 ///
-/// Capacity 1 is deliberately the ONLY case covered. The same window also ran a larger pool one
-/// worker short, but that is not observable with a mock provider: a mock worker trips the
-/// degenerate-loop guard within about a second and fails on its own, freeing further slots, so
-/// "exactly one slot freed" and "the live worker was not evicted" both read false for reasons
-/// that have nothing to do with draining. A test asserting them would be a flake, not a guard —
-/// proving it needs a worker that stays alive, which is scaffolding this suite does not have.
+/// Capacity 1 is the only case covered. The same window also ran a larger pool one worker short;
+/// covering that needs workers that stay alive, which `StillThinkingLLMProvider` now provides.
 @Suite("Worker slot drain")
 struct WorkerSlotDrainTests {
 
@@ -48,7 +44,7 @@ struct WorkerSlotDrainTests {
         let providers: [AgentRole: any LLMProvider] = [
             .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
             .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
-            .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")])
+            .brown: StillThinkingLLMProvider()
         ]
         let configurations: [AgentRole: ModelConfiguration] = [
             .smith: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model"),
@@ -59,9 +55,9 @@ struct WorkerSlotDrainTests {
             providers: providers,
             configurations: configurations,
             providerAPITypes: [:],
-            // Long poll intervals so the mock workers sit IDLE instead of burning turns. Without
-            // this, Brown trips the degenerate-loop guard within about a second and self-terminates
-            // — and that path removes its handle BEFORE writing the status, which is the ordering
+            // The worker stays mid-call (`StillThinkingLLMProvider`) rather than answering: a
+            // worker that answers text-only trips the degenerate-loop guard and self-terminates —
+            // and that path removes its handle BEFORE writing the status, which is the ordering
             // the bug under test does NOT have. So a spinning worker let the test sometimes
             // exercise the already-correct path and pass with the fix reverted.
             agentTuning: [

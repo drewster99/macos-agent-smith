@@ -17,8 +17,8 @@ struct WorkerCapacityLiveChangeTests {
         return await predicate()
     }
 
-    /// Mock workers with long poll intervals so they sit idle instead of burning turns and tripping
-    /// the degenerate-loop guard (which would free slots for reasons unrelated to the test).
+    /// Workers that stay mid-call (`StillThinkingLLMProvider`), so no worker frees its slot for a
+    /// reason unrelated to the test.
     private func makeRuntime(autoRunNextTask: Bool) async -> (OrchestrationRuntime, URL) {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-capacity-live", isDirectory: true)
@@ -29,7 +29,7 @@ struct WorkerCapacityLiveChangeTests {
             providers: [
                 .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
                 .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
-                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")]),
+                .brown: StillThinkingLLMProvider(),
             ],
             configurations: [.smith: config, .securityAgent: config, .brown: config],
             providerAPITypes: [:],

@@ -47,3 +47,29 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
         }
     }
 }
+
+/// A worker's model that is still thinking: every call stays in flight until it is cancelled (the
+/// agent stopped). Use it wherever a test needs a worker that STAYS ALIVE.
+///
+/// A `MockLLMProvider` text reply does not do that. A worker that answers without calling a tool is
+/// nudged to continue at once — a long poll interval does not delay it — and after six text-only
+/// replies the degenerate-loop guard ends it and fails its task, about a second or two in. Tests
+/// asserting on live workers then passed or failed depending on whether they sampled first.
+final class StillThinkingLLMProvider: LLMProvider, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _callCount = 0
+
+    var callCount: Int {
+        lock.withLock { _callCount }
+    }
+
+    func send(
+        messages: [LLMMessage],
+        tools: [LLMToolDefinition],
+        overrides: LLMCallOverrides
+    ) async throws -> LLMResponse {
+        lock.withLock { _callCount += 1 }
+        try await Task.sleep(for: .seconds(24 * 3600))
+        throw CancellationError()
+    }
+}

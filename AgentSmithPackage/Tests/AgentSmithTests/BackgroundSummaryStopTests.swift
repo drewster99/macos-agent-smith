@@ -89,7 +89,7 @@ struct BackgroundSummaryStopTests {
             providers: [
                 .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
                 .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
-                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")]),
+                .brown: StillThinkingLLMProvider(),
                 .summarizer: summarizerProvider
             ],
             configurations: [.smith: config, .securityAgent: config, .brown: config, .summarizer: config],

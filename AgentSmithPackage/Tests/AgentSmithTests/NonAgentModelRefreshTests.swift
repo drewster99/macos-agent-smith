@@ -96,7 +96,7 @@ struct NonAgentModelRefreshTests {
             providers: [
                 .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
                 .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
-                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")]),
+                .brown: StillThinkingLLMProvider(),
                 .summarizer: MockLLMProvider(responses: [LLMResponse(text: "summary")])
             ],
             configurations: [.smith: configuration, .securityAgent: configuration, .brown: configuration, .summarizer: configuration],
@@ -190,7 +190,7 @@ struct NonAgentModelRefreshTests {
             providers: [
                 .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
                 .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
-                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")])
+                .brown: StillThinkingLLMProvider()
             ],
             configurations: [.smith: configuration, .securityAgent: configuration, .brown: configuration],
             providerAPITypes: [:],

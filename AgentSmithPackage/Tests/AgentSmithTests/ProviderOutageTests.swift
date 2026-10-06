@@ -76,7 +76,7 @@ struct ProviderOutageTests {
 
         // Switching the worker's model releases the outage and resumes both.
         await runtime.setProviders(
-            providers: [.brown: ThinkingProvider()],
+            providers: [.brown: StillThinkingLLMProvider()],
             configurations: [.brown: ModelConfiguration(name: "test", providerID: "test", modelID: "working-model")],
             apiTypes: [.brown: .openAICompatible]
         )
@@ -149,7 +149,7 @@ struct ProviderOutageTests {
     /// report must not re-trip the breaker against the NEW model.
     @Test("a failure reported for a model the worker no longer uses restarts the task and trips nothing")
     func staleModelReportIgnored() async throws {
-        let runtime = try makeRuntime(brownProvider: ThinkingProvider())
+        let runtime = try makeRuntime(brownProvider: StillThinkingLLMProvider())
         await configure(runtime, capacity: 2)
         await runtime.start()
         let store = await runtime.taskStore
@@ -291,7 +291,7 @@ struct ProviderOutageTests {
 
     private func switchWorkerToWorkingModel(_ runtime: OrchestrationRuntime) async {
         await runtime.setProviders(
-            providers: [.brown: ThinkingProvider()],
+            providers: [.brown: StillThinkingLLMProvider()],
             configurations: [.brown: ModelConfiguration(name: "test", providerID: "test", modelID: "working-model")],
             apiTypes: [.brown: .openAICompatible]
         )
@@ -329,14 +329,6 @@ struct ProviderOutageTests {
                 try await Task.sleep(for: .milliseconds(10))
             }
             throw LLMProviderError.httpError(statusCode: 402, body: #"{"error":{"message":"This model is not in the Free plan."}}"#)
-        }
-    }
-
-    /// A working model that is still thinking: keeps a resumed task running (cancellably).
-    private struct ThinkingProvider: LLMProvider {
-        func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
-            try await Task.sleep(for: .seconds(3600))
-            return LLMResponse(text: "unreachable")
         }
     }
 

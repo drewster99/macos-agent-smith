@@ -25,7 +25,7 @@ struct TaskValidationCoordinatorTests {
         let testConfiguration = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
         var providers: [AgentRole: any LLMProvider] = [
             .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
-            .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")]),
+            .brown: StillThinkingLLMProvider(),
             .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
             .summarizer: MockLLMProvider(responses: [LLMResponse(text: "Summarized.")])
         ]

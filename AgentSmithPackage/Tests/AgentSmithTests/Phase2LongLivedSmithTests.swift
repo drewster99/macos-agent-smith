@@ -37,7 +37,7 @@ struct Phase2LongLivedSmithTests {
             .securityAgent: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
         ]
         if includeBrown {
-            providers[.brown] = MockLLMProvider(responses: [LLMResponse(text: "Working.")])
+            providers[.brown] = StillThinkingLLMProvider()
             configurations[.brown] = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
         }
         return OrchestrationRuntime(

@@ -164,7 +164,7 @@ struct TaskWatchRuntimeTests {
             providers: [
                 .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
                 .securityAgent: MockLLMProvider(responses: [LLMResponse(text: "SAFE")]),
-                .brown: MockLLMProvider(responses: [LLMResponse(text: "Working.")])
+                .brown: StillThinkingLLMProvider()
             ],
             configurations: [.smith: configuration, .securityAgent: configuration, .brown: configuration],
             providerAPITypes: [:],
