@@ -73,11 +73,12 @@ public enum SmithTaskBriefing {
                 """
         case .providerUnavailable:
             return """
-                [System: \(subject) is PAUSED, not failed: its worker's model can't be used right now (an \
-                account or model problem — the user has been told what it is). It resumes automatically when \
-                the user switches the worker's model or presses Play on a paused task, and no task starts on \
-                that model until then. Do NOT `run_task`, recreate, or fail it. No action is needed from you; \
-                if the user asks, point them to the notice about the worker's model.]
+                [System: \(subject) is ON HOLD (interrupted), not failed: its worker's model couldn't be used \
+                (an account or model problem — the user has been told what it is). It restarts automatically \
+                when the worker's model works again: at once if the user already switched it, otherwise when \
+                they switch it or press Play on the task; no task starts on that model until then. Do NOT \
+                `run_task`, recreate, or fail it. No action is needed from you; if the user asks, point them \
+                to the notice about the worker's model.]
                 """
         case .startClaimed, .startAbandoned, .workerStartedAtRuntimeStart,
              .spawnFailedAtRuntimeStart, .submittedForValidation, .validationEscalated,

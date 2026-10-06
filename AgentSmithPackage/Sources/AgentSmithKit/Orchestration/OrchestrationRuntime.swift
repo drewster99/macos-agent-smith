@@ -588,76 +588,99 @@ public actor OrchestrationRuntime {
     /// regardless of the auto-run settings (`drainPendingTaskQueue`), so this is the ONE answer the
     /// drain and `wait_for_child_tasks` share.
     func automaticallyResumingChildTaskIDs() -> Set<UUID> {
-        Set(capacityDeferredQueue).union(launchResumeQueue).union(providerRecoveredQueue)
-            .union(tasksWaitingOnProvider[.brown] ?? [])
+        Set(capacityDeferredQueue).union(launchResumeQueue)
+            .union(providerRecoveredQueue.map(\.taskID))
+            .union(startsHeldByWorkerOutage.map(\.taskID))
     }
 
     // MARK: - Provider outages (an account or model problem only a person can fix)
 
-    /// Roles whose model reported itself unusable (`ProviderOutage`). For the worker role this is a
-    /// breaker: no task starts on that model (`performStartTaskWithLiveSmith`, the drain), because
-    /// every one would fail the same way — on 2026-10-06 auto-advance started five tasks on a model
-    /// outside the account's plan and each failed within seconds. In memory only: a relaunch is a
-    /// retry, and the first task that fails again trips it again.
-    private var providerOutages: [AgentRole: ProviderOutage] = [:]
-    /// Tasks paused by, or refused during, the worker model's outage, oldest first. Moved onto
-    /// `providerRecoveredQueue` when the outage is released.
-    private var tasksWaitingOnProvider: [AgentRole: [UUID]] = [:]
-    /// Tasks released from a worker-model outage, waiting for a slot, oldest first. The drain starts
-    /// them ahead of capacity-deferred work and regardless of the auto-run settings — they were
-    /// promised a start ("it starts on its own once the worker's model is changed"). A start refused
-    /// at capacity goes back to its front, in the status it was claimed from.
-    private var providerRecoveredQueue: [UUID] = []
+    /// The worker model's outage (`ProviderOutage`), if one stands. A breaker: no task starts on that
+    /// model (`passesProviderOutageGate`, the drains), because every one would fail the same way — on
+    /// 2026-10-06 auto-advance started five tasks on a model outside the account's plan and each
+    /// failed within seconds. Only the worker role has one: it is the role tasks start on. In memory
+    /// only: a relaunch is a retry, and the first task that fails again trips it again.
+    private var workerOutage: ProviderOutage?
 
-    /// The worker model's outage, if one stands — read by `run_task` / `create_task` so they don't
-    /// claim a start that is being held back.
-    public func workerProviderOutage() -> ProviderOutage? {
-        providerOutages[.brown]
+    /// A start held for the worker's model, and the task's status revision when it was held: at the
+    /// release it is started only if nothing has happened to the task since (a user pause, an
+    /// archive, a start by other means). Keyed on the revision rather than the status so a task Smith
+    /// asked to resume from `.paused` keeps the start it was promised.
+    struct HeldStart: Equatable {
+        let taskID: UUID
+        let statusRevision: Int
     }
 
-    /// An agent's model can't be used. For a worker it PAUSES the task instead of letting the
-    /// self-terminate path fail it — the task didn't fail, the account or model did — and records a
-    /// breaker so no task starts on that model (telling the user once). Called by the agent BEFORE
-    /// it stops.
+    /// Starts held during the worker model's outage — tasks it stopped, and starts refused while it
+    /// stood — oldest first. Moved onto `providerRecoveredQueue` when the outage is released.
+    private var startsHeldByWorkerOutage: [HeldStart] = []
+    /// Starts released from a worker-model outage, waiting for a slot, oldest first. The drain starts
+    /// them ahead of capacity-deferred work and regardless of the auto-run settings — they were
+    /// promised a start ("it starts on its own once the worker's model is changed"). A start refused
+    /// at capacity goes back to its front.
+    private var providerRecoveredQueue: [HeldStart] = []
+
+    /// The worker model's outage, if one stands — read by the start tools so they don't claim a
+    /// start that is being held back.
+    public func workerProviderOutage() -> ProviderOutage? {
+        workerOutage
+    }
+
+    /// Whether `outage` is about the model `role` has now.
+    private func isCurrentModel(of role: AgentRole, in outage: ProviderOutage) -> Bool {
+        llmConfigs[role].map { $0.providerID == outage.providerID && $0.modelID == outage.modelID } ?? false
+    }
+
+    /// An agent's model can't be used. For a worker it puts the task ON HOLD (`.interrupted`)
+    /// instead of letting the self-terminate path fail it — the task didn't fail, the account or
+    /// model did — and trips the breaker so no task starts on that model (telling the user once).
+    /// Called by the agent BEFORE it stops; the result says what happened to its task.
     ///
     /// A failure from a model the role no longer has (the user switched models while this call was
-    /// in flight) is about the OLD model: the task is restarted on the current one and nothing is
-    /// recorded, so a fixed configuration can't be re-tripped by a stale answer.
-    func handleProviderUnavailable(_ outage: ProviderOutage, agentID: UUID) async {
-        let isCurrentModel = llmConfigs[outage.role].map {
-            $0.providerID == outage.providerID && $0.modelID == outage.modelID
-        } ?? false
+    /// in flight) is about the OLD model: nothing is recorded, and the task is handed to the drain to
+    /// restart on the current one once this worker is gone.
+    func handleProviderUnavailable(_ outage: ProviderOutage, agentID: UUID) async -> ProviderOutageHandling {
         guard outage.role == .brown else {
-            // Only the worker role has a breaker (it is the one tasks start on). Any other role's
-            // agent stops on this error; telling the user each time is right, since each is a stop.
-            if isCurrentModel { await postProviderOutageAdvisory(outage) }
-            return
+            // Any other role's agent just stops on this error; telling the user each time is
+            // right, since each is a stop.
+            if isCurrentModel(of: outage.role, in: outage) { await postProviderOutageAdvisory(outage) }
+            return .noTaskHeld
         }
         guard let task = await taskStore.taskForAgent(agentID: agentID),
-              await taskStore.updateStatus(id: task.id, to: .interrupted, ifCurrentlyIn: [.running], cause: .providerUnavailable) else {
-            if isCurrentModel { await recordWorkerOutage(outage) }
-            return
+              let heldRevision = await taskStore.updateStatusReturningRevision(
+                id: task.id, to: .interrupted, ifCurrentlyIn: [.running], cause: .providerUnavailable) else {
+            if isCurrentModel(of: .brown, in: outage) { await recordWorkerOutage(outage) }
+            return .noTaskHeld
         }
-        guard isCurrentModel else {
-            await taskStore.addUpdate(id: task.id, message: "Restarted on the worker's new model — the previous model '\(outage.modelID)' could not be used: \(outage.kind.displayDescription).")
-            restartForNewTask(taskID: task.id, origin: .providerRecovered)
-            return
+        let held = HeldStart(taskID: task.id, statusRevision: heldRevision)
+        // The model check and what follows from it happen with no suspension in between: a model
+        // change landing earlier is seen here, and one landing later finds the breaker to release.
+        guard isCurrentModel(of: .brown, in: outage) else {
+            // This worker still holds the task's slot; the drain its self-termination runs starts
+            // the task again, through the queue a coordinator's child is also taken from.
+            await taskStore.unassignAgent(taskID: task.id, agentID: agentID)
+            providerRecoveredQueue.append(held)
+            await taskStore.addUpdate(id: task.id, message: "Restarting on the worker's new model — the previous model '\(outage.modelID)' could not be used: \(outage.kind.displayDescription).")
+            return .taskRestarting
         }
-        await taskStore.addUpdate(id: task.id, message: "Paused: the worker's model '\(outage.modelID)' can't be used — \(outage.kind.displayDescription). The task resumes when the worker's model is changed, or when you press Play \(outage.kind.retryCondition).")
-        waitOnProvider(task.id, role: .brown)
-        await recordWorkerOutage(outage)
+        holdStart(held)
+        let isNewOutage = workerOutage == nil
+        if isNewOutage { workerOutage = outage }   // keep the first report (its `since`)
+        await taskStore.addUpdate(id: task.id, message: "On hold: the worker's model '\(outage.modelID)' can't be used — \(outage.kind.displayDescription). The task resumes when the worker's model is changed, or when you press Play \(outage.kind.retryCondition). If the app is relaunched first, press Play.")
+        if isNewOutage { await postProviderOutageAdvisory(outage) }
+        return .taskOnHold
     }
 
     /// Trips the worker breaker, telling the user once per outage.
     private func recordWorkerOutage(_ outage: ProviderOutage) async {
-        guard providerOutages[.brown] == nil else { return }   // keep the first report (its `since`)
-        providerOutages[.brown] = outage
+        guard workerOutage == nil else { return }   // keep the first report (its `since`)
+        workerOutage = outage
         await postProviderOutageAdvisory(outage)
     }
 
     private func postProviderOutageAdvisory(_ outage: ProviderOutage) async {
         let consequence = outage.role == .brown
-            ? "No task will start on it until it is fixed. Tasks it stopped are paused, not failed, and resume on their own when you change the worker's model in Settings — or press Play on a paused task \(outage.kind.retryCondition)."
+            ? "No task will start on it until it is fixed. Tasks it stopped are on hold, not failed, and resume on their own when you change the worker's model in Settings — or press Play on one of them \(outage.kind.retryCondition)."
             : "\(outage.role.displayName) stopped and can't work until it is fixed: change its model in Settings, or start it again \(outage.kind.retryCondition)."
         await channel.post(ChannelMessage(
             sender: .system,
@@ -676,65 +699,92 @@ public actor OrchestrationRuntime {
     /// — it is how they say "I fixed the account, try again", and it releases the rest too. Runs
     /// in `restartForNewTask`'s queue item, ahead of the cold/live branch, so both paths share it.
     private func passesProviderOutageGate(taskID: UUID, origin: TaskStartOrigin) async -> Bool {
-        guard providerOutages[.brown] != nil else { return true }
-        if origin == .explicitUser {
-            await releaseProviderOutage(.brown, because: .userRetried)
+        guard let outage = workerOutage else { return true }
+        // An outage of a model the worker no longer has is over (the release from `setProviders`
+        // can trail the model change by a suspension).
+        guard isCurrentModel(of: .brown, in: outage) else {
+            await releaseProviderOutage(because: .modelChanged)
             return true
         }
+        if origin == .explicitUser {
+            await releaseProviderOutage(because: .userRetried)
+            return true
+        }
+        // A task that isn't there goes on to the start, which reports it as not found.
+        guard let task = await taskStore.task(id: taskID) else { return true }
         // Told once per task: a retried start of a task already waiting adds nothing.
-        guard waitOnProvider(taskID, role: .brown) else { return false }
-        let title = await taskStore.task(id: taskID)?.title ?? taskID.uuidString
+        guard holdStart(HeldStart(taskID: taskID, statusRevision: task.statusRevision)) else { return false }
         await channel.post(ChannelMessage(
             sender: .system,
-            content: "Not starting \"\(title)\" yet: the worker's model can't be used. It starts on its own once the worker's model is changed, or when you press Play on a paused task.",
+            content: "Not starting \"\(task.title)\" yet: the worker's model can't be used. It starts on its own once the worker's model is changed, or when you press Play on it.",
             metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(taskID.uuidString), "severity": .severity(.warning)],
             taskID: taskID
         ))
         return false
     }
 
-    /// Adds `taskID` to the tasks waiting on `role`'s model. Returns whether it was newly added.
+    /// Holds a start until the worker's outage is released. Returns whether the task was newly held;
+    /// a task already held keeps its original entry.
     @discardableResult
-    private func waitOnProvider(_ taskID: UUID, role: AgentRole) -> Bool {
-        guard tasksWaitingOnProvider[role]?.contains(taskID) != true else { return false }
-        tasksWaitingOnProvider[role, default: []].append(taskID)
+    private func holdStart(_ held: HeldStart) -> Bool {
+        guard !startsHeldByWorkerOutage.contains(where: { $0.taskID == held.taskID }) else { return false }
+        startsHeldByWorkerOutage.append(held)
         return true
     }
 
     /// Why an outage ended.
     private enum ProviderOutageRelease {
-        /// The role was given a different model.
+        /// The worker was given a different model.
         case modelChanged
         /// The user pressed Play on a task — after fixing the account, presumably.
         case userRetried
     }
 
-    /// Ends the worker's outage: the tasks waiting on it move onto `providerRecoveredQueue`, and the
-    /// drain — which started nothing while the outage stood — runs, starting them (and anything else
-    /// queued) as slots allow. If the model still can't be used, the first task to fail trips it again.
-    private func releaseProviderOutage(_ role: AgentRole, because reason: ProviderOutageRelease) async {
-        guard let outage = providerOutages.removeValue(forKey: role) else { return }
-        let waitingIDs = tasksWaitingOnProvider.removeValue(forKey: role) ?? []
-        // Only tasks still active and waiting to start: one archived, deleted, paused by the user or
-        // started meanwhile has no claim on a restart.
-        var waiting: [UUID] = []
-        for taskID in waitingIDs {
-            if let task = await taskStore.task(id: taskID), task.disposition == .active,
-               task.status == .pending || task.status == .interrupted {
-                waiting.append(taskID)
+    /// Ends the worker's outage: the held starts move onto `providerRecoveredQueue`, and a drain —
+    /// which started nothing while the outage stood — is queued behind the current lifecycle step
+    /// (`drainAfterOutageRelease`). If the model still can't be used, the first task to fail trips
+    /// the breaker again.
+    private func releaseProviderOutage(because reason: ProviderOutageRelease) async {
+        guard let outage = workerOutage else { return }
+        workerOutage = nil
+        let held = startsHeldByWorkerOutage
+        startsHeldByWorkerOutage.removeAll()
+        // Only starts nothing has happened to since: a task archived, deleted, paused by the user or
+        // started meanwhile has moved on, and its revision says so.
+        var released: [HeldStart] = []
+        for entry in held {
+            if let task = await taskStore.task(id: entry.taskID), task.disposition == .active,
+               task.statusRevision == entry.statusRevision {
+                released.append(entry)
             }
         }
-        providerRecoveredQueue += waiting.filter { !providerRecoveredQueue.contains($0) }
+        providerRecoveredQueue += released.filter { entry in !providerRecoveredQueue.contains { $0.taskID == entry.taskID } }
         let lead = switch reason {
-        case .modelChanged: "\(role.displayName)'s model was changed."
-        case .userRetried: "Retrying \(role.displayName)'s model '\(outage.modelID)' because you started a task."
+        case .modelChanged: "The worker's model was changed."
+        case .userRetried: "Retrying the worker's model '\(outage.modelID)' because you started a task."
         }
         await channel.post(ChannelMessage(
             sender: .system,
-            content: waiting.isEmpty ? lead : "\(lead) Starting \(waiting.count) waiting task(s) as worker slots allow.",
+            content: released.isEmpty ? lead : "\(lead) Starting \(released.count) waiting task(s) as worker slots allow.",
             metadata: ["messageKind": .kind(.advisory), "severity": .severity(.info)]
         ))
-        await advanceAfterFreedWorkerSlot()
+        drainAfterOutageRelease()
+    }
+
+    /// The drain after an outage's release, as its own lifecycle step: behind the step that released
+    /// it, so a Play that released the outage claims its own slot before the drain counts them. Each
+    /// scheduled run it starts is queued behind it in turn, and the drain repeats after that start
+    /// holds its slot — otherwise one scheduled run per release would leave the other slots idle,
+    /// since a scheduled start ends a drain pass.
+    private func drainAfterOutageRelease() {
+        lifecycleQueue.schedule { [weak self] in
+            guard let self else { return }
+            if await self.drainPendingScheduledRunQueue() {
+                await self.drainAfterOutageRelease()
+            } else {
+                await self.drainPendingTaskQueue()
+            }
+        }
     }
 
     /// Live worker count vs. capacity — the slot arithmetic tools and UI gate on.
@@ -1235,7 +1285,7 @@ public actor OrchestrationRuntime {
     ///
     /// (The former "task in flight, interrupt = true" path — pause the live task, run the scheduled
     /// one, resume — is gone by design; capacity never evicts a live worker.)
-    private func dispatchAutoRunWake(taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome {
+    func dispatchAutoRunWake(taskID: UUID, amendment: String?) async -> AutoRunDispatchOutcome {
         // `taskOrLibraryTemplate`, not `task(id:)`: a TEMPLATE lives in the GLOBAL library, not this
         // session's store, and `schedule_task_action` promotes a task to a template whenever the
         // schedule is recurring — so the per-session lookup returns nil for exactly the case this
@@ -1848,10 +1898,8 @@ public actor OrchestrationRuntime {
                 // an inactive task never held a worker slot.
                 await scheduler.cancelAllWakes(forRemovedTask: lifecycle.taskID)
                 // Gone from the active list: no longer owed a restart after a worker-model outage.
-                for role in tasksWaitingOnProvider.keys {
-                    tasksWaitingOnProvider[role]?.removeAll { $0 == lifecycle.taskID }
-                }
-                providerRecoveredQueue.removeAll { $0 == lifecycle.taskID }
+                startsHeldByWorkerOutage.removeAll { $0.taskID == lifecycle.taskID }
+                providerRecoveredQueue.removeAll { $0.taskID == lifecycle.taskID }
                 await rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating: lifecycle.taskID)
                 await reportStrandedHolds(watchedTaskID: lifecycle.taskID, because: "is no longer in the active list")
             case .restoredToActive:
@@ -2103,7 +2151,7 @@ public actor OrchestrationRuntime {
         guard !pendingScheduledRunQueue.isEmpty else { return false }
         // The worker's model can't be used: leave the (persisted) entries queued rather than move
         // them onto the in-memory outage list, so a relaunch still has them. The release drains.
-        guard providerOutages[.brown] == nil else { return false }
+        guard workerOutage == nil else { return false }
         guard !isDrainingTaskQueues else { drainRequestedWhileBusy = true; return false }
         isDrainingTaskQueues = true
         defer { isDrainingTaskQueues = false }
@@ -2199,7 +2247,7 @@ public actor OrchestrationRuntime {
         }
         // No worker can run on a model that reported itself unusable; the waiting tasks restart when
         // the outage is released.
-        guard providerOutages[.brown] == nil else { return }
+        guard workerOutage == nil else { return }
         // Cheap early out before the store read; the pool is read again after it.
         guard maxConcurrentWorkers > supervisor.handles(role: .brown).count
                 || !coordinatorsBlockedOnCapacity().isEmpty else { return }
@@ -2219,9 +2267,9 @@ public actor OrchestrationRuntime {
         // completed, was manually run, or was archived drops off).
         launchResumeQueue = launchResumeQueue.filter { byID[$0]?.status == .interrupted }
         capacityDeferredQueue = capacityDeferredQueue.filter { byID[$0]?.status == .interrupted }
-        providerRecoveredQueue = providerRecoveredQueue.filter {
-            byID[$0]?.status == .interrupted || byID[$0]?.status == .pending
-        }
+        // A released start whose task has moved on since (paused, started by other means) is
+        // dropped; its revision says so.
+        providerRecoveredQueue = providerRecoveredQueue.filter { byID[$0.taskID]?.statusRevision == $0.statusRevision }
         let resumingChildIDs = automaticallyResumingChildTaskIDs()
 
         func isCommittedChild(_ task: AgentTask) -> Bool {
@@ -2240,7 +2288,7 @@ public actor OrchestrationRuntime {
         // Above capacity only a blocked coordinator's child may start, so nothing else is considered.
         if !startsAboveCapacity {
             // Released from a worker-model outage: promised a start, so not gated on auto-run.
-            runnable += providerRecoveredQueue.compactMap { byID[$0] }.map { ($0, .providerRecovered) }
+            runnable += providerRecoveredQueue.compactMap { byID[$0.taskID] }.map { ($0, .providerRecovered) }
             runnable += capacityDeferredQueue.compactMap { byID[$0] }.map { ($0, .capacityResume) }
             if autoRunInterruptedTasks {
                 runnable += launchResumeQueue.compactMap { byID[$0] }.map { ($0, .launchResume) }
@@ -2262,7 +2310,7 @@ public actor OrchestrationRuntime {
         let startedIDs = Set(toStart.map(\.task.id))
         launchResumeQueue.removeAll { startedIDs.contains($0) }
         capacityDeferredQueue.removeAll { startedIDs.contains($0) }
-        providerRecoveredQueue.removeAll { startedIDs.contains($0) }
+        providerRecoveredQueue.removeAll { startedIDs.contains($0.taskID) }
         for entry in toStart {
             restartForNewTask(taskID: entry.task.id, origin: entry.origin)
         }
@@ -2919,8 +2967,8 @@ public actor OrchestrationRuntime {
             }
         }
         // A different model is the fix for an outage of the old one.
-        for role in switchedRoles where providerOutages[role] != nil {
-            await releaseProviderOutage(role, because: .modelChanged)
+        if let outage = workerOutage, !isCurrentModel(of: .brown, in: outage) {
+            await releaseProviderOutage(because: .modelChanged)
         }
         // Posted last so this suspension cannot reorder the merge and pushes above against an
         // overlapping call.
@@ -3372,14 +3420,14 @@ public actor OrchestrationRuntime {
     private enum ResumeQueue { case launchResume, capacityDeferred, providerRecovered }
 
     /// Where a start refused at capacity goes back to, and in what status. A task released from a
-    /// worker-model outage returns to `providerRecoveredQueue` in the status it was claimed from
-    /// (pending or interrupted) — it was promised a start. An interrupted task being resumed goes
-    /// back to the queue it came from, still interrupted (a coordinator's child to the
-    /// capacity-deferred queue, which resumes regardless of the auto-run settings). Anything else
-    /// is pended, on no queue.
+    /// worker-model outage returns to `providerRecoveredQueue` — it was promised a start —
+    /// interrupted if it was claimed from `.interrupted`, else pending (a start claim cannot return
+    /// to `.paused`). An interrupted task being resumed goes back to the queue it came from, still
+    /// interrupted (a coordinator's child to the capacity-deferred queue, which resumes regardless
+    /// of the auto-run settings). Anything else is pended, on no queue.
     private static func refusedStartReturn(claimedFrom: AgentTask.Status, origin: TaskStartOrigin) -> (queue: ResumeQueue?, status: AgentTask.Status) {
-        if origin == .providerRecovered, claimedFrom == .pending || claimedFrom == .interrupted {
-            return (.providerRecovered, claimedFrom)
+        if origin == .providerRecovered {
+            return (.providerRecovered, claimedFrom == .interrupted ? .interrupted : .pending)
         }
         guard claimedFrom == .interrupted else { return (nil, .pending) }
         switch origin {
@@ -3424,7 +3472,7 @@ public actor OrchestrationRuntime {
         // still queued for an automatic resume.
         launchResumeQueue.removeAll { $0 == taskID }
         capacityDeferredQueue.removeAll { $0 == taskID }
-        providerRecoveredQueue.removeAll { $0 == taskID }
+        providerRecoveredQueue.removeAll { $0.taskID == taskID }
 
         // Cycle out IDLE workers: any whose task is terminal, inactive, or gone is a
         // leftover from a previous task and frees its slot here. Workers on live tasks
@@ -3467,7 +3515,8 @@ public actor OrchestrationRuntime {
             // idle-worker cycling above, and an unconditional revert would clobber that pause and
             // let the auto-advance drain run a task that was meant to stay paused. If the CAS loses,
             // honor the new status silently (no misleading "queued" message).
-            guard await taskStore.updateStatus(id: taskID, to: revertStatus, ifCurrentlyIn: [.starting], cause: .startAbandoned) else { return }
+            guard let revertedRevision = await taskStore.updateStatusReturningRevision(
+                id: taskID, to: revertStatus, ifCurrentlyIn: [.starting], cause: .startAbandoned) else { return }
             switch resumeQueue {
             case .launchResume?:
                 launchResumeQueue.removeAll { $0 == taskID }
@@ -3476,8 +3525,8 @@ public actor OrchestrationRuntime {
                 capacityDeferredQueue.removeAll { $0 == taskID }
                 capacityDeferredQueue.insert(taskID, at: 0)
             case .providerRecovered?:
-                providerRecoveredQueue.removeAll { $0 == taskID }
-                providerRecoveredQueue.insert(taskID, at: 0)
+                providerRecoveredQueue.removeAll { $0.taskID == taskID }
+                providerRecoveredQueue.insert(HeldStart(taskID: taskID, statusRevision: revertedRevision), at: 0)
             case nil:
                 break
             }
@@ -5897,7 +5946,8 @@ public actor OrchestrationRuntime {
                 await self?.orchestrationSettings.scopeToolSetOnTaskStart ?? OrchestrationSettings.builtIn.scopeToolSetOnTaskStart
             },
             reportProviderUnavailable: { [weak self] outage in
-                await self?.handleProviderUnavailable(outage, agentID: agentID)
+                // A runtime already gone holds nothing.
+                await self?.handleProviderUnavailable(outage, agentID: agentID) ?? .noTaskHeld
             },
             workerProviderOutage: { [weak self] in
                 await self?.workerProviderOutage()

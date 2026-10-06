@@ -184,6 +184,8 @@ struct TaskValidationCoordinatorTests {
                 "send-back returns the task to the worker (or re-queues it if no slot is free)")
         #expect(final?.result == nil, "the rejected result is cleared for the rework")
         #expect(final?.updates.contains { $0.message.contains("Sent back by the user") } == true)
+        // The send-back started a worker; it stays mid-call until stopped.
+        await runtime.stopAll()
     }
 
     @Test("occupiesWorkerSlot: validator-error park frees the slot; help/config parks keep it")
@@ -253,6 +255,7 @@ struct TaskValidationCoordinatorTests {
         let final = await runtime.taskStore.task(id: task.id)
         #expect(final?.status == .running || final?.status == .pending)
         #expect(final?.updates.contains { $0.message.contains("not ready, fix the thing") } == true)
+        await runtime.stopAll()
     }
 
     @Test("respond_to_user_acceptance: refuses a reject with no feedback")
@@ -305,9 +308,10 @@ struct TaskValidationCoordinatorTests {
         _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
         let reply = await userReplyAfterPark(on: runtime, taskID: task.id, "no, fix the header")
         #expect(await runtime.resolveUserAcceptanceRelay(taskID: task.id, accept: false, feedback: "fix the header", authorizedBy: reply).succeeded)
-        let final = try #require(await runtime.taskStore.task(id: task.id))
-        #expect(final.status == .running || final.status == .pending)
-        #expect(final.updates.contains { $0.message == OrchestrationRuntime.userAcceptanceRelayAuditNote(reply) })
+        let final = await runtime.taskStore.task(id: task.id)
+        #expect(final?.status == .running || final?.status == .pending)
+        #expect(final?.updates.contains { $0.message == OrchestrationRuntime.userAcceptanceRelayAuditNote(reply) } == true)
+        await runtime.stopAll()
     }
 
     @Test("Relay: refused with no in-app message, or one written before the park — the task stays parked")

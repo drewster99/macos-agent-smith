@@ -3273,6 +3273,19 @@ public actor TaskStore {
         return applyStatus(id: id, to: newStatus, cause: cause)
     }
 
+    /// `updateStatus(id:to:ifCurrentlyIn:cause:)`, returning the status revision the write produced
+    /// (nil when refused). Read in the same actor turn as the write, so a later write can never be
+    /// mistaken for this one.
+    public func updateStatusReturningRevision(
+        id: UUID,
+        to newStatus: AgentTask.Status,
+        ifCurrentlyIn allowed: Set<AgentTask.Status>,
+        cause: TaskTransitionCause
+    ) -> Int? {
+        guard updateStatus(id: id, to: newStatus, ifCurrentlyIn: allowed, cause: cause) else { return nil }
+        return tasks[id]?.statusRevision
+    }
+
     // MARK: - Bulk operations
 
     /// Restores tasks from a persisted list (e.g., on app launch).

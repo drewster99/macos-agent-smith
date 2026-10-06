@@ -109,12 +109,11 @@ struct WorkerSlotDrainTests {
         // Tear the worker down with A still `.running`, so NO terminal status transition fires and
         // the only thing that can admit B is the drain this teardown kicks.
         //
-        // Deliberately not driven through validation-completion. That is the shape the bug had, but
-        // it cannot be tested with a mock worker: the mock repeats its last canned response, trips
-        // the text-turn guard within a second or two, and self-terminates — and that death both
-        // frees the slot and races the terminal-status hook's own drain, so the test passed with
-        // the fix reverted 4 times in 5. Isolating the teardown removes every confound: with A
-        // `.running` and its worker gone, nothing else in the system has any reason to start B.
+        // Deliberately not driven through validation-completion, the shape the bug had: the
+        // terminal-status hook runs its own drain, which would admit B with the fix reverted. (An
+        // answering mock worker once confounded this further by dying on its own; the worker here
+        // stays mid-call.) Isolating the teardown removes every confound: with A `.running` and its
+        // worker gone, nothing else in the system has any reason to start B.
         let brownForA = try #require(await runtime.agentIDForRole(.brown))
         #expect(await store.task(id: taskA.id)?.status == .running)
         _ = await runtime.terminateAgent(id: brownForA)

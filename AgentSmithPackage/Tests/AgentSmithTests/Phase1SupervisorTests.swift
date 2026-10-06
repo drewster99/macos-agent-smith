@@ -347,6 +347,78 @@ struct SmithContextManagementTests {
         #expect(await agent.contextSnapshot().count == 2, "the reset history was left alone")
     }
 
+    // MARK: Where the kept tail starts (`AgentActor.compactionTailStart`)
+
+    private static func toolTurn(calls count: Int) -> (call: LLMMessage, results: [LLMMessage]) {
+        let calls = (1...count).map { LLMToolCall(id: "call-\($0)", name: "file_read", arguments: "{}") }
+        return (.assistant(from: LLMResponse(toolCalls: calls)), calls.map { .toolResult("result", callID: $0.id) })
+    }
+
+    /// A snapshot taken mid-turn ends in tool results; the turn's last result arrives after it.
+    /// Skipping forward over results passed the snapshot's end and kept that last result alone,
+    /// its call summarized away — a request every provider rejects, which stops Smith.
+    @Test("the kept tail never starts on a tool result whose call would be summarized away")
+    func compactionTailNeverOrphansToolResults() {
+        let turn = Self.toolTurn(calls: 7)
+        let snapshot: [LLMMessage] = [.system("S")] + (1...5).map { .user("message \($0)") } + [turn.call] + Array(turn.results.prefix(6))
+        let history = snapshot + [turn.results[6]]
+        let tailStart = AgentActor.compactionTailStart(history: history, summarizedSnapshot: snapshot, keepingRecentTurns: 6)
+        #expect(tailStart == 6, "the tail must start on the assistant turn that owns the results")
+        if let tailStart {
+            #expect(history[tailStart].role == .assistant)
+            #expect(Self.orphanedToolResultCount(in: Array(history[tailStart...])) == 0)
+        }
+    }
+
+    /// Tool results in `messages` whose call is not also in `messages`.
+    private static func orphanedToolResultCount(in messages: [LLMMessage]) -> Int {
+        var callIDs: Set<String> = []
+        var orphans = 0
+        for message in messages {
+            switch message.content {
+            case .toolCalls(let calls), .mixed(_, let calls):
+                callIDs.formUnion(calls.map(\.id))
+            case .toolResult(let callID, _):
+                if !callIDs.contains(callID) { orphans += 1 }
+            default:
+                break
+            }
+        }
+        return orphans
+    }
+
+    @Test("a tail landing mid-results moves back onto their call")
+    func compactionTailMovesBackOntoCall() {
+        let turn = Self.toolTurn(calls: 3)
+        let history: [LLMMessage] = [.system("S")] + (1...8).map { .user("message \($0)") } + [turn.call] + turn.results + [.user("after")]
+        // keep 3 → the tail would start on the second result.
+        let tailStart = AgentActor.compactionTailStart(history: history, summarizedSnapshot: history, keepingRecentTurns: 3)
+        #expect(tailStart.map { history[$0].role } == .assistant)
+    }
+
+    @Test("a same-length edit inside the summarized span discards the summary; an edit in the tail does not")
+    func compactionTailChecksOnlyTheSummarizedSpan() {
+        let snapshot: [LLMMessage] = [.system("S")] + (1...12).map { .user("message \($0)") }
+        var middleEdited = snapshot
+        middleEdited[4] = .user("rewritten")
+        #expect(AgentActor.compactionTailStart(history: middleEdited, summarizedSnapshot: snapshot, keepingRecentTurns: 3) == nil)
+
+        var tailEdited = snapshot
+        tailEdited[12] = .user("message 12, with a newly drained message merged in")
+        #expect(AgentActor.compactionTailStart(history: tailEdited, summarizedSnapshot: snapshot, keepingRecentTurns: 3) == 10)
+
+        var promptEdited = snapshot
+        promptEdited[0] = .system("A NEW PROMPT")
+        #expect(AgentActor.compactionTailStart(history: promptEdited, summarizedSnapshot: snapshot, keepingRecentTurns: 3) == 10)
+    }
+
+    @Test("an empty snapshot or history has no tail start")
+    func compactionTailStartRejectsEmpty() {
+        let history: [LLMMessage] = [.system("S"), .user("a")]
+        #expect(AgentActor.compactionTailStart(history: history, summarizedSnapshot: [], keepingRecentTurns: 3) == nil)
+        #expect(AgentActor.compactionTailStart(history: [], summarizedSnapshot: history, keepingRecentTurns: 3) == nil)
+    }
+
     @Test("clearSmithContext resets a live Smith and re-briefs task state")
     func clearSmithContextResetsLiveSmith() async {
         let runtime = makeLiveSmithRuntime()

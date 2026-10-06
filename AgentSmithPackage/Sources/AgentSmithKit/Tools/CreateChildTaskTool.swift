@@ -142,6 +142,10 @@ struct CreateChildTaskTool: AgentTool {
             context: context
         )
         await context.startChildTask(child.id)
-        return .success("Child task created (ID: \(child.id.uuidString), title: \"\(title)\"). It starts as soon as a worker slot is free. Its outcome will be delivered to you; call `wait_for_child_tasks` when you have nothing else to do until then.")
+        // The worker's model can't be used: the start is held, so don't promise a free slot is enough.
+        let whenItStarts = await context.workerProviderOutage() == nil
+            ? "It starts as soon as a worker slot is free."
+            : "It is held until the workers' model can be used again, then starts on its own."
+        return .success("Child task created (ID: \(child.id.uuidString), title: \"\(title)\"). \(whenItStarts) Its outcome will be delivered to you; call `wait_for_child_tasks` when you have nothing else to do until then.")
     }
 }

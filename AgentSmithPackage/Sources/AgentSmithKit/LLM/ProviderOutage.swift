@@ -21,9 +21,10 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
     /// 429 is transient — only by `afterRetriesExhausted(on:)`.
     case rateLimitExhausted
 
-    /// The kind of `error`, or nil when it is not an account/model problem. A malformed request,
-    /// a content-policy refusal or a context overflow belongs to ONE conversation, not the model.
-    public static func of(_ error: Error) -> ProviderUnavailableKind? {
+    /// The kind of `error` from `providerID`, or nil when it is not an account/model problem. A
+    /// malformed request, a content-policy refusal or a context overflow belongs to ONE
+    /// conversation, not the model.
+    public static func of(_ error: Error, providerID: String) -> ProviderUnavailableKind? {
         guard let providerError = error as? LLMProviderError,
               case .httpError(let statusCode, let body, _, _) = providerError else { return nil }
         if let limit = CodexLimit.parse(statusCode: statusCode, body: body) {
@@ -40,6 +41,10 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
         // not of the account — and says so in typed fields of its error object.
         case 403 where isModerationRefusal(body: body): return nil
         case 403: return .forbidden
+        // OpenRouter answers 404 "No endpoints found that support …" when the REQUEST needs what
+        // the model can't do (image input, a tool_choice value) — one conversation's problem. Its
+        // unknown-model answer is a 400. Keyed on the provider, never the message.
+        case 404 where providerID == BuiltInProviders.ID.openRouter: return nil
         case 404: return .modelNotFound
         default: return nil
         }
@@ -71,7 +76,7 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
         return metadata["reasons"] != nil || metadata["flagged_input"] != nil
     }
 
-    /// What the user does before pressing Play, finishing "press Play on a paused task …".
+    /// What the user does before pressing Play, finishing "press Play on one of them …".
     public var retryCondition: String {
         switch self {
         case .rateLimitExhausted: return "once the provider's limit resets"
@@ -92,8 +97,18 @@ public enum ProviderUnavailableKind: Sendable, Equatable {
     }
 }
 
+/// What the runtime did with an agent's `ProviderOutage` report — the agent's stop line says it.
+public enum ProviderOutageHandling: Sendable, Equatable {
+    /// The worker's task is on hold until the worker's model can be used.
+    case taskOnHold
+    /// The report was about a model the worker no longer has; its task restarts on the current one.
+    case taskRestarting
+    /// No task was put on hold: not a worker, or its task was not running.
+    case noTaskHeld
+}
+
 /// A role's model reported unusable (`ProviderUnavailableKind`). While one stands for the worker
-/// role, no task starts on that model; tasks it stopped are paused, not failed, and resume when the
+/// role, no task starts on that model; tasks it stopped are on hold, not failed, and restart when the
 /// worker's model changes or the user presses Play on one of them.
 public struct ProviderOutage: Sendable, Equatable {
     public let role: AgentRole

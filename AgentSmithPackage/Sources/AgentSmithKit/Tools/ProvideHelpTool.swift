@@ -73,6 +73,11 @@ struct ProvideHelpTool: AgentTool {
                 break
             }
         }
+        // A new worker would run on a model that can't be used, fail at once and put the task on
+        // hold — with the help request already consumed. Keep the request and say why.
+        if brownID == nil, let outage = await context.workerProviderOutage() {
+            return .failure("Couldn't resume this task: the worker's model '\(outage.modelID)' can't be used (\(outage.kind.displayDescription)). The task stays parked awaiting help, with its help request intact; answer again once the user has changed the worker's model.")
+        }
         if brownID == nil, let newBrownID = await context.spawnBrown(task) {
             await context.taskStore.assignAgent(taskID: taskID, agentID: newBrownID)
             brownID = newBrownID

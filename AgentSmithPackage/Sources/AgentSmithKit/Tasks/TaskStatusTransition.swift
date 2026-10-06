@@ -98,8 +98,8 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     /// The user lowered worker capacity and this task's worker was stopped to free a slot.
     case capacityShed
     /// The worker's model can't be used (out of credits, rejected key, model not in the plan —
-    /// `ProviderUnavailableKind`): the task is paused rather than failed, and resumes when the
-    /// worker's model changes or the user presses Play.
+    /// `ProviderUnavailableKind`): the task is put on hold (interrupted) rather than failed, and
+    /// restarts when the worker's model changes or the user presses Play.
     case providerUnavailable
     /// A scheduled task action (pause / interrupt) fired.
     case scheduledAction(TaskActionKind)

@@ -15,59 +15,130 @@ struct BackgroundSummaryStopTests {
     @Test("Stop cancels a running summary and says which task's summary was not written")
     func stopCancelsRunningSummary() async throws {
         let summarizer = HangingSummarizerProvider()
-        let runtime = try makeRuntime(summarizerProvider: summarizer)
-        await runtime.start()
-        let store = await runtime.taskStore
-        await store.restore([AgentTask(title: "Finished work", description: "d", status: .completed)])
-        let task = try #require(await store.allTasks().first { $0.title == "Finished work" })
+        try await withRuntime(summarizerProvider: summarizer) { runtime, store in
+            let taskID = try await addCompletedTask("Finished work", to: store)
+            await runtime.summarizeAndEmbedTaskInBackground(taskID: taskID)
+            let called = try await waitUntil { await summarizer.callCount == 1 }
+            #expect(called, "the summary never reached the Summarizer")
 
-        await runtime.summarizeAndEmbedTaskInBackground(taskID: task.id)
-        #expect(try await waitUntil { await summarizer.callStarted }, "the summary never reached the Summarizer")
+            await runtime.stopAll()
 
-        await runtime.stopAll()
-
-        #expect(await summarizer.wasCancelled, "Stop must end the Summarizer call, not leave it billing")
-        let note = await runtime.channel.allMessages().first {
-            $0.kind == .advisory && $0.taskID == task.id && $0.content.contains("Stopped before the summary")
+            #expect(await summarizer.cancellations == 1, "Stop must end the Summarizer call, not leave it billing")
+            let messages = await runtime.channel.allMessages()
+            let note = messages.first { $0.kind == .advisory && $0.taskID == taskID && $0.content.contains("Stopped before the summary") }
+            #expect(note?.content.contains("Finished work") == true)
+            #expect(note?.severity == .warning)
+            // A cancelled transfer throws URLError.cancelled, which reads as transient: it must not
+            // be announced as a retry.
+            #expect(!messages.contains { $0.content.contains("Summarization retry") })
         }
-        #expect(note != nil)
-        #expect(note?.content.contains("Finished work") == true)
-        #expect(note?.severity == .warning)
-        #expect(await store.task(id: task.id)?.summary == nil)
     }
 
     @Test("a summary that finished before Stop is kept and not reported")
     func finishedSummaryIsNotReported() async throws {
-        let runtime = try makeRuntime(summarizerProvider: MockLLMProvider(responses: [LLMResponse(text: "What was done.")]))
-        await runtime.start()
-        let store = await runtime.taskStore
-        await store.restore([AgentTask(title: "Quick work", description: "d", status: .completed)])
-        let task = try #require(await store.allTasks().first { $0.title == "Quick work" })
+        try await withRuntime(summarizerProvider: MockLLMProvider(responses: [LLMResponse(text: "What was done.")])) { runtime, store in
+            let taskID = try await addCompletedTask("Quick work", to: store)
+            await runtime.summarizeAndEmbedTaskInBackground(taskID: taskID)
+            let written = try await waitUntil { await store.task(id: taskID)?.summary != nil }
+            #expect(written)
+            await runtime.stopAll()
+            #expect(!(await runtime.channel.allMessages().contains { $0.content.contains("Stopped before the summary") }))
+        }
+    }
 
-        await runtime.summarizeAndEmbedTaskInBackground(taskID: task.id)
-        #expect(try await waitUntil { await store.task(id: task.id)?.summary != nil })
+    /// A completion can land while Stop runs (its lifecycle step queued behind the Stop). Its
+    /// summary must not start after Stop has already cancelled the others.
+    @Test("a summary requested after Stop is not started, and says so")
+    func summaryAfterStopIsNotStarted() async throws {
+        let summarizer = HangingSummarizerProvider()
+        try await withRuntime(summarizerProvider: summarizer) { runtime, store in
+            let taskID = try await addCompletedTask("Late completion", to: store)
+            await runtime.stopAll()
+            await runtime.summarizeAndEmbedTaskInBackground(taskID: taskID)
+            let noted = try await waitUntil {
+                await runtime.channel.allMessages().contains { $0.taskID == taskID && $0.content.contains("Stopped before the summary") }
+            }
+            #expect(noted)
+            #expect(await summarizer.callCount == 0, "a summary started after Stop")
+        }
+    }
 
-        await runtime.stopAll()
-        #expect(!(await runtime.channel.allMessages().contains { $0.content.contains("Stopped before the summary") }))
+    /// A task reopened and completed again is summarized again; the older run, still waiting on
+    /// its provider, would otherwise overwrite the newer summary with an older snapshot.
+    @Test("a newer summary of a task cancels the older one still running")
+    func newerSummarySupersedesOlder() async throws {
+        let summarizer = HangingSummarizerProvider()
+        try await withRuntime(summarizerProvider: summarizer) { runtime, store in
+            let taskID = try await addCompletedTask("Done twice", to: store)
+            await runtime.summarizeAndEmbedTaskInBackground(taskID: taskID)
+            let firstCalled = try await waitUntil { await summarizer.callCount == 1 }
+            #expect(firstCalled)
+            await runtime.summarizeAndEmbedTaskInBackground(taskID: taskID)
+            let superseded = try await waitUntil {
+                let cancellations = await summarizer.cancellations
+                let calls = await summarizer.callCount
+                return cancellations == 1 && calls == 2
+            }
+            #expect(superseded, "the older summary was not cancelled")
+
+            await runtime.stopAll()
+            let notes = await runtime.channel.allMessages().filter { $0.taskID == taskID && $0.content.contains("Stopped before the summary") }
+            #expect(notes.count == 1, "only the run Stop cancelled is reported")
+        }
     }
 
     // MARK: - Helpers
 
-    /// A Summarizer call that never answers until cancelled, recording both.
+    /// A Summarizer call that never answers until cancelled, failing then the way a real transfer
+    /// does (`URLError.cancelled`, not `CancellationError`).
     private actor HangingSummarizerProvider: LLMProvider {
-        private(set) var callStarted = false
-        private(set) var wasCancelled = false
+        private(set) var callCount = 0
+        private(set) var cancellations = 0
 
         func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
-            callStarted = true
+            callCount += 1
             do {
                 try await Task.sleep(for: .seconds(3600))
             } catch {
-                wasCancelled = true
-                throw error
+                cancellations += 1
+                throw URLError(.cancelled)
             }
-            return LLMResponse(text: "unreachable")
+            throw URLError(.timedOut)
         }
+    }
+
+    private func addCompletedTask(_ title: String, to store: TaskStore) async throws -> UUID {
+        let taskID = await store.addTask(title: title, description: "d").id
+        let completed = await store.driveStatus(id: taskID, to: .completed)
+        try #require(completed)
+        return taskID
+    }
+
+    /// Runs `body` on a started runtime and always stops it and removes its files, even when the
+    /// body throws.
+    private func withRuntime(
+        summarizerProvider: any LLMProvider,
+        _ body: (OrchestrationRuntime, TaskStore) async throws -> Void
+    ) async throws {
+        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("agent-smith-background-summary-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        let runtime = makeRuntime(summarizerProvider: summarizerProvider, tmpRoot: tmpRoot)
+        await runtime.start()
+        var failure: Error?
+        do {
+            try await body(runtime, await runtime.taskStore)
+        } catch {
+            failure = error
+        }
+        await runtime.stopAll()
+        do {
+            try FileManager.default.removeItem(at: tmpRoot)
+        } catch {
+            Issue.record("could not remove the test's files at \(tmpRoot.path): \(error)")
+        }
+        if let failure { throw failure }
     }
 
     private func waitUntil(timeout: Duration = .seconds(15), _ predicate: @Sendable () async -> Bool) async throws -> Bool {
@@ -79,11 +150,7 @@ struct BackgroundSummaryStopTests {
         return await predicate()
     }
 
-    private func makeRuntime(summarizerProvider: any LLMProvider) throws -> OrchestrationRuntime {
-        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("agent-smith-background-summary-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+    private func makeRuntime(summarizerProvider: any LLMProvider, tmpRoot: URL) -> OrchestrationRuntime {
         let config = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
         return OrchestrationRuntime(
             providers: [

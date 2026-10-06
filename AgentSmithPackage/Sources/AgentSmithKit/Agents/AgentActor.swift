@@ -1260,24 +1260,11 @@ public actor AgentActor {
         // system + summary + tail must actually shrink the history to be worth it.
         guard summarizedSnapshot.count > keepingRecentTurns + 3 else { return .tooSmall }
 
-        // Where the kept tail starts, measured on the SNAPSHOT.
-        var tailStart = max(1, summarizedSnapshot.count - keepingRecentTurns)
-        // Only `[1..<tailStart]` is replaced by the summary, so only that span must still be what
-        // was summarized. The system prompt (`[0]`, which a prompt edit replaces) and the tail
-        // (whose last user turn a newly drained message may be merged into) are kept from the
-        // CURRENT history, so edits there are carried over rather than discarding the summary.
-        guard count >= tailStart,
-              conversationHistory[1..<tailStart].elementsEqual(summarizedSnapshot[1..<tailStart]) else {
-            return .historyChanged
-        }
-        // Never start the tail on a tool result: move back onto the assistant turn that owns it,
-        // so a tool_use/tool_result pair is never split. Backwards, never forwards — skipping
-        // forward could pass the snapshot's end and keep results whose call was summarized away
-        // (a snapshot taken mid-turn ends in results; the rest of them arrive after it), which
-        // providers reject. The span shrinks, so it stays verified.
-        while tailStart > 1, tailStart < count, conversationHistory[tailStart].role == .tool {
-            tailStart -= 1
-        }
+        guard let tailStart = Self.compactionTailStart(
+            history: conversationHistory,
+            summarizedSnapshot: summarizedSnapshot,
+            keepingRecentTurns: keepingRecentTurns
+        ) else { return .historyChanged }
 
         var compacted: [LLMMessage] = [conversationHistory[0]]
         compacted.append(.user("""
@@ -1296,6 +1283,36 @@ public actor AgentActor {
         markHistoryRewritten()
         pushLiveContext()
         return .compacted(before: count, after: compacted.count)
+    }
+
+    /// Where a compaction's kept tail starts in `history`: everything before it (after the system
+    /// prompt) is replaced by the summary of `summarizedSnapshot`. Nil when the history no longer
+    /// starts with what was summarized (`.historyChanged`).
+    ///
+    /// Measured on the SNAPSHOT, so messages added during the summarizer call are kept. Only
+    /// `[1..<tailStart]` must still match the snapshot: the system prompt (`[0]`, which a prompt edit
+    /// replaces) and the tail (whose last user turn a newly drained message may be merged into) are
+    /// taken from the CURRENT history, so edits there carry over instead of discarding the summary.
+    ///
+    /// The tail never starts on a tool result: it moves back onto the assistant turn that owns it,
+    /// so a tool_use/tool_result pair is never split. Backwards, never forwards — skipping forward
+    /// could pass the snapshot's end and keep results whose call was summarized away (a snapshot
+    /// taken mid-turn ends in results; the rest arrive after it), which providers reject. Moving
+    /// back shrinks the replaced span, so it stays verified.
+    static func compactionTailStart(
+        history: [LLMMessage],
+        summarizedSnapshot: [LLMMessage],
+        keepingRecentTurns: Int
+    ) -> Int? {
+        var tailStart = max(1, summarizedSnapshot.count - keepingRecentTurns)
+        guard !history.isEmpty, history.count >= tailStart, summarizedSnapshot.count >= tailStart,
+              history[1..<tailStart].elementsEqual(summarizedSnapshot[1..<tailStart]) else {
+            return nil
+        }
+        while tailStart > 1, tailStart < history.count, history[tailStart].role == .tool {
+            tailStart -= 1
+        }
+        return tailStart
     }
 
     /// Returns and clears the snapshots stashed by the most recent `captureSnapshots: true`
@@ -2206,25 +2223,15 @@ public actor AgentActor {
                     // An account or model problem (not this conversation's): reported BEFORE the
                     // stop, so the runtime pauses this agent's task instead of the self-terminate
                     // path failing it, and stops starting tasks on a model that can't run them.
-                    let providerUnavailable = failureWasProviderCall ? ProviderUnavailableKind.of(error) : nil
-                    if let kind = providerUnavailable {
-                        await toolContext.reportProviderUnavailable(ProviderOutage(
-                            role: configuration.role,
-                            providerID: configuration.llmConfig.providerID,
-                            modelID: configuration.llmConfig.model,
-                            kind: kind,
-                            detail: error.localizedDescription
-                        ))
-                    }
-                    // A worker stopped by its model's outage leaves its task paused, not failed —
-                    // say that, rather than a stop that reads as the task's failure.
-                    let workerTaskPaused = providerUnavailable != nil && configuration.role == .brown
+                    let kind = failureWasProviderCall ? ProviderUnavailableKind.of(error, providerID: configuration.llmConfig.providerID) : nil
+                    let handling = await reportProviderUnavailable(kind, error: error)
+                    // A worker stopped by its model's outage leaves its task on hold, not failed —
+                    // say what actually happened to it, rather than a stop that reads as its failure.
                     await toolContext.post(ChannelMessage(
                         sender: .system,
-                        content: workerTaskPaused
-                            ? "Agent \(configuration.role.displayName) stopped; its task is paused until the worker's model can be used."
-                            : "Agent \(configuration.role.displayName) stopped — this error cannot be resolved by retrying: \(error.localizedDescription)",
-                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(workerTaskPaused ? .warning : .error), "agentRole": .string(configuration.role.rawValue)]
+                        content: Self.taskFateAfterProviderOutage(handling).map { "Agent \(configuration.role.displayName) stopped; \($0)" }
+                            ?? "Agent \(configuration.role.displayName) stopped — this error cannot be resolved by retrying: \(error.localizedDescription)",
+                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(handling == .noTaskHeld ? .error : .warning), "agentRole": .string(configuration.role.rawValue)]
                     ))
                     isRunning = false
                     break
@@ -2235,23 +2242,14 @@ public actor AgentActor {
                     // A 429 that outlasted every retry is a limit only a person can lift: reported
                     // BEFORE the stop like any unusable model, so a worker's task is PAUSED (and no
                     // other task starts on that model) instead of the self-terminate path failing it.
-                    let providerUnavailable = failureWasProviderCall ? ProviderUnavailableKind.afterRetriesExhausted(on: error) : nil
-                    if let kind = providerUnavailable {
-                        await toolContext.reportProviderUnavailable(ProviderOutage(
-                            role: configuration.role,
-                            providerID: configuration.llmConfig.providerID,
-                            modelID: configuration.llmConfig.model,
-                            kind: kind,
-                            detail: error.localizedDescription
-                        ))
-                    }
+                    let kind = failureWasProviderCall ? ProviderUnavailableKind.afterRetriesExhausted(on: error) : nil
+                    let handling = await reportProviderUnavailable(kind, error: error)
                     // Name which bound fired, and what it usually means. A 429 that never states a
                     // delay and never clears is far more often an exhausted quota or an unpaid
                     // balance than a brief throttle — and that is something only the user can fix.
-                    let workerTaskPaused = providerUnavailable != nil && configuration.role == .brown
                     let stopReason: String
-                    if workerTaskPaused {
-                        stopReason = "stopped: the provider kept answering HTTP 429 (a rate or usage limit) through \(consecutiveErrors) attempts over \(Self.formatRetryDelay(retryWindowElapsed)). Its task is paused until the worker's model can be used."
+                    if let fate = Self.taskFateAfterProviderOutage(handling) {
+                        stopReason = "stopped: the provider kept answering HTTP 429 (a rate or usage limit) through \(consecutiveErrors) attempts over \(Self.formatRetryDelay(retryWindowElapsed)); \(fate)"
                     } else if retryWindowElapsed >= retryWindowBudget.maxElapsedSeconds {
                         stopReason = isRateLimited
                             ? "stopped: the provider returned HTTP 429 for \(Self.formatRetryDelay(retryWindowElapsed)) and never said when the limit resets. That is usually an exhausted quota or an unpaid balance rather than a brief throttle — check the provider account, or switch this agent's model, then re-run the task."
@@ -2262,7 +2260,7 @@ public actor AgentActor {
                     await toolContext.post(ChannelMessage(
                         sender: .system,
                         content: "Agent \(configuration.role.displayName) \(stopReason)",
-                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(workerTaskPaused ? .warning : .error), "agentRole": .string(configuration.role.rawValue)]
+                        metadata: ["messageKind": .kind(.agentLifecycle), "severity": .severity(handling == .noTaskHeld ? .error : .warning), "agentRole": .string(configuration.role.rawValue)]
                     ))
                     isRunning = false
                     break
@@ -2297,6 +2295,30 @@ public actor AgentActor {
             }
         }
         await toolContext.onSelfTerminate()
+    }
+
+    /// Reports this agent's model as unusable (`kind`, nil when the error says nothing about the
+    /// model) BEFORE the agent stops, so the runtime holds a worker's task instead of the
+    /// self-terminate path failing it. Returns what the runtime did with the task.
+    private func reportProviderUnavailable(_ kind: ProviderUnavailableKind?, error: Error) async -> ProviderOutageHandling {
+        guard let kind else { return .noTaskHeld }
+        return await toolContext.reportProviderUnavailable(ProviderOutage(
+            role: configuration.role,
+            providerID: configuration.llmConfig.providerID,
+            modelID: configuration.llmConfig.model,
+            kind: kind,
+            detail: error.localizedDescription
+        ))
+    }
+
+    /// The end of a stop line saying what happened to the stopped worker's task, or nil when
+    /// nothing did (the line then gives the error).
+    static func taskFateAfterProviderOutage(_ handling: ProviderOutageHandling) -> String? {
+        switch handling {
+        case .taskOnHold: return "its task is on hold until the worker's model can be used."
+        case .taskRestarting: return "its model was changed meanwhile, so its task restarts on the new one."
+        case .noTaskHeld: return nil
+        }
     }
 
     static func isTruncatedQwenToolCall(_ response: LLMResponse) -> Bool {

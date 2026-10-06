@@ -384,9 +384,9 @@ public struct ToolContext: Sendable {
     /// (`OrchestrationRuntime.automaticallyResumingChildTaskIDs`). Nil when the runtime is gone.
     public let automaticallyResumingChildTaskIDs: @Sendable () async -> Set<UUID>?
     /// Reports that the calling agent's model can't be used (`ProviderOutage`), BEFORE the agent
-    /// stops: a worker's task is paused rather than failed, and no task starts on that model until
-    /// it changes or the user retries.
-    public let reportProviderUnavailable: @Sendable (ProviderOutage) async -> Void
+    /// stops: a worker's task is put on hold rather than failed, and no task starts on that model
+    /// until it changes or the user retries. Returns what happened to the agent's task.
+    public let reportProviderUnavailable: @Sendable (ProviderOutage) async -> ProviderOutageHandling
     /// The worker model's outage, if one stands (`OrchestrationRuntime.workerProviderOutage`): a
     /// start then waits instead of running, and the tools must not claim otherwise.
     public let workerProviderOutage: @Sendable () async -> ProviderOutage?
@@ -517,7 +517,7 @@ public struct ToolContext: Sendable {
         maxChildTasksPerTask: @escaping @Sendable () async -> Int? = { nil },
         automaticallyResumingChildTaskIDs: @escaping @Sendable () async -> Set<UUID>? = { nil },
         scopesToolSetOnTaskStart: @escaping @Sendable () async -> Bool = { OrchestrationSettings.builtIn.scopeToolSetOnTaskStart },
-        reportProviderUnavailable: @escaping @Sendable (ProviderOutage) async -> Void = { _ in },
+        reportProviderUnavailable: @escaping @Sendable (ProviderOutage) async -> ProviderOutageHandling = { _ in .noTaskHeld },
         workerProviderOutage: @escaping @Sendable () async -> ProviderOutage? = { nil },
         currentResumingTaskID: UUID? = nil,
         memoryStore: MemoryStore,
