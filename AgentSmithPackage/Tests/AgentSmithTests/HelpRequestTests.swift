@@ -76,6 +76,75 @@ struct HelpRequestTests {
         #expect(delivered?.content.contains("Here it is.") == true)
     }
 
+    /// While the worker's model can't be used, a respawned worker would fail at once and put the
+    /// task on hold — with its help request already consumed. Nothing is spawned; the request stays.
+    @Test("provide_help does not respawn a worker while the worker's model can't be used")
+    func provideHelpRefusesRespawnDuringOutage() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let smithID = UUID()
+        let task = await taskStore.addTask(title: "Extract hooks", description: "...")
+        await taskStore.driveStatus(id: task.id, to: .running)
+        #expect(await taskStore.requestHelp(id: task.id, request: "Need the transcript."))
+        let spawnedFor = SpawnRecorder()
+        let outage = ProviderOutage(role: .brown, providerID: "test", modelID: "broken-model", kind: .paymentRequired, detail: "402")
+        let ctx = ToolContext(
+            agentID: smithID,
+            agentRole: .smith,
+            channel: channel,
+            taskStore: taskStore,
+            spawnBrown: { spawnTask in
+                spawnedFor.record(spawnTask.id)
+                return UUID()
+            },
+            terminateAgent: { _, _ in false },
+            abort: { _, _ in },
+            agentRoleForID: { _ in .smith },
+            workerProviderOutage: { outage },
+            memoryStore: MemoryStore(engine: SemanticSearchEngine())
+        )
+        let result = try await ProvideHelpTool().execute(
+            arguments: ["task_id": .string(task.id.uuidString), "response": .string("Here it is.")],
+            context: ctx
+        )
+        #expect(!result.succeeded)
+        #expect(result.output.contains("broken-model"))
+        #expect(spawnedFor.ids.isEmpty, "a worker was spawned on a model that can't be used")
+        let after = try #require(await taskStore.task(id: task.id))
+        #expect(after.status == .awaitingHelp)
+        #expect(after.helpRequest == "Need the transcript.", "the help request was consumed")
+    }
+
+    /// The outage stops new workers, not a live one: a worker still waiting on its help gets it.
+    @Test("provide_help still answers a live worker while the worker's model can't be used")
+    func provideHelpAnswersLiveWorkerDuringOutage() async throws {
+        let channel = MessageChannel()
+        let taskStore = TaskStore()
+        let brownID = UUID(), smithID = UUID()
+        let task = await taskStore.addTask(title: "Extract hooks", description: "...")
+        await taskStore.assignAgent(taskID: task.id, agentID: brownID)
+        await taskStore.requestHelp(id: task.id, request: "Blocker: x\nNeeded: y")
+        let outage = ProviderOutage(role: .brown, providerID: "test", modelID: "broken-model", kind: .paymentRequired, detail: "402")
+        let ctx = ToolContext(
+            agentID: smithID,
+            agentRole: .smith,
+            channel: channel,
+            taskStore: taskStore,
+            spawnBrown: { _ in nil },
+            terminateAgent: { _, _ in false },
+            abort: { _, _ in },
+            agentRoleForID: { id in id == brownID ? .brown : .smith },
+            workerProviderOutage: { outage },
+            memoryStore: MemoryStore(engine: SemanticSearchEngine())
+        )
+        let result = try await ProvideHelpTool().execute(
+            arguments: ["task_id": .string(task.id.uuidString), "response": .string("Here it is.")],
+            context: ctx
+        )
+        #expect(result.succeeded, "\(result.output)")
+        #expect(await taskStore.task(id: task.id)?.status == .running)
+    }
+
     private final class SpawnRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var spawned: [UUID] = []
