@@ -4571,11 +4571,13 @@ public actor OrchestrationRuntime {
         // slot, and resurrect the runtime via a cold `restartForNewTask`. The app drops the runtime
         // right after a full stopAll and builds a fresh one on restart, so the memoized scheduler is
         // never reused after this.
+        // Not on a task start's cold path: that keeps this runtime and its store, so a summary in
+        // progress still lands. Cancelled here, reported once the agents are down (the report
+        // waits for them to unwind, and nothing else should run in that wait).
+        var stoppedSummaries: [UUID: BackgroundSummary] = [:]
         if !preserveObserverCallbacks {
             await wakeScheduler?.stop()
-            // Not on a task start's cold path: that keeps this runtime and its store, so a summary
-            // in progress still lands.
-            await cancelBackgroundSummaries()
+            stoppedSummaries = cancelBackgroundSummaries()
         }
         // A stop ends background summarizer work too: an auto-compaction would keep calling (and
         // billing) the Summarizer for a Smith being torn down.
@@ -4663,8 +4665,9 @@ public actor OrchestrationRuntime {
         // observability — Security Agent's evaluation history disappeared from the right pane,
         // turn records stopped accumulating, and timer-event channel posts went silent.
         if !preserveObserverCallbacks {
+            await reportUnwrittenSummaries(stoppedSummaries)
             clearObserverCallbacks()
-            // The summarizer outlives a stop (late summaries still land), but its inspector
+            // The summarizer object outlives a stop (the next Start reuses it), but its inspector
             // observer holds the same app-layer closure and goes with the others.
             await taskSummarizer?.setOnLLMCallRecorded(nil)
         }
@@ -5447,15 +5450,20 @@ public actor OrchestrationRuntime {
     }
 
     /// A full Stop ends summaries still running: they would keep calling (and billing) the Summarizer
-    /// after the user stopped the session, and land on a task store the next Start retires. Each one
-    /// gets a moment to unwind — one already saving its result still lands — and each that wrote
-    /// nothing is named, since that task's summary is then never written.
-    private func cancelBackgroundSummaries() async {
+    /// after the user stopped the session, and land on a task store the next Start retires. Returns
+    /// the cancelled ones for `reportUnwrittenSummaries`.
+    private func cancelBackgroundSummaries() -> [UUID: BackgroundSummary] {
         let stopped = backgroundSummaries
         backgroundSummaries.removeAll()
-        guard !stopped.isEmpty else { return }
         stoppingSummaryTokens.formUnion(stopped.keys)
         for summary in stopped.values { summary.work.cancel() }
+        return stopped
+    }
+
+    /// Gives each cancelled summary a moment to unwind — one already saving its result still
+    /// lands — and names each that wrote nothing, since that task's summary is then never written.
+    private func reportUnwrittenSummaries(_ stopped: [UUID: BackgroundSummary]) async {
+        guard !stopped.isEmpty else { return }
         let deadline = ContinuousClock.now.advanced(by: Self.stoppedSummaryUnwindLimit)
         while stopped.keys.contains(where: { stoppedSummaryWritten[$0] == nil }), ContinuousClock.now < deadline {
             do {
