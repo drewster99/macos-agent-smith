@@ -30,7 +30,7 @@ The full design history, rationale, and completed/planned features live in `ROAD
 
 ## Package dependencies (versioned git)
 
-`AgentSmithPackage/Package.swift` depends on versioned git releases (NOT path-based; siblings checkouts are for development of those packages only):
+`AgentSmithPackage/Package.swift` depends on versioned git releases (NOT path-based; sibling checkouts are for development of those packages only):
 
 - `drewster99/swift-llm-kit` (SwiftLLMKit — providers, model configs, Keychain API key storage, `LLMKitManager`, `ModelConfiguration`, `ProviderAPIType`). Releasing a change there means: change → build → commit → push → tag → push tag → bump the `from:` version here.
 - `drewster99/swift-semantic-search` (SemanticSearch — `SemanticSearchEngine` used by `MemoryStore`)
@@ -420,7 +420,7 @@ silently drops the field and would turn "no error" into a recorded false positiv
 ### Persistence boundaries
 
 - Per-session: channel log, tasks, attachments, session-local state JSON. Path: `AppSupport/AgentSmith/sessions/<uuid>/`.
-- Global: `memories/`, task summaries, `UsageRecord` history, model configurations (via SwiftLLMKit), session list. Path: `AppSupport/AgentSmith/`.
+- Global: `memories/`, task summaries, `UsageRecord` history, model catalog (via SwiftLLMKit); per-role overrides in `role_model_config_overrides.json`, session list. Path: `AppSupport/AgentSmith/`.
 - Keychain: provider API keys (service `com.agentsmith.SwiftLLMKit.com.nuclearcyborg.AgentSmith`, account = provider ID).
 
 Every `UsageRecord` and `ChannelMessage` is stamped with `OrchestrationRuntime.currentSessionID` (a fresh UUID per `start()` call) so analytics can group by run without timestamp joins.
@@ -445,11 +445,15 @@ Agent Smith uses **JSON files** for all persistence — no SQLite or other datab
 | **Channel Log** | `/Users/andrew/Library/Application Support/AgentSmith/sessions/{SESSION_ID}/channel_log.jsonl` | Newline-delimited JSON message log |
 | **Memories** | `/Users/andrew/Library/Application Support/AgentSmith/memories.json` | Semantic memory entries with embeddings |
 | **Usage Records** | `/Users/andrew/Library/Application Support/AgentSmith/usage_records.jsonl` | Token/cost tracking — append-only `UsageLogEntry` lines (see below); the legacy `usage_records.json` array is a migration backup, never written |
+| **Role Model Overrides** | `/Users/andrew/Library/Application Support/AgentSmith/role_model_config_overrides.json` | Per-role model configuration overrides |
+| **Validation Metrics** | `/Users/andrew/Library/Application Support/AgentSmith/validation_metrics.jsonl` | Append-only validation metrics log |
+| **Orchestration Override** | `/Users/andrew/Library/Application Support/AgentSmith/orchestration_settings_override.json` | App-level orchestration settings override |
+| **Downloaded Orchestration Defaults** | `/Users/andrew/Library/Application Support/AgentSmith/orchestration_defaults_downloaded.json` | Last downloaded orchestration defaults |
 | **Backups** | `/Users/andrew/Library/Application Support/AgentSmith/backups/` | Automatic backups from migrations |
 
 **Global vs per-session model:**
 
-- **GLOBAL (shared across all sessions):** `sessions.json` (the list), `inactive_tasks.json`, `task_summaries.json`, `attachments/`, `memories.json`, `usage_records.jsonl`, `backups/`, `mcp_servers.json`, `model_overrides.json`
+- **GLOBAL (shared across all sessions):** `sessions.json` (the list), `inactive_tasks.json`, `task_summaries.json`, `attachments/`, `memories.json`, `usage_records.jsonl`, `backups/`, `mcp_servers.json`, `model_overrides.json`, `role_model_config_overrides.json`, `validation_metrics.jsonl`, `orchestration_settings_override.json`, `orchestration_defaults_downloaded.json`
 - **PER-SESSION (scoped to `sessions/{SESSION_ID}/`):** `tasks.json` (active tasks only), `tasks/{TASK_ID}/evidence/`, `state.json`, `channel_log.jsonl`, `timer_events.json`, `scheduled_wakes.json`, `pending_scheduled_run_queue.json`, `notification_ledger.json`, `notification_pending.json`, `pending_user_messages.json`
 
 **Usage records are append-only JSONL (decided 2026-10-05).** `usage_records.jsonl` holds one `UsageLogEntry` per line: a bare `UsageRecord` object, or a row naming its `rowKind` (`UsageLogRowKind`; today only `task_backfill`). The whole-array `usage_records.json` it replaced had reached 151 MB and was re-encoded and rewritten every five seconds while agents ran, holding a second full copy of every record in memory for each encode. `UsageStore.backfillTaskID` — the one operation that changes stored records — appends a backfill ROW that load replays onto the records before it (`UsageLogEntry.replay`, shared with the live mutation via `UsageTaskBackfill.apply(to:)`); never rewrite earlier lines. Both JSONL logs append through `JSONLAppendWriter`, whose `enqueue` is synchronous on purpose: line order must equal call order, and two awaited hops to an actor are not ordered.
@@ -580,7 +584,7 @@ changes, re-arms, and assigns each output only when it changed. The views watch 
   (`FilteredTranscriptProvider.revision`, bumped on every `messages` write) — the one expensive step.
 - The 10 s aging rebuild stays: Live rows age out on a clock, which no observed value reports.
 
-### Task state events and task watches (decided 2026-09-24, revised 2026-09-25 — see TaskStateEventsPlan.md)
+### Task state events and task watches (decided 2026-09-24, revised 2026-09-25 — see `TaskStateEventsPlan.md` at repo root)
 
 **One event source, two kinds of subscriber.** Every live task status change goes through ONE
 `TaskStore` writer, `applyStatus`. It emits ONE typed `TaskStatusTransition`, carrying a per-task
