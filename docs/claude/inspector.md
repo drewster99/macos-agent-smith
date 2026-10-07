@@ -1,0 +1,28 @@
+# Inspector
+
+_Split verbatim from `CLAUDE.md` (2026-10-07); `CLAUDE.md` keeps the binding summary and links here._
+
+### Inspector / archive of terminated agents
+
+When an agent terminates, its conversation history, LLM turn records, and Security Agent evaluations are snapshotted into `terminatedAgentArchive` / `archivedEvaluationRecords` on `OrchestrationRuntime` before the actor is dropped. The `AgentInspectorWindow` UI reads both live and archived agents through this surface — keep it intact when refactoring agent lifecycle code.
+
+**Architecture decision (2026-07-26): the inspector becomes a live "Now" panel, telemetry re-keyed by instance.** The role-keyed inspector in the previous paragraph is the PRE-MIGRATION state. The agreed direction rebuilds the right inspector as a live "Now" panel (agent states, live task stages, a tool-call lifecycle tree with inline security), driven by **per-instance** telemetry (`AgentInstanceRef`) rather than the fixed four `AgentRole` buckets; per-agent config moves to Settings, per-task detail to a click-into-a-task view, durable money to the cost panel. This is the long-deferred "M2 inspector re-key." The full phased build plan + settled UI rules live in `ROADMAP.md` ("Inspector 'Now' panel + M2 telemetry re-key"). Until those phases land, the role-keyed surfaces (`turnsByRole`, `processingRoles`, `toolExecutingByRole`, role-keyed `terminatedAgentArchive`, `AgentInspectorTarget(sessionID, role)`) are still current — do not assume the instance-keyed model exists in code yet.
+
+### Inspector data sources (built 2026-09-23 — see docs/plans/InspectorImprovements.md)
+
+- **Provider calls reach the inspector as `LLMCallEvent` (`completed` turn | `failed` attempt)** through `OrchestrationRuntime.setOnLLMCallRecorded`. Every caller that bills a role emits them: `AgentActor`, every `SecurityEvaluator` (Smith's, each Brown's, and the validation evaluator), `TaskSummarizer.sendRecorded`, and `compactSmithContext`. A new LLM call site that records usage must emit here too, or its cost shows with no call behind it. The one exception is the Validator (`EvaluationRunner`): its record is the task verdict ledger, not a call log. A thrown call is a `LLMCallFailureRecord`, never a fabricated empty turn.
+- **`InspectorCallLog` owns retention honesty**: stable lifetime ordinals, `lifetimeCount`, and why a snapshot is absent. Never number rows by retained-array index.
+- **Self-contained calls** (`LLMTurnRecord.isSelfContainedRequest`) keep the request ONLY in `contextSnapshot`; putting it in `inputDelta` too would defeat the snapshot window.
+- **Per-role session cost reads `CostBoard.runRoleUsage`** (UsageRecords keyed by the run's session id, pushed via `setOnRunSessionChanged`), never the retained turns.
+- **Validator inspector reads task verdict ledgers** (`ValidatorVerdictHistory`); there is no second validator history.
+- **Memory activity feed**: `MemoryStore` is its single publisher (`setOnActivityRecorded`), stamping a sequence before delivery. Queries carry per-corpus `CorpusSearchOutcome` and hit snapshots; mutations are published only after commit, with typed `MemoryActivityOrigin`. Callers never synthesize memory events.
+
+### The inspector's display state is derived in the model (decided 2026-09-26)
+
+**User decision: "Model-side snapshots."** The agent cards and the Live section read finished, `Equatable` values from `AppViewModel.inspectorLive` (`InspectorLiveState`): per-role `RoleCardState.data` (`AgentRoleData`, including the processing / tools-running start dates), `summarizerCard`, and `liveRows`. `InspectorLiveState.rebuild()` reads every input inside `withObservationTracking`, schedules ONE rebuild on the next main-queue turn when any of them changes, re-arms, and assigns each output only when it changed. The views watch NOTHING.
+
+- **Why:** every SwiftUI "onChange(of:) action tried to update multiple times per frame" warning in the app came from the `.onChange` watchers those views used to drive their own `@State` caches (identified site by site with per-site wrapper types), a single input change was enough to trigger one, and SwiftUI SKIPS the action it warns about, so a card sat stale until its 2 s heartbeat. Measured on one small task: 11 warning sites before, 0 after. Frame-batching the sources instead made it WORSE (17). Details: `docs/audits/2026-09-25-onchange-per-frame/`.
+- **Every output is assigned OUTSIDE the tracking, only when it changed — never written inside `computeOutputs()`.** A tracked property written inside the apply closure fires the PREVIOUS rebuild's still-armed tracking (a dictionary subscript assignment fires `willSet` even when the value is unchanged), and with the 10 s aging sweep supplying the first overlap that becomes a self-sustaining loop: `processingSince` / `toolsRunningSince` did exactly this from `b388cf0`, pinning the main thread at 100% (fixed 2026-10-01; measured thousands of rebuilds/s → 2 per 20 s). State a rebuild must carry between passes lives in `@ObservationIgnored` storage (`lastProcessingSince`), never in the tracked output it feeds.
+- **Don't add `.onChange` watchers (or a `@State` cache rebuilt by them) back to these views.** A new input to a card or the Live section is read inside `InspectorLiveState.computeOutputs()`; the tracking picks it up automatically.
+- The transcript is re-bucketed by role only when `AppViewModel.messagesRevision` moves (`FilteredTranscriptProvider.revision`, bumped on every `messages` write) — the one expensive step.
+- The 10 s aging rebuild stays: Live rows age out on a clock, which no observed value reports.
