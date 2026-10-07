@@ -2,7 +2,7 @@
 
 _Split verbatim from `CLAUDE.md` (2026-10-07); `CLAUDE.md` keeps the binding summary and links here._
 
-### Task state events and task watches (decided 2026-09-24, revised 2026-09-25 — see `docs/plans/TaskStateEventsPlan.md`)
+### Task state events and task watches (decided 2026-09-24, revised 2026-09-25 — see `TaskStateEventsPlan.md` at repo root)
 
 **One event source, two kinds of subscriber.** Every live task status change goes through ONE `TaskStore` writer, `applyStatus`. It emits ONE typed `TaskStatusTransition`, carrying a per-task `statusRevision` and a required typed `TaskTransitionCause`, validated against a single `TaskTransitionMatrix`; an illegal combination is refused. Everything that reacts to a status change subscribes to it:
 
