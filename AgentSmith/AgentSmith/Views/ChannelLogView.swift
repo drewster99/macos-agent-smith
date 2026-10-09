@@ -364,6 +364,8 @@ struct ChannelLogView: View, Equatable {
     var verdictFilter: TranscriptFilter = .all
 
     @State private var isAtBottom = true
+    /// Drives programmatic scrolls (to the end, or back to an anchor row); never tracks the user.
+    @State private var scrollPosition = ScrollPosition(idType: ChannelMessage.ID.self)
     @State private var autoScrollEnabled = true
     /// Non-nil while the user has scrolled up: the id of the message the window's top is pinned
     /// to, so streaming messages append *below* the visible area instead of sliding rows off the
@@ -443,27 +445,27 @@ struct ChannelLogView: View, Equatable {
     /// Grows the visible window, pinned so the rows the user is reading do not move.
     ///
     /// Growing inserts older rows ABOVE the current top, which would otherwise shove the content
-    /// downward. Re-anchors to the previously-first visible row once the new rows exist.
-    private func loadEarlier(using proxy: ScrollViewProxy) {
-        let anchorID = cachedVisibleMessages.first?.id
+    /// downward. Re-anchors to the previously-first RENDERED row once the new rows exist (a row folded
+    /// into its parent has no view to anchor to).
+    private func loadEarlier() {
+        let anchorID = cachedVisibleMessages.first { !shouldSuppress($0, toolRequestIDs: toolRequestIDs) }?.id
         maxVisibleCount = min(messages.count, maxVisibleCount + Self.windowGrowStep)
         guard let anchorID else { return }
-        DispatchQueue.main.async { proxy.scrollTo(anchorID, anchor: .top) }
+        DispatchQueue.main.async { scrollPosition.scrollTo(id: anchorID, anchor: .top) }
     }
 
-    /// Scrolls to the last RENDERED message. A suppressed last message has no view, so targeting
-    /// the raw last id made both auto-scroll and the scroll-to-bottom button no-ops in exactly the
-    /// cases they exist for.
-    private func scrollToLatest(using proxy: ScrollViewProxy) {
-        guard let target = lastRenderedMessageID else { return }
+    /// Scrolls to the end of the transcript. By EDGE, not by a message's id: the newest message is
+    /// often folded into its parent row (a tool output, a security verdict) or renders as nothing,
+    /// and scrolling to an id without a view silently does nothing — which is how auto-scroll once
+    /// stopped following the tail with nothing in the logs to say why.
+    private func scrollToLatest() {
         withAnimation(.easeOut(duration: 0.2)) {
-            proxy.scrollTo(target, anchor: .bottom)
+            scrollPosition.scrollTo(edge: .bottom)
         }
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ZStack(alignment: .bottom) {
+        ZStack(alignment: .bottom) {
                 ScrollView {
                     // The three cached values are updated by the single cacheSignature watcher
                     // below, never recomputed on a body pass.
@@ -474,11 +476,15 @@ struct ChannelLogView: View, Equatable {
                         hasRestoredHistory: hasRestoredHistory, displayPrefs: displayPrefs,
                         isSuppressed: { shouldSuppress($0, toolRequestIDs: toolRequestIDs) },
                         onRestoreHistory: onRestoreHistory,
-                        onLoadEarlier: { loadEarlier(using: proxy) },
+                        onLoadEarlier: { loadEarlier() },
                         onExportTaskPDF: onExportTaskPDF, onOpenMCPSettings: onOpenMCPSettings,
                         selectedImageAttachment: $selectedImageAttachment
                     )
                 }
+                // Programmatic scrolling only (no scroll-target layout): the position is not
+                // tracked while the user scrolls, so scrolling never re-renders this view. Where the
+                // user IS is `ChannelLogScrollTracking`'s job.
+                .scrollPosition($scrollPosition)
                 .background(AppColors.channelBackground)
                 .environment(\.timestampPreferences, displayPrefs)
                 .modifier(ChannelLogScrollTracking(
@@ -496,7 +502,7 @@ struct ChannelLogView: View, Equatable {
                 // only one with a view to reach.
                 .onChange(of: messages.last?.id) {
                     guard autoScrollEnabled else { return }
-                    scrollToLatest(using: proxy)
+                    scrollToLatest()
                 }
                 // ONE watcher over the whole dependency set, not one per input. Three separate
                 // watchers ran this rebuild (an array copy plus a grouping-index build over the
@@ -518,7 +524,7 @@ struct ChannelLogView: View, Equatable {
                 }
 
                 if !isAtBottom {
-                    ChannelLogScrollToBottomButton(onTap: { scrollToLatest(using: proxy) })
+                    ChannelLogScrollToBottomButton(onTap: { scrollToLatest() })
                 }
             }
             // GREEDY, and load-bearing in both directions, and applied to the ZSTACK rather than
@@ -534,7 +540,6 @@ struct ChannelLogView: View, Equatable {
             // a split view's child that is not greedy on the cross axis collapses to its intrinsic
             // size and floats centered.
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
     }
     
     /// Updates cached values for window start, visible messages, and grouping index.
@@ -572,8 +577,8 @@ struct ChannelLogView: View, Equatable {
     /// Rebuilds the window, the visible slice, and the grouping index.
     ///
     /// Synchronous, and deliberately not deferred to a later main-queue turn: this cache feeds the
-    /// `ForEach` that the auto-scroll handler above targets
-    /// with `proxy.scrollTo`, so a main-queue turn of delay would put the rebuild behind the scroll
+    /// `ForEach` that the auto-scroll handler above scrolls through, so a main-queue turn of delay
+    /// would put the rebuild behind the scroll
     /// in a view where the two are already tightly interleaved. The signature check removes the
     /// duplicate work without moving anything in time, which is the property that matters here.
     private func updateCachedValues() {
@@ -589,22 +594,6 @@ struct ChannelLogView: View, Equatable {
         guard message.stringMetadata("requestID") != nil else { return false }
         return message.metadata?["securityDisposition"] != nil
             || message.kind == .toolOutput
-    }
-
-    /// The id of the last message that actually HAS a view — the only thing `proxy.scrollTo` can
-    /// reach.
-    ///
-    /// The `ForEach` renders only non-suppressed messages, so a security review or tool output has
-    /// no `.id(...)` of its own; it is folded into its parent `tool_request` row. Scrolling to
-    /// `messages.last?.id` therefore targeted a view that does not exist whenever the newest
-    /// message was one of those — which in this app is most appends, since every tool call produces
-    /// a tool output. `scrollTo` fails silently in that case, so the transcript simply stopped
-    /// following the tail with nothing in the logs to say why.
-    ///
-    /// `windowStartIndex` already walks back past suppressible rows so the window never STARTS on
-    /// one. This is the same hazard at the other end of the array.
-    private var lastRenderedMessageID: ChannelMessage.ID? {
-        messages.last { !shouldSuppress($0, toolRequestIDs: toolRequestIDs) }?.id
     }
 
     /// Suppresses security reviews and tool outputs that are grouped into a parent tool_request row.
