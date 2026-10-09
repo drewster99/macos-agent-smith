@@ -9,11 +9,11 @@ import SemanticSearch
 struct WorkerSpawnScopingTests {
 
     /// A runtime whose Security Agent approves only `file_read` when asked to scope a worker.
-    private func makeRuntime() -> OrchestrationRuntime {
+    private func makeRuntime() throws -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-spawn-scoping-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try? FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
         let scopingResponse = "{\"toolResponses\":[{\"toolID\":\"file_read\",\"isAllowed\":true}]}"
         let configuration = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
         return OrchestrationRuntime(
@@ -35,7 +35,7 @@ struct WorkerSpawnScopingTests {
 
     @Test("A provide_help respawn gets the task's scoped tool set, never Brown's full set")
     func provideHelpRespawnIsScoped() async throws {
-        let runtime = makeRuntime()
+        let runtime = try makeRuntime()
         await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(
             OrchestrationSettingsOverride(autoRunNextTask: false, scopeToolSetOnTaskStart: true)))
         await runtime.start()
