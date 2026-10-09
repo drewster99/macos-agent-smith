@@ -47,15 +47,31 @@ struct SearchMemoryTool: AgentTool {
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
         guard case .string(let query) = arguments["query"],
-              !query.trimmingCharacters(in: .whitespaces).isEmpty else {
+              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ToolCallError.missingRequiredArgument("query")
         }
 
+        // Absent, null or a blank placeholder is the default; anything else must be a whole number —
+        // a malformed limit is refused rather than quietly read as the default.
         let limit: Int
-        if case .int(let l) = arguments["limit"] {
-            limit = max(1, min(l, 10))
-        } else {
+        switch arguments["limit"] {
+        case nil, .null?:
             limit = 5
+        case .string(let text)?:
+            // A quoted whole number means that number, as a quoted bool means that bool.
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                limit = 5
+            } else if let requested = Int(trimmed) {
+                limit = max(1, min(requested, 10))
+            } else {
+                return .failure("`limit` must be a whole number, not \"\(text)\".")
+            }
+        case .some:
+            guard let requested = ToolArguments.optionalInt(arguments, "limit") else {
+                return .failure("`limit` must be a whole number.")
+            }
+            limit = max(1, min(requested, 10))
         }
 
         // This is an EXPLICIT agent search (pull), not pushed auto-context, so it stays

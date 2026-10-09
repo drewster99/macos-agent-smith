@@ -83,8 +83,19 @@ enum TimerArgumentParsing {
         }
     }
 
+    /// Whether a `recurrence` value means "not supplied": null, a blank string, or an empty object —
+    /// the placeholders some models send for every optional argument.
+    static func isAbsentRecurrence(_ raw: AnyCodable) -> Bool {
+        switch raw {
+        case .null: return true
+        case .string(let text): return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .dictionary(let fields): return fields.isEmpty
+        default: return false
+        }
+    }
+
     static func parseRecurrence(_ raw: AnyCodable?) -> RecurrenceResult {
-        guard let raw else { return .value(nil) }
+        guard let raw, !isAbsentRecurrence(raw) else { return .value(nil) }
         guard case .dictionary(let dict) = raw else {
             return .invalid("recurrence must be an object.")
         }

@@ -23,7 +23,8 @@ struct AbortTool: AgentTool {
     }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
-        guard case .string(let reason) = arguments["reason"] else {
+        guard case .string(let reason) = arguments["reason"],
+              !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ToolCallError.missingRequiredArgument("reason")
         }
 

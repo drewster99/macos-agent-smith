@@ -51,8 +51,18 @@ struct ListScriptableAppsTool: AgentTool {
         let query: String? = {
             return ToolArguments.optionalString(arguments, "query")
         }()
-        let scriptableOnly = boolArg(arguments["scriptable_only"], default: true)
-        let nonStandardOnly = boolArg(arguments["non_standard_only"], default: true)
+        let scriptableOnly: Bool
+        switch ToolArguments.strictOptionalBool(arguments, "scriptable_only") {
+        case .absent: scriptableOnly = true
+        case .value(let value): scriptableOnly = value
+        case .malformed(let raw): return .failure("`scriptable_only` must be true or false, not \(raw).")
+        }
+        let nonStandardOnly: Bool
+        switch ToolArguments.strictOptionalBool(arguments, "non_standard_only") {
+        case .absent: nonStandardOnly = true
+        case .value(let value): nonStandardOnly = value
+        case .malformed(let raw): return .failure("`non_standard_only` must be true or false, not \(raw).")
+        }
 
         let registry = InstalledApplicationsRegistry.shared
         let apps: [InstalledApplication]
@@ -88,9 +98,4 @@ struct ListScriptableAppsTool: AgentTool {
         return .success(lines.joined(separator: "\n"))
     }
 
-    private func boolArg(_ value: AnyCodable?, default defaultValue: Bool) -> Bool {
-        guard let value else { return defaultValue }
-        if case .bool(let b) = value { return b }
-        return defaultValue
-    }
 }

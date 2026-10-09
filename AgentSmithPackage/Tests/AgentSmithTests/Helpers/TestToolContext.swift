@@ -65,7 +65,10 @@ enum TestToolContext {
         maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024,
         taskEvidenceDirectory: URL? = nil,
         reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .success("reported") },
-        scheduleWake: @escaping @Sendable (WakeRequest) async -> ScheduleWakeOutcome = { _ in .error("Scheduling not configured in test.") }
+        scheduleWake: @escaping @Sendable (WakeRequest) async -> ScheduleWakeOutcome = { _ in .error("Scheduling not configured in test.") },
+        listScheduledWakes: @escaping @Sendable () async -> [ScheduledWake] = { [] },
+        cancelScheduledWake: @escaping @Sendable (UUID) async -> Bool = { _ in false },
+        abort: @escaping @Sendable (String, AgentRole?) async -> Void = { _, _ in }
     ) -> ToolContext {
         ToolContext(
             agentID: agentID,
@@ -76,7 +79,7 @@ enum TestToolContext {
             currentProviderType: currentProviderType,
             spawnBrown: { _ in nil },
             terminateAgent: { _, _ in false },
-            abort: { _, _ in },
+            abort: abort,
             agentRoleForID: { _ in nil },
             // Stands in for OrchestrationRuntime.composeBrownTaskBriefing. Any test that drives a
             // Brown far enough to compact (the empty-response and context-overflow paths both
@@ -86,6 +89,8 @@ enum TestToolContext {
                 return "Task: \"\(task.title)\"\n\n\(task.description)"
             },
             scheduleWake: scheduleWake,
+            listScheduledWakes: listScheduledWakes,
+            cancelScheduledWake: cancelScheduledWake,
             reportInboundUserMessage: reportInboundUserMessage,
             memoryStore: memoryStore,
             reconcileMemory: reconcileMemory,

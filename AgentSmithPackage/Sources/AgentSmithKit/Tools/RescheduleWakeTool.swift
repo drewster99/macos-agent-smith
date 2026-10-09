@@ -79,7 +79,7 @@ struct RescheduleWakeTool: AgentTool {
 
         // Recurrence handling: omitted → keep existing; {"type":"none"} → clear; otherwise parse.
         let newRecurrence: Recurrence?
-        if let raw = arguments["recurrence"] {
+        if let raw = arguments["recurrence"], !TimerArgumentParsing.isAbsentRecurrence(raw) {
             if case .dictionary(let dict) = raw,
                case .string(let typeRaw) = dict["type"],
                typeRaw.lowercased() == "none" {

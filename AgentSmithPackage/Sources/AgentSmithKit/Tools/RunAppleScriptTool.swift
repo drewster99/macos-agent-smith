@@ -72,7 +72,8 @@ struct RunAppleScriptTool: AgentTool {
     }
 
     public func execute(arguments: [String: AnyCodable], context: ToolContext) async throws -> ToolExecutionResult {
-        guard case .string(let source) = arguments["script"], !source.isEmpty else {
+        guard case .string(let source) = arguments["script"],
+              !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ToolCallError.missingRequiredArgument("script")
         }
 
