@@ -91,7 +91,7 @@ final class GlobTool: AgentTool {
                 ]),
                 "respect_gitignore": .dictionary([
                     "type": .string("boolean"),
-                    "description": .string("Optional, default false. When true and `path` is inside a git work tree, leave out what git ignores (build output, dependencies — whatever `.gitignore` and git's other exclude files say; tracked files are never left out; a nested repository that isn't a submodule keeps its own rules to itself). The result says so if it couldn't be applied. Reading git's view counts against `timeout`. Ignored when `resume` is set: a resumed search keeps its original setting.")
+                    "description": .string("Optional, default false. When true and `path` is inside a git work tree, leave out what git ignores (build output, dependencies — whatever `.gitignore` and git's other exclude files say; tracked files are never left out; a nested repository or submodule is not filtered — its own rules apply only inside it). The result says so if it couldn't be applied. Reading git's view counts against `timeout`. Ignored when `resume` is set: a resumed search keeps its original setting.")
                 ]),
                 "resume": .dictionary([
                     "type": .string("string"),
@@ -118,13 +118,18 @@ final class GlobTool: AgentTool {
     /// the maximum caller `timeout` plus slack for Spotlight + post-processing on top.
     var executionTimeout: Duration { .seconds(Self.maxTimeoutSeconds + 20) }
 
+    /// The environment `respect_gitignore`'s git runs with; nil inherits this process's.
+    private let gitEnvironment: [String: String]?
+
     init(
         useSpotlight: Bool = true,
         maxEntriesScanned: Int = 200_000,
         walkStoreCapacity: Int = 4,
-        defaultTimeoutSeconds: Int = 30
+        defaultTimeoutSeconds: Int = 30,
+        gitEnvironment: [String: String]? = nil
     ) {
         self.useSpotlight = useSpotlight
+        self.gitEnvironment = gitEnvironment
         self.maxEntriesScanned = maxEntriesScanned
         self.defaultTimeoutSeconds = defaultTimeoutSeconds
         self.walkStore = WalkStore(capacity: walkStoreCapacity)
@@ -268,7 +273,7 @@ final class GlobTool: AgentTool {
         var gitSeconds = 0
         if respectGitignore {
             let gitStarted = Date()
-            switch await GitIgnoreSnapshot.take(forRoot: resolvedBase, budget: TimeInterval(max(1, timeoutSec / 2))) {
+            switch await GitIgnoreSnapshot.take(forRoot: resolvedBase, budget: TimeInterval(max(1, timeoutSec / 2)), environment: gitEnvironment) {
             case .success(let snapshot):
                 gitIgnore = snapshot
                 if snapshot.rootIgnored {
@@ -354,7 +359,7 @@ final class GlobTool: AgentTool {
         let requested: Int
         switch raw {
         case .int(let v): requested = v
-        case .double(let v): requested = Int(v)
+        case .double(let v): requested = ToolArguments.saturatingInt(v) ?? 100
         default: requested = 100
         }
         return max(1, min(requested, Self.maxResultsHardCap))
@@ -364,7 +369,7 @@ final class GlobTool: AgentTool {
         let requested: Int
         switch raw {
         case .int(let v): requested = v
-        case .double(let v): requested = Int(v)
+        case .double(let v): requested = ToolArguments.saturatingInt(v) ?? defaultTimeoutSeconds
         default: requested = defaultTimeoutSeconds
         }
         return max(1, min(requested, Self.maxTimeoutSeconds))

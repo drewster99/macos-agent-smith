@@ -43,8 +43,8 @@ struct DirectoryTreeTool: AgentTool {
         let maxDepth: Int
         if case .int(let v) = arguments["max_depth"] {
             maxDepth = max(1, min(v, Self.maxAllowedDepth))
-        } else if case .double(let v) = arguments["max_depth"] {
-            maxDepth = max(1, min(Int(v), Self.maxAllowedDepth))
+        } else if case .double(let v) = arguments["max_depth"], let depth = ToolArguments.saturatingInt(v) {
+            maxDepth = max(1, min(depth, Self.maxAllowedDepth))
         } else {
             maxDepth = Self.defaultMaxDepth
         }

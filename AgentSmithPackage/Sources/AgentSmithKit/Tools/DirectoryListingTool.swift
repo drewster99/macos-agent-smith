@@ -69,14 +69,14 @@ struct DirectoryListingTool: AgentTool {
         let limit: Int = {
             let raw: Int
             if case .int(let v) = arguments["limit"] { raw = v }
-            else if case .double(let v) = arguments["limit"] { raw = Int(v) }
+            else if case .double(let v) = arguments["limit"], let n = ToolArguments.saturatingInt(v) { raw = n }
             else { raw = Self.defaultLimit }
             return max(1, min(raw, Self.maxAllowedLimit))
         }()
         let offset: Int = {
             let raw: Int
             if case .int(let v) = arguments["offset"] { raw = v }
-            else if case .double(let v) = arguments["offset"] { raw = Int(v) }
+            else if case .double(let v) = arguments["offset"], let n = ToolArguments.saturatingInt(v) { raw = n }
             else { raw = 0 }
             return max(0, raw)
         }()

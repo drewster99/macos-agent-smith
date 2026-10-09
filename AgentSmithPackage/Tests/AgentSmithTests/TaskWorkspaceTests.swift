@@ -245,6 +245,48 @@ struct EvidenceSweepTests {
         #expect(sweep.problems.first?.hasPrefix("link.txt") == true)
     }
 
+    @Test("an evidence folder that is itself a symbolic link attaches nothing, and says so")
+    func symlinkedEvidenceFolderRefused() async throws {
+        let target = try makeEvidenceDir()
+        defer { try? FileManager.default.removeItem(at: target) }
+        try "private".write(to: target.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        let link = FileManager.default.temporaryDirectory.appendingPathComponent("sweep-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        defer { try? FileManager.default.removeItem(at: link) }
+
+        let sweep = await TaskCompleteTool.ingestEvidenceDirectory(context: makeContext(evidenceDir: link, recorder: IngestRecorder()), existing: [])
+
+        #expect(sweep.attachments.isEmpty)
+        #expect(sweep.problems.count == 1)
+        #expect(sweep.problems.first?.contains("symbolic link") == true)
+    }
+
+    @Test("a long list of problems is cut to a count, so it can't flood the transcript")
+    func problemListIsCapped() async throws {
+        let dir = try makeEvidenceDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let extra = 7
+        for index in 0..<(TaskCompleteTool.maxListedEvidenceProblems + extra) {
+            try FileManager.default.createSymbolicLink(at: dir.appendingPathComponent("link\(index)"), withDestinationURL: URL(fileURLWithPath: "/etc/hosts"))
+        }
+
+        let sweep = await TaskCompleteTool.ingestEvidenceDirectory(context: makeContext(evidenceDir: dir, recorder: IngestRecorder()), existing: [])
+
+        #expect(sweep.problems.count == TaskCompleteTool.maxListedEvidenceProblems + 1)
+        #expect(sweep.problems.last == "…and \(extra) more")
+    }
+
+    @Test("matching an attachment whose bytes aren't loaded by name and size is reported, not silent")
+    func sizeOnlyMatchIsDistinguished() {
+        let bytes = Data("same size".utf8)
+        let unloaded = Attachment(filename: "a.txt", mimeType: "text/plain", byteCount: bytes.count, data: nil)
+        let loaded = Attachment(filename: "a.txt", mimeType: "text/plain", byteCount: bytes.count, data: bytes)
+        #expect(TaskCompleteTool.attachmentMatch(bytes, mimeType: "text/plain", amongNamesakes: [loaded]) == .sameBytes)
+        #expect(TaskCompleteTool.attachmentMatch(bytes, mimeType: "text/plain", amongNamesakes: [unloaded]) == .sameNameAndSize)
+        #expect(TaskCompleteTool.attachmentMatch(Data("other".utf8), mimeType: "text/plain", amongNamesakes: [unloaded]) == .none)
+        #expect(TaskCompleteTool.attachmentMatch(bytes, mimeType: "text/plain", amongNamesakes: []) == .none)
+    }
+
     @Test("files over the per-submission file limit are reported, not silently dropped")
     func fileLimitIsReported() async throws {
         let dir = try makeEvidenceDir()

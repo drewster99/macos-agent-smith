@@ -49,7 +49,8 @@ enum ProcessRunner {
         arguments: [String],
         workingDirectory: String?,
         timeout: TimeInterval,
-        standardError: StandardErrorDestination = .mergedIntoOutput
+        standardError: StandardErrorDestination = .mergedIntoOutput,
+        environment: [String: String]? = nil
     ) async throws -> Result {
         enum State {
             case pending
@@ -227,7 +228,9 @@ enum ProcessRunner {
                     posix_spawnattr_setpgroup(&attr, 0)
 
                     // --- argv / envp (posix_spawn copies these; free after the call) ---
-                    var env = ProcessInfo.processInfo.environment
+                    // The given environment replaces this process's — for a caller (a test) that must
+                    // keep the machine's setup out without mutating the process-wide environment.
+                    var env = environment ?? ProcessInfo.processInfo.environment
                     env["GIT_TERMINAL_PROMPT"] = "0"  // git: don't prompt for credentials
                     env["SSH_ASKPASS"] = ""            // ssh: don't invoke a GUI askpass
                     let argvStrings = [executable] + arguments

@@ -101,26 +101,37 @@ struct GitIgnoreSnapshot: Sendable, Equatable {
     /// ("directory entry not superset of prefix"). `--directory` collapses each ignored directory
     /// to one entry, so the listing stays small — though git still visits every untracked directory
     /// in the work tree, which on a very large one can spend the budget and report a timeout.
-    static func take(forRoot root: String, budget: TimeInterval) async -> Result<GitIgnoreSnapshot, Unavailable> {
+    /// `environment` replaces the inherited one for every call (nil inherits) — tests pass one with
+    /// the machine's git config kept out.
+    static func take(forRoot root: String, budget: TimeInterval, environment: [String: String]? = nil) async -> Result<GitIgnoreSnapshot, Unavailable> {
         let deadline = Date().addingTimeInterval(budget)
         let timedOut = Unavailable.gitFailed("timed out after \(Int(budget))s")
         do {
-            let tools = try await ProcessRunner.run(executable: "/usr/bin/xcode-select", arguments: ["-p"], workingDirectory: nil, timeout: deadline.timeIntervalSinceNow)
+            let tools = try await ProcessRunner.run(executable: "/usr/bin/xcode-select", arguments: ["-p"], workingDirectory: nil, timeout: deadline.timeIntervalSinceNow, environment: environment)
             guard !tools.timedOut else { return .failure(timedOut) }
             guard tools.exitCode == 0 else { return .failure(.gitNotInstalled) }
             let config = ["-c", "core.fsmonitor=false"]
             // Each later call gets what is left of the one budget; none starts once it is spent.
             guard deadline.timeIntervalSinceNow > 0 else { return .failure(timedOut) }
 
-            // Standard error stays merged here: when the answer is "no", it is git's reason.
+            // Standard error is discarded for the answer itself — a warning interleaved with "true"
+            // would make a real work tree read as "not one" — and asked for separately only to say
+            // why when the answer is no.
+            let insideArguments = ["-C", root] + config + ["rev-parse", "--is-inside-work-tree"]
             let inside = try await ProcessRunner.run(
-                executable: "/usr/bin/git", arguments: ["-C", root] + config + ["rev-parse", "--is-inside-work-tree"],
-                workingDirectory: nil, timeout: deadline.timeIntervalSinceNow
+                executable: "/usr/bin/git", arguments: insideArguments,
+                workingDirectory: nil, timeout: deadline.timeIntervalSinceNow, standardError: .discarded, environment: environment
             )
             guard !inside.timedOut else { return .failure(timedOut) }
-            let insideAnswer = inside.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard inside.exitCode == 0, insideAnswer == "true" else {
-                return .failure(.notInAWorkTree(root: root, gitSays: inside.exitCode == 0 ? "" : insideAnswer))
+            guard inside.exitCode == 0, inside.output.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else {
+                guard inside.exitCode != 0, deadline.timeIntervalSinceNow > 0 else {
+                    return .failure(.notInAWorkTree(root: root, gitSays: ""))
+                }
+                let reason = try await ProcessRunner.run(
+                    executable: "/usr/bin/git", arguments: insideArguments,
+                    workingDirectory: nil, timeout: deadline.timeIntervalSinceNow, environment: environment
+                )
+                return .failure(.notInAWorkTree(root: root, gitSays: reason.output.trimmingCharacters(in: .whitespacesAndNewlines)))
             }
 
             // Standard error is discarded from here on: a warning interleaved into output this
@@ -128,7 +139,7 @@ struct GitIgnoreSnapshot: Sendable, Equatable {
             guard deadline.timeIntervalSinceNow > 0 else { return .failure(timedOut) }
             let location = try await ProcessRunner.run(
                 executable: "/usr/bin/git", arguments: ["-C", root] + config + ["rev-parse", "--show-toplevel", "--show-prefix"],
-                workingDirectory: nil, timeout: deadline.timeIntervalSinceNow, standardError: .discarded
+                workingDirectory: nil, timeout: deadline.timeIntervalSinceNow, standardError: .discarded, environment: environment
             )
             guard !location.timedOut else { return .failure(timedOut) }
             // Exactly "<top level>\n<prefix>\n". Anything else — a path containing a newline — would
@@ -145,7 +156,7 @@ struct GitIgnoreSnapshot: Sendable, Equatable {
                 executable: "/usr/bin/git",
                 arguments: ["-C", topLevel] + config
                     + ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"],
-                workingDirectory: nil, timeout: deadline.timeIntervalSinceNow, standardError: .discarded
+                workingDirectory: nil, timeout: deadline.timeIntervalSinceNow, standardError: .discarded, environment: environment
             )
             guard !listing.timedOut else { return .failure(timedOut) }
             guard listing.exitCode == 0 else { return .failure(.gitFailed("ls-files exited with status \(listing.exitCode)")) }
@@ -162,6 +173,8 @@ struct GitIgnoreSnapshot: Sendable, Equatable {
                 return .failure(.volumeUnreadable(error.localizedDescription))
             }
             return .success(parse(lsFilesOutput: listing.output, rootPrefix: rootPrefix, caseInsensitive: !caseSensitive))
+        } catch is CancellationError {
+            return .failure(.gitFailed("the search was cancelled"))
         } catch {
             return .failure(.gitFailed(error.localizedDescription))
         }

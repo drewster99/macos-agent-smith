@@ -223,6 +223,17 @@ enum ToolArguments {
         }
     }
 
+    /// A model-supplied double as an `Int`, saturating at `Int`'s bounds; nil for NaN or infinity.
+    /// For arguments that are clamped anyway (limits, depths, offsets). Never `Int(value)`: it TRAPS
+    /// on a non-finite or out-of-range double, and a model can send `1e300` — which crashed the app.
+    /// `Double(Int.max)` rounds up to 2^63, so the bound is compared with `>=`.
+    static func saturatingInt(_ value: Double) -> Int? {
+        guard value.isFinite else { return nil }
+        if value >= Double(Int.max) { return Int.max }
+        if value <= Double(Int.min) { return Int.min }
+        return Int(value)
+    }
+
     /// An integer, or `nil` when the argument is absent, null, or not numeric.
     ///
     /// Accepts a `.double` that is exactly integral, because a JSON number that arrives as `5.0`

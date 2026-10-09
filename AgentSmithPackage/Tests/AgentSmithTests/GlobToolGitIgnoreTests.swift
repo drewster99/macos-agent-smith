@@ -36,16 +36,16 @@ private enum GitIgnoreTestEnvironment {
 @Suite("GlobTool respect_gitignore", .enabled(if: GitIgnoreTestEnvironment.gitIsInstalled))
 struct GlobToolGitIgnoreTests {
 
-    /// Keeps the machine's git setup out of every git this suite runs — its own and the tool's,
-    /// which inherit this process's environment: no global or system config (a developer's global
-    /// excludes file would change what is ignored) and no `GIT_*` overrides (a `GIT_DIR` set by a
-    /// hook would point git at another repository). Process-wide, set once.
-    private static let isolatedGit: Void = {
-        for name in ProcessInfo.processInfo.environment.keys where name.hasPrefix("GIT_") {
-            unsetenv(name)
-        }
-        setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1)
-        setenv("GIT_CONFIG_NOSYSTEM", "1", 1)
+    /// The environment every git in this suite runs with — the fixture's and the tool's: this
+    /// process's, minus `GIT_*` overrides (a `GIT_DIR` set by a hook would point git at another
+    /// repository) and with no global or system config (a developer's global excludes file would
+    /// change what is ignored). Passed explicitly; the process-wide environment is never touched,
+    /// since other suites spawn processes concurrently.
+    static let isolatedGitEnvironment: [String: String] = {
+        var environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }
+        environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        return environment
     }()
 
     struct GitCommandFailed: Error, CustomStringConvertible {
@@ -63,8 +63,8 @@ struct GlobToolGitIgnoreTests {
 
     /// Runs git in `directory`, throwing on a non-zero exit so a broken fixture fails where it broke.
     private static func git(_ arguments: [String], in directory: String) throws {
-        Self.isolatedGit
         let process = Process()
+        process.environment = Self.isolatedGitEnvironment
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = ["-C", directory] + arguments
         process.standardOutput = FileHandle.nullDevice
@@ -89,8 +89,7 @@ struct GlobToolGitIgnoreTests {
     }
 
     private static func run(_ arguments: [String: AnyCodable]) async throws -> [String: Any] {
-        Self.isolatedGit
-        let result = try await GlobTool(useSpotlight: false).execute(arguments: arguments, context: TestToolContext.make())
+        let result = try await GlobTool(useSpotlight: false, gitEnvironment: Self.isolatedGitEnvironment).execute(arguments: arguments, context: TestToolContext.make())
         #expect(result.succeeded)
         return try #require(decode(result))
     }
@@ -287,7 +286,7 @@ struct GlobToolGitIgnoreTests {
     func malformedRefused() async throws {
         let dir = TempDir()
         defer { dir.cleanup() }
-        let result = try await GlobTool(useSpotlight: false).execute(
+        let result = try await GlobTool(useSpotlight: false, gitEnvironment: Self.isolatedGitEnvironment).execute(
             arguments: ["pattern": .string("*"), "path": .string(dir.path), "respect_gitignore": .string("maybe")],
             context: TestToolContext.make()
         )
@@ -303,7 +302,7 @@ struct GlobToolGitIgnoreTests {
             try dir.write("\(index)", to: "src/more/file_\(index).swift")
             try dir.write("\(index)", to: "generated/more/file_\(index).swift")
         }
-        let tool = GlobTool(useSpotlight: false)
+        let tool = GlobTool(useSpotlight: false, gitEnvironment: Self.isolatedGitEnvironment)
         var seen: [String] = []
         var arguments: [String: AnyCodable] = [
             "pattern": .string("**/*.swift"), "path": .string(dir.path), "respect_gitignore": .bool(true), "limit": .int(5)

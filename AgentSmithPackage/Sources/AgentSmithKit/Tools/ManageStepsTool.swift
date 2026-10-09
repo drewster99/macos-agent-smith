@@ -320,7 +320,12 @@ public struct ManageStepsTool: AgentTool {
         if let position = arguments["position"] {
             switch position {
             case .int(let value): found.append(.position(value))
-            case .double(let value): found.append(.position(Int(value)))
+            case .double(let value):
+                if let whole = ToolArguments.saturatingInt(value) {
+                    found.append(.position(whole))
+                } else {
+                    malformed.append("`position` must be a whole number.")
+                }
             case .string(let raw):
                 if let value = Int(raw) {
                     found.append(.position(value))

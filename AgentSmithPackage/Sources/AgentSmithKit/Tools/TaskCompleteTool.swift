@@ -214,6 +214,9 @@ public struct TaskCompleteTool: AgentTool {
     /// The most evidence files one submission attaches. A worker that dumped a build tree into its
     /// evidence directory would otherwise attach thousands of files to one message.
     static let maxEvidenceFiles = 200
+    /// Problems listed individually before the rest are summarized as a count, so a folder full of
+    /// symlinks can't flood the transcript and the worker's context.
+    static let maxListedEvidenceProblems = 25
 
     /// Ingests every regular file under the task's evidence directory — subfolders included, each
     /// named by its path relative to the directory (`screenshots/1.png`) — as an attachment, skipping
@@ -230,6 +233,19 @@ public struct TaskCompleteTool: AgentTool {
         var sweep = EvidenceSweep()
         guard isDirectory.boolValue else {
             sweep.problems.append("the evidence path \(evidenceDir.path) is not a directory")
+            return sweep
+        }
+        // The folder ITSELF must not be a link: `realpath` below would follow it, and a worker that
+        // swapped `evidence/` for a link to, say, ~/Documents would send those files to the
+        // validator's provider. (Links above it — `/var` → `/private/var` — are the system's.)
+        do {
+            let type = try FileManager.default.attributesOfItem(atPath: evidenceDir.path)[.type] as? FileAttributeType
+            if type == .typeSymbolicLink {
+                sweep.problems.append("the evidence directory \(evidenceDir.path) is a symbolic link, so nothing in it was attached — put the files in the folder itself")
+                return sweep
+            }
+        } catch {
+            sweep.problems.append("the evidence directory \(evidenceDir.path) could not be inspected: \(error.localizedDescription)")
             return sweep
         }
         // The canonical path, so it shares the enumerated paths' prefix even when the directory is
@@ -263,7 +279,11 @@ public struct TaskCompleteTool: AgentTool {
             // same file (each path is visited once, so nothing this sweep attached can be).
             let bareName = (candidate.relativePath as NSString).lastPathComponent
             let namesakes = existing.filter { $0.filename == candidate.relativePath || $0.filename == bareName }
-            let overCap = byteCap > 0 && totalBytes + candidate.size > byteCap
+            guard let listedSize = candidate.size else {
+                sweep.problems.append("\(candidate.relativePath): its size couldn't be read, so it was not attached")
+                continue
+            }
+            let overCap = byteCap > 0 && totalBytes + listedSize > byteCap
             // Over the cap, the file is read only when it may already be attached — then it needs no room.
             if overCap && namesakes.isEmpty {
                 sweep.problems.append(Self.overCapProblem(candidate.relativePath, byteCap: byteCap))
@@ -278,9 +298,20 @@ public struct TaskCompleteTool: AgentTool {
                 continue
             }
             // Skip only the SAME file already attached, not merely one sharing its name: a distinct
-            // file that happens to share a name with another attachment is still evidence.
-            if Self.isAttached(data, mimeType: mimeType, amongNamesakes: namesakes) { continue }
-            if overCap {
+            // file that happens to share a name with another attachment is still evidence. Off the
+            // cooperative pool: the comparison may re-encode an image or rewrite a PDF.
+            switch await Self.offCooperativePool({ Self.attachmentMatch(data, mimeType: mimeType, amongNamesakes: namesakes) }) {
+            case .sameBytes:
+                continue
+            case .sameNameAndSize:
+                sweep.problems.append("\(candidate.relativePath): skipped as a likely duplicate of an attachment with the same name and size")
+                continue
+            case .none:
+                break
+            }
+            // The cap is re-checked against the bytes actually read — the file may have grown since
+            // it was listed.
+            if overCap || (byteCap > 0 && totalBytes + data.count > byteCap) {
                 sweep.problems.append(Self.overCapProblem(candidate.relativePath, byteCap: byteCap))
                 continue
             }
@@ -291,6 +322,10 @@ public struct TaskCompleteTool: AgentTool {
             }
             sweep.attachments.append(attachment)
             totalBytes += attachment.byteCount
+        }
+        if sweep.problems.count > maxListedEvidenceProblems {
+            let more = sweep.problems.count - maxListedEvidenceProblems
+            sweep.problems = Array(sweep.problems.prefix(maxListedEvidenceProblems)) + ["…and \(more) more"]
         }
         return sweep
     }
@@ -313,7 +348,8 @@ public struct TaskCompleteTool: AgentTool {
     private struct EvidenceFile: Sendable {
         let relativePath: String
         let url: URL
-        let size: Int
+        /// Nil when the file system didn't report one; such a file isn't attached.
+        let size: Int?
     }
 
     /// Every regular file under `root` (resolved), each with its path relative to `root`, plus a
@@ -362,24 +398,33 @@ public struct TaskCompleteTool: AgentTool {
                 problems.append("\(relativePath): not a regular file")
                 continue
             }
-            files.append(EvidenceFile(relativePath: relativePath, url: url, size: values.fileSize ?? 0))
+            files.append(EvidenceFile(relativePath: relativePath, url: url, size: values.fileSize))
         }
         return (files, problems + enumerationProblems.all)
+    }
+
+    /// How a file relates to the attachments named like it.
+    enum AttachmentMatch: Equatable {
+        /// Byte-for-byte one of them (raw or as sanitized).
+        case sameBytes
+        /// An attachment whose bytes aren't loaded has the same name and size — probably the same
+        /// file, but not proven, so skipping it is reported rather than silent.
+        case sameNameAndSize
+        case none
     }
 
     /// Whether a file with these bytes is already among `namesakes` — the attachments named like it.
     /// An attachment's stored bytes went through `AttachmentSanitizer` at ingest, which re-encodes
     /// images and rewrites PDFs, so the file matches either its raw or its sanitized bytes. An
-    /// attachment resolved by id may not have its bytes loaded; its recorded size stands in then.
-    private static func isAttached(_ data: Data, mimeType: String, amongNamesakes namesakes: [Attachment]) -> Bool {
-        guard !namesakes.isEmpty else { return false }
-        func matches(_ candidate: Data) -> Bool {
-            namesakes.contains { attachment in
-                if let attached = attachment.data { return attached == candidate }
-                return attachment.byteCount == candidate.count
-            }
-        }
-        return matches(data) || matches(AttachmentSanitizer.sanitize(data, mimeType: mimeType))
+    /// attachment resolved by id may not have its bytes loaded; only its recorded size is known then.
+    static func attachmentMatch(_ data: Data, mimeType: String, amongNamesakes namesakes: [Attachment]) -> AttachmentMatch {
+        guard !namesakes.isEmpty else { return .none }
+        let sanitized = AttachmentSanitizer.sanitize(data, mimeType: mimeType)
+        let loaded = namesakes.compactMap(\.data)
+        if loaded.contains(data) || loaded.contains(sanitized) { return .sameBytes }
+        let sizesOnly = namesakes.filter { $0.data == nil }.map(\.byteCount)
+        if sizesOnly.contains(data.count) || sizesOnly.contains(sanitized.count) { return .sameNameAndSize }
+        return .none
     }
 
     /// Posts a system channel message recording an auto-rejection of an empty/missing-result

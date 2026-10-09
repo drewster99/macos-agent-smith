@@ -122,7 +122,7 @@ struct WebSearchTool: AgentTool {
         let requested: Int?
         switch value {
         case .int(let n): requested = n
-        case .double(let d): requested = Int(d)
+        case .double(let d): requested = ToolArguments.saturatingInt(d)
         case .string(let s): requested = Int(s)
         default: requested = nil
         }
