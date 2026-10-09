@@ -127,10 +127,16 @@ struct RunTaskTool: AgentTool {
             return .failure("input_values are valid only when task_id points to a template. Ordinary non-template tasks cannot accept template inputs.")
         }
 
+        // A task that belongs to another session never runs here in place: that would split its
+        // transcript across two sessions' logs (#15). It runs as a fresh clone in this session, and
+        // the original is left exactly as it is — not restored, reset, reopened or amended. Decided
+        // here, before anything below touches the original.
+        let runsAsCloneFromAnotherSession = await context.taskStore.originatesElsewhere(task)
+
         // If the task lives in the global archived/deleted store, pull it back into this session's
         // active list before reopening — the reset/reopen paths operate on the active store, and
         // run_task means "redo this one here" (lands in the current session).
-        if task.disposition != .active {
+        if task.disposition != .active && !runsAsCloneFromAnotherSession {
             guard await context.taskStore.restoreToActive(id: taskID),
                   let restored = await context.taskStore.task(id: taskID) else {
                 return .failure("Could not restore task '\(task.title)' to the active list to run it.")
@@ -153,7 +159,8 @@ struct RunTaskTool: AgentTool {
         // runs perfectly well.
         // A task a watch is waiting to start is not Smith's to start: only the user's explicit Play
         // overrides a hold. Checked BEFORE `prepareForRun`, which would otherwise reset or reopen it.
-        if !task.startHolds.isEmpty {
+        // The clone of a task from another session has no holds of its own; the original's stay put.
+        if !task.startHolds.isEmpty && !runsAsCloneFromAnotherSession {
             var waitingOn: [String] = []
             for hold in task.startHolds {
                 waitingOn.append(await context.taskStore.task(id: hold.watchedTaskID).map { "\"\($0.title)\"" } ?? hold.watchedTaskID.uuidString)
@@ -164,7 +171,7 @@ struct RunTaskTool: AgentTool {
                 watch), or remove the watch.
                 """)
         }
-        if !task.isTemplate {
+        if !task.isTemplate && !runsAsCloneFromAnotherSession {
             if case .refused(let reason) = await context.taskStore.prepareForRun(id: taskID) {
                 return .failure("""
                     Cannot run this task: \(reason). \
@@ -184,7 +191,10 @@ struct RunTaskTool: AgentTool {
         let slotHolders = allTasks.filter {
             $0.disposition == .active && $0.id != taskID && $0.occupiesWorkerSlot
         }
-        if !task.isTemplate && slotHolders.count >= capacity {
+        // A clone (of a template, or of a task from another session) is created regardless and its
+        // start is pended by the runtime's capacity gate, from where auto-run starts it — refusing
+        // here would leave the original, which nothing ever starts automatically.
+        if !task.isTemplate && !runsAsCloneFromAnotherSession && slotHolders.count >= capacity {
             // A blocker deserves a pointed message — resolving one is usually the fastest way to
             // free a slot. (A validator-error park does NOT hold a slot — its worker is gone — so
             // it never appears here; the only slot-holding `.awaitingReview` is a config block.)
@@ -242,15 +252,15 @@ struct RunTaskTool: AgentTool {
         // must name it (amend_task or an explicit run_task).
         let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
         var amendmentNote = ""
-        // For a template, the amendment must NOT be written onto the template itself (it clones a
-        // fresh instance downstream, and welding here would contaminate every future clone). Defer
-        // it to the clone by handing it to restartForNewTask. A non-template amends in place now.
-        var deferredTemplateAmendment: String? = nil
+        // For a template, or a task from another session, the amendment must NOT be written onto the
+        // task itself: both run as a clone, and welding it onto the source would contaminate every
+        // future clone. It is applied to the clone below. Anything else amends in place now.
+        var deferredCloneAmendment: String? = nil
         if !trimmed.isEmpty {
             if autoResolved {
                 amendmentNote = " NOTE: your `instructions` were NOT applied to the task description because task_id was auto-resolved — the task runs with its existing description. If the instructions matter, call amend_task with this task's ID."
-            } else if task.isTemplate {
-                deferredTemplateAmendment = trimmed
+            } else if task.isTemplate || runsAsCloneFromAnotherSession {
+                deferredCloneAmendment = trimmed
             } else {
                 // Handled, unlike the two instance sites below: nothing has been created or
                 // announced yet, so refusing here refuses cleanly.
@@ -261,7 +271,9 @@ struct RunTaskTool: AgentTool {
         }
 
         let startTaskID: UUID
-        var templateInstanceNote = ""
+        var cloneNote = ""
+        let clone: AgentTask?
+        let cloneSource: ClonedRunSource?
         if task.isTemplate {
             let instance: AgentTask
             switch await context.taskStore.instantiateTemplate(templateID: task.id, inputValues: suppliedInputValues) {
@@ -270,38 +282,29 @@ struct RunTaskTool: AgentTool {
             case .failure(let message):
                 return .failure(message)
             }
-            if let deferredTemplateAmendment, !deferredTemplateAmendment.isEmpty {
-                // Discarded on purpose. The instance is `isTemplate: false` by construction
-                // (`instantiateTemplate`) and the placeholder check is template-only, so there is
-                // nothing here to refuse. Bailing would also be the WRONG response: the instance
-                // already exists and has not been announced yet, so an early return would leave an
-                // orphaned `.pending` task that auto-advance starts later anyway, minus these
-                // instructions.
-                _ = await context.taskStore.amendDescription(id: instance.id, amendment: deferredTemplateAmendment)
-            }
+            clone = instance
+            cloneSource = .template(task.id)
             await context.taskStore.addUpdate(id: task.id, message: "Started instance \(instance.id.uuidString) from this template.")
-            let announced = await context.taskStore.task(id: instance.id) ?? instance
-            // Fetch relevant context for THIS run (not just at template authoring) so a repeatedly-run
-            // template picks up memories accumulated since — attached before the worker's briefing reads it.
-            let retrieved = await context.retrieveContext(
-                .newTask, announced.title + " " + announced.renderedDescriptionWithTemplateInputs())
-            await TaskContextRetrieval.attachRelevantContext(
-                taskID: instance.id,
-                results: retrieved,
-                taskStore: context.taskStore
+            cloneNote = " Created template instance \(instance.id.uuidString)."
+        } else if runsAsCloneFromAnotherSession {
+            let copy = await context.taskStore.cloneForRunInThisSession(source: task)
+            clone = copy
+            cloneSource = .taskFromAnotherSession(task.id)
+            cloneNote = " That task belongs to another session, so it runs here as a fresh copy, task \(copy.id.uuidString) — refer to the copy from now on; the original is unchanged."
+        } else {
+            clone = nil
+            cloneSource = nil
+        }
+        if let clone, let cloneSource {
+            _ = await ClonedRunAnnouncement.announce(
+                clone: clone,
+                source: cloneSource,
+                amendment: deferredCloneAmendment,
+                taskStore: context.taskStore,
+                retrieveContext: { query in await context.retrieveContext(.newTask, query) },
+                post: { message in await context.post(message) }
             )
-            await context.post(ChannelMessage(
-                sender: .system,
-                content: announced.title,
-                metadata: [
-                    "messageKind": .kind(.taskCreated),
-                    "taskID": .string(announced.id.uuidString),
-                    "taskDescription": .string(announced.renderedDescriptionWithTemplateInputs()),
-                    "clonedFromTemplate": .string(task.id.uuidString)
-                ].merging(announced.taskCreatedBannerCapabilitiesMetadata()) { current, _ in current }
-            ))
-            startTaskID = instance.id
-            templateInstanceNote = " Created template instance \(instance.id.uuidString)."
+            startTaskID = clone.id
         } else {
             startTaskID = task.id
         }
@@ -309,12 +312,12 @@ struct RunTaskTool: AgentTool {
         await context.restartForNewTask(startTaskID, nil)
 
         if let held = await TaskCreationSupport.outageHoldNote(context: context) {
-            return .success("Task '\(task.title)' (ID: \(startTaskID)).\(templateInstanceNote)\(amendmentNote) \(held)")
+            return .success("Task '\(task.title)' (ID: \(startTaskID)).\(cloneNote)\(amendmentNote) \(held)")
         }
         let autoNote = autoResolved
             ? " (auto-resolved task_id because it was omitted from the call and only one task was eligible)"
             : ""
-        return .success("Running task '\(task.title)' (ID: \(startTaskID)).\(templateInstanceNote)\(autoNote)\(amendmentNote) System is restarting with a clean context to begin work.")
+        return .success("Running task '\(task.title)' (ID: \(startTaskID)).\(cloneNote)\(autoNote)\(amendmentNote) System is restarting with a clean context to begin work.")
     }
 
     private enum TemplateInputValueParseResult {
@@ -347,8 +350,11 @@ struct RunTaskTool: AgentTool {
     /// onto a 9 PM reminder in the 2026-07-08 incident.
     private static func onlyPendingRunnableTaskID(context: ToolContext) async -> UUID? {
         let allTasks = await context.taskStore.allTasks()
+        let homeSessionID = await context.taskStore.homeSessionID
+        // Never a task from another session: running one clones it, so auto-picking the same
+        // original on every bare call would clone it again each time (#15).
         let pending = allTasks.filter {
-            $0.disposition == .active && $0.scheduledRunAt == nil && (
+            $0.disposition == .active && $0.scheduledRunAt == nil && !$0.belongsToAnotherSession(than: homeSessionID) && (
                 $0.status == .pending || $0.status == .paused || $0.status == .interrupted
             )
         }
@@ -384,7 +390,11 @@ struct RunTaskTool: AgentTool {
         guard !candidates.isEmpty else {
             return "There are no runnable tasks right now (use list_tasks to confirm)."
         }
-        let summary = candidates.prefix(10).map { "\($0.id.uuidString) (\"\($0.title)\", status=\($0.status.rawValue))" }
+        let homeSessionID = await context.taskStore.homeSessionID
+        let summary = candidates.prefix(10).map { task in
+            let origin = task.belongsToAnotherSession(than: homeSessionID) ? ", from another session — runs as a fresh copy" : ""
+            return "\(task.id.uuidString) (\"\(task.title)\", status=\(task.status.rawValue)\(origin))"
+        }
             .joined(separator: "; ")
         return "Runnable task IDs: \(summary)."
     }

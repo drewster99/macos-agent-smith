@@ -1734,6 +1734,9 @@ public actor OrchestrationRuntime {
     /// cloned or claimed, and the ones a person or Smith is waiting on are told why.
     private func passesStartGate(taskID: UUID, origin: TaskStartOrigin) async -> Bool {
         guard let task = await taskStore.task(id: taskID), !task.startHolds.isEmpty else { return true }
+        // A task from another session runs as a clone with no holds of its own
+        // (`resolveStartTarget`); its holds are its own session's watches, never this start's to cancel.
+        guard await !taskStore.originatesElsewhere(task) else { return true }
         let waitingOn = await describeHolds(task.startHolds)
         if origin.overridesStartHolds {
             _ = await taskStore.overrideStartHolds(of: taskID)
@@ -2261,7 +2264,12 @@ public actor OrchestrationRuntime {
         // Cheap early out before the store read; the pool is read again after it.
         guard maxConcurrentWorkers > supervisor.handles(role: .brown).count
                 || !coordinatorsBlockedOnCapacity().isEmpty else { return }
-        let activeTasks = await taskStore.allTasks().filter { $0.disposition == .active }
+        // A task from another session is never started automatically: each start would clone it
+        // afresh (#15), so only an explicit start (Play, run_task) does that, once.
+        let homeSessionID = await taskStore.homeSessionID
+        let activeTasks = await taskStore.allTasks().filter {
+            $0.disposition == .active && !$0.belongsToAnotherSession(than: homeSessionID)
+        }
         // Read the pool AFTER the suspension: a worker that parked or left during the read is seen
         // here, and nothing below suspends, so this pass acts on one consistent picture. The
         // restarts are enqueued (not awaited), so the live count doesn't move within the pass —
@@ -2695,8 +2703,12 @@ public actor OrchestrationRuntime {
             await scheduler.listScheduledWakes().compactMap { $0.taskID }
         )
         let now = Date()
+        // A task from another session gets no wake here: firing would clone it (#15), and its own
+        // session owns its schedule.
+        let homeSessionID = await taskStore.homeSessionID
         let scheduled = await taskStore.allTasks().filter {
             $0.disposition == .active && $0.status == .scheduled && $0.id != excluded
+                && !$0.belongsToAnotherSession(than: homeSessionID)
         }
         for task in scheduled {
             guard let fireAt = task.scheduledRunAt else { continue }
@@ -3333,12 +3345,12 @@ public actor OrchestrationRuntime {
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
             guard await self.passesStartGate(taskID: taskID, origin: origin) else { return }
-            // Template interception: starting a template never runs the template — it
-            // clones a fresh instance and runs THAT. The template stays put (gets a
-            // "started instance" note) so it can spawn another instance next time. This
-            // is the single chokepoint every start path funnels through (run_task, the
-            // play button, auto-advance, scheduled wakes), so all of them clone. Any
-            // per-run amendment lands on the started (cloned) task, not the template.
+            // Clone interception (`resolveStartTarget`): starting a template never runs the
+            // template, and starting a task that belongs to another session never runs it here
+            // in place (#15) — each clones a fresh task and runs THAT, leaving the source as it
+            // was. This is the single chokepoint every start path funnels through (run_task, the
+            // play button, scheduled wakes, watches; auto-advance never picks a foreign task), so
+            // all of them clone. Any per-run amendment lands on the clone, not the source.
             guard let startID = await self.resolveStartTarget(
                 taskID: taskID,
                 amendment: amendment,
@@ -3371,60 +3383,48 @@ public actor OrchestrationRuntime {
         }
     }
 
-    /// If `taskID` is a template, clone a fresh instance, note it on the template, and
-    /// announce the instance; return the ID to actually start (the instance, or the
-    /// original for a non-template). Runs on the lifecycle queue via `restartForNewTask`.
+    /// The task a start of `taskID` actually runs. A template is never run: a fresh instance is
+    /// cloned from it and noted on the template. A task that belongs to another session is never run
+    /// here in place either (#15): it is cloned into this session, because running it here would
+    /// split its transcript across two sessions' logs. Anything else runs as itself. Returns nil
+    /// when a needed clone could not be made. Runs on the lifecycle queue via `restartForNewTask`.
     private func resolveStartTarget(
         taskID: UUID,
         amendment: String? = nil,
         templateInputValues: [String: String] = [:]
     ) async -> UUID? {
-        guard let task = await taskStore.taskOrLibraryTemplate(id: taskID), task.isTemplate else { return taskID }
-        let instance: AgentTask
-        switch await taskStore.instantiateTemplate(templateID: taskID, inputValues: templateInputValues) {
-        case .success(let created):
-            instance = created
-        case .failure(let message):
-            await channel.post(ChannelMessage(
-                sender: .system,
-                content: "Could not start template \"\(task.title)\": \(message)",
-                metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
-            ))
-            return nil
+        guard let task = await taskStore.taskOrLibraryTemplate(id: taskID) else { return taskID }
+        let clone: AgentTask
+        let source: ClonedRunSource
+        if task.isTemplate {
+            switch await taskStore.instantiateTemplate(templateID: taskID, inputValues: templateInputValues) {
+            case .success(let created):
+                clone = created
+            case .failure(let message):
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Could not start template \"\(task.title)\": \(message)",
+                    metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
+                ))
+                return nil
+            }
+            source = .template(taskID)
+            await taskStore.addUpdate(id: taskID, message: "Started instance \(clone.id.uuidString) from this template.")
+        } else if await taskStore.originatesElsewhere(task) {
+            clone = await taskStore.cloneForRunInThisSession(source: task)
+            source = .taskFromAnotherSession(taskID)
+        } else {
+            return taskID
         }
-        // Apply any per-run instructions to the fresh INSTANCE, never the reusable template — else
-        // one run's one-off text would weld onto the template and every future clone would inherit it.
-        // Re-read after amending so the announced description reflects the applied instructions
-        // (Brown's briefing already reads the task fresh by id; this keeps the banner consistent).
-        if let amendment, !amendment.isEmpty {
-            // Discarded on purpose, same as `RunTaskTool`'s deferred-amendment site: the instance is
-            // `isTemplate: false` by construction, so the template-only placeholder check has
-            // nothing to refuse, and bailing after the instance exists would orphan a `.pending`
-            // task that auto-advance starts later regardless.
-            _ = await taskStore.amendDescription(id: instance.id, amendment: amendment)
-        }
-        let announced = await taskStore.task(id: instance.id) ?? instance
-        // Fetch relevant context for THIS run (not just at template authoring) so a repeatedly-run
-        // template picks up memories accumulated since — attached before the worker's briefing reads it.
-        let retrievedContext = await retrieveContext(
-            source: .newTask, query: announced.title + " " + announced.renderedDescriptionWithTemplateInputs())
-        await TaskContextRetrieval.attachRelevantContext(
-            taskID: instance.id,
-            results: retrievedContext,
-            taskStore: taskStore
+        _ = await ClonedRunAnnouncement.announce(
+            clone: clone,
+            source: source,
+            amendment: amendment,
+            taskStore: taskStore,
+            retrieveContext: { query in await self.retrieveContext(source: .newTask, query: query) },
+            post: { message in await self.channel.post(message) }
         )
-        await taskStore.addUpdate(id: taskID, message: "Started instance \(instance.id.uuidString) from this template.")
-        await channel.post(ChannelMessage(
-            sender: .system,
-            content: announced.title,
-            metadata: [
-                "messageKind": .kind(.taskCreated),
-                "taskID": .string(announced.id.uuidString),
-                "taskDescription": .string(announced.renderedDescriptionWithTemplateInputs()),
-                "clonedFromTemplate": .string(taskID.uuidString)
-            ].merging(announced.taskCreatedBannerCapabilitiesMetadata()) { current, _ in current }
-        ))
-        return instance.id
+        return clone.id
     }
 
     private enum ResumeQueue { case launchResume, capacityDeferred, providerRecovered }
@@ -3933,8 +3933,10 @@ public actor OrchestrationRuntime {
         // scheduled task (identified by a non-nil `scheduledRunAt`) not already queued, so the
         // scheduled-run drain — which runs INDEPENDENTLY of `autoAdvanceEnabled` — picks it up.
         let alreadyQueued = Set(pendingScheduledRunQueue.map(\.taskID))
+        let homeSessionIDForOrphans = await taskStore.homeSessionID
         let orphanedScheduledRuns = await taskStore.allTasks().filter {
             $0.disposition == .active
+                && !$0.belongsToAnotherSession(than: homeSessionIDForOrphans)
                 && $0.status == .pending
                 && $0.scheduledRunAt != nil
                 && $0.id != resumingTaskID
@@ -3987,7 +3989,10 @@ public actor OrchestrationRuntime {
         // Validation is idempotent and restartable: tasks caught mid-validation by a
         // quit/crash re-enqueue from their sticky-verdict state (partial rounds were
         // never persisted as conclusions).
-        for task in activeTasks where task.status == .validating {
+        // A task restored from another session is not validated here: that would post its
+        // judgments into this session's transcript (#15).
+        let homeSessionIDForValidation = await taskStore.homeSessionID
+        for task in activeTasks where task.status == .validating && !task.belongsToAnotherSession(than: homeSessionIDForValidation) {
             startTaskValidation(taskID: task.id)
         }
 
@@ -4137,19 +4142,27 @@ public actor OrchestrationRuntime {
             // Cold launch — gather all active tasks by status and surface everything to Smith.
             // A sign-off park waits on a person, possibly for days: it must not hold back the launch
             // resume of interrupted work. It is listed for Smith separately below.
-            let awaitingReviewTasks = activeTasks.filter { $0.status == .awaitingReview && !$0.isParkedForUserAcceptance }
-            let signOffTasks = activeTasks.filter(\.isParkedForUserAcceptance)
-            let awaitingHelpTasks = activeTasks.filter { $0.status == .awaitingHelp }
-            let validatingTasks = activeTasks.filter { $0.status == .validating }
-            let interruptedTasks = activeTasks.filter { $0.status == .interrupted }
+            // A task restored from another session is in none of these lists (#15): nothing here
+            // resumes, re-arms or auto-starts it, so describing it as such would be false. The
+            // startable ones are listed on their own, as runnable only as a fresh copy.
+            let homeSessionID = await taskStore.homeSessionID
+            let homeTasks = activeTasks.filter { !$0.belongsToAnotherSession(than: homeSessionID) }
+            let tasksFromOtherSessions = activeTasks.filter {
+                $0.belongsToAnotherSession(than: homeSessionID) && ($0.status.isRunnable || $0.status == .scheduled)
+            }
+            let awaitingReviewTasks = homeTasks.filter { $0.status == .awaitingReview && !$0.isParkedForUserAcceptance }
+            let signOffTasks = homeTasks.filter(\.isParkedForUserAcceptance)
+            let awaitingHelpTasks = homeTasks.filter { $0.status == .awaitingHelp }
+            let validatingTasks = homeTasks.filter { $0.status == .validating }
+            let interruptedTasks = homeTasks.filter { $0.status == .interrupted }
             // Templates are `.pending` launchers, not queued work — exclude them from the
             // startup pending list so Smith isn't told they're being auto-started (they
             // aren't; they run only on explicit action).
-            let pendingTasks = activeTasks.filter { $0.status == .pending && !$0.isTemplate }
-            let pausedTasks = activeTasks.filter { $0.status == .paused }
-            let scheduledTasks = activeTasks.filter { $0.status == .scheduled }
+            let pendingTasks = homeTasks.filter { $0.status == .pending && !$0.isTemplate }
+            let pausedTasks = homeTasks.filter { $0.status == .paused }
+            let scheduledTasks = homeTasks.filter { $0.status == .scheduled }
             let recentFailed = Array(
-                activeTasks
+                homeTasks
                     .filter { $0.status == .failed }
                     .sorted { $0.updatedAt > $1.updatedAt }
                     .prefix(5)
@@ -4283,6 +4296,18 @@ public actor OrchestrationRuntime {
                 } else {
                     parts.append("The following task(s) are pending and waiting to be started (auto-run is OFF — ask the user whether to start them):\n\(list)")
                 }
+            }
+
+            if !tasksFromOtherSessions.isEmpty {
+                let list = tasksFromOtherSessions
+                    .map { "- \($0.title) (id: \($0.id.uuidString)) — \($0.status.displayName), from another session" }
+                    .joined(separator: "\n")
+                parts.append("""
+                    The following unfinished task(s) were restored here from another session. Nothing \
+                    starts them automatically. If the user wants one run, `run_task` runs a fresh copy in \
+                    this session and leaves the original unchanged:
+                    \(list)
+                    """)
             }
 
             if !pausedTasks.isEmpty {

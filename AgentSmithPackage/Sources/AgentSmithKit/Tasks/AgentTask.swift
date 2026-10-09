@@ -127,6 +127,19 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// and back-filled on load for legacy per-session tasks. `nil` only for archived/deleted tasks that
     /// predate this field — their origin session is unrecoverable, so their transcript reads unavailable.
     public var sessionID: UUID?
+
+    /// Whether this task belongs to a session other than `homeSessionID`, so running it there
+    /// would split its transcript across two sessions' logs (#15). Such a task is never run in
+    /// place: a start clones it into the home session instead.
+    ///
+    /// A template belongs to no session (the library is global, and starting one always clones),
+    /// so it is never foreign. A task with no `sessionID` predates the field, so its transcript
+    /// lives in an unknown log: foreign. With no home session — a standalone or test store —
+    /// nothing is foreign.
+    public func belongsToAnotherSession(than homeSessionID: UUID?) -> Bool {
+        guard let homeSessionID, !isTemplate else { return false }
+        return sessionID != homeSessionID
+    }
     /// Inputs this template requires or accepts before a run can be instantiated. Only
     /// template tasks may define these directly. Template instances retain a snapshot so
     /// their historical context stays stable if the template is edited later.

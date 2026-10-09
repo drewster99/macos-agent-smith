@@ -148,6 +148,15 @@ public actor TaskStore {
         self.templateLibraryPersistable = templateLibraryPersistable
     }
 
+    /// The session this store belongs to (`Session.id`), or nil for a standalone store.
+    public var homeSessionID: UUID? { sessionID }
+
+    /// Whether `task` belongs to another session and must be cloned rather than run here — see
+    /// `AgentTask.belongsToAnotherSession(than:)`.
+    public func originatesElsewhere(_ task: AgentTask) -> Bool {
+        task.belongsToAnotherSession(than: sessionID)
+    }
+
     /// Sets the origin session ONCE (no-op if already set). Used for the live store, which is
     /// constructed inside the runtime before the session id is known and adopted afterward.
     public func setSessionID(_ id: UUID) {
@@ -1385,6 +1394,56 @@ public actor TaskStore {
         return .success(withWatches)
     }
 
+    /// Clones `source` — a task that belongs to another session — into THIS session as a fresh
+    /// pending task, so it can run here without splitting its transcript (#15). `source` may come
+    /// from this store's active list or the global inactive store; it is never modified, re-homed
+    /// or restored. One write.
+    ///
+    /// The clone carries what the work IS: title, description and its attachments, the acceptance
+    /// contract (fresh criterion ids, no verdicts — nothing has been judged in this session), the
+    /// active steps reset to pending, the user's tool overrides, the sign-off gate, required
+    /// capabilities, and template lineage and inputs. It carries nothing about the earlier run:
+    /// status, result, validation, updates, approved tools, saved worker context, queued worker
+    /// messages, pending effects, watches, start holds, schedule, or the coordinator link (a
+    /// coordinator in another session cannot be waiting on it).
+    public func cloneForRunInThisSession(source: AgentTask) -> AgentTask {
+        let clone = AgentTask(
+            title: source.title,
+            description: source.description,
+            status: .pending,
+            disposition: .active,
+            updates: [AgentTask.TaskUpdate(message: "Cloned from task \(source.id.uuidString), which belongs to another session — a task runs only in the session its transcript lives in.")],
+            descriptionAttachments: source.descriptionAttachments,
+            userToolOverrides: source.userToolOverrides,
+            requiresUserAcceptance: source.requiresUserAcceptance,
+            acceptanceCriteria: source.acceptanceCriteria.map { criterion in
+                AcceptanceCriterion(
+                    name: criterion.name,
+                    validationPrompt: criterion.validationPrompt,
+                    inputEnumeratorPrompt: criterion.inputEnumeratorPrompt,
+                    waivable: criterion.waivable,
+                    origin: criterion.origin
+                )
+            },
+            steps: source.steps.filter(\.isActive).map { step in
+                TaskStep(text: step.text, status: .pending, note: nil, origin: step.origin)
+            },
+            isTemplate: false,
+            parentTaskID: source.parentTaskID,
+            sessionID: sessionID,
+            templateInputDefinitions: source.templateInputDefinitions,
+            templateInputValues: source.templateInputValues,
+            requiredCapabilities: source.requiredCapabilities
+        )
+        tasks[clone.id] = clone
+        if tasks[source.id] != nil {
+            tasks[source.id]?.updates.append(AgentTask.TaskUpdate(message: "Run in this session as task \(clone.id.uuidString); this task belongs to another session and is left as it was."))
+            tasks[source.id]?.updatedAt = Date()
+        }
+        didMutate()
+        return clone
+    }
+
     /// Adds a new task and returns it. When auto-archive is enabled (Settings), also sweeps any
     /// completed tasks older than the configured cutoff out to the Archived bucket first.
     /// When `scheduledRunAt` is non-nil and in the future the new task is created with status
@@ -1865,6 +1924,9 @@ public actor TaskStore {
             return .refused("task \(id.uuidString) is not in this session's active list")
         }
         if task.isTemplate { return .ready }
+        // Like a template, a task from another session is cloned downstream (`resolveStartTarget`),
+        // so its own state must not be reset or reopened here (#15).
+        if task.belongsToAnotherSession(than: sessionID) { return .ready }
         if task.status.isRunnable { return .ready }
         switch task.status {
         case .failed:
