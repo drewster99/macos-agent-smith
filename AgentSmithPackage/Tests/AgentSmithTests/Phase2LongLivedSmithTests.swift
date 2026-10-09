@@ -70,7 +70,7 @@ struct Phase2LongLivedSmithTests {
 
         let smithAfter = await runtime.agentIDForRole(.smith)
         #expect(smithAfter == smithBefore, "Smith must SURVIVE a task start — that is Phase 2's whole point")
-        let brownID = await runtime.agentIDForRole(.brown)
+        let brownID = await runtime.liveWorkerID(taskID: task.id)
         #expect(brownID != nil, "a worker must be live")
         let running = await store.task(id: task.id)
         #expect(running?.status == .running)
@@ -103,7 +103,7 @@ struct Phase2LongLivedSmithTests {
         let first = await store.addTask(title: "First", description: "d")
         await runtime.restartForNewTask(taskID: first.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
-        let firstBrown = await runtime.agentIDForRole(.brown)
+        let firstBrown = await runtime.liveWorkerID(taskID: first.id)
 
         // Finish the first task so the second is allowed to start.
         await store.driveStatus(id: first.id, to: .completed)
@@ -111,7 +111,7 @@ struct Phase2LongLivedSmithTests {
         let second = await store.addTask(title: "Second", description: "d")
         await runtime.restartForNewTask(taskID: second.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
-        let secondBrown = await runtime.agentIDForRole(.brown)
+        let secondBrown = await runtime.liveWorkerID(taskID: second.id)
 
         #expect(await runtime.agentIDForRole(.smith) == smithID, "same Smith across both tasks")
         #expect(firstBrown != nil && secondBrown != nil)
@@ -133,13 +133,15 @@ struct Phase2LongLivedSmithTests {
         let workerA1 = await runtime.spawnBrown(for: taskA)
         let workerA2 = await runtime.spawnBrown(for: taskA)
         #expect(workerA1 != nil && workerA2 != nil && workerA1 != workerA2)
-        #expect(await runtime.agentIDForRole(.brown) == workerA2)
+        #expect(await runtime.liveWorkerID(taskID: taskA.id) == workerA2)
+        if let workerA1 { #expect(await !runtime.isAgentRegistered(workerA1), "the respawn replaced task A's worker") }
 
         // Different task at capacity: the spawn is REFUSED; the incumbent is untouchable.
         let taskB = await store.addTask(title: "B", description: "d")
         let workerB = await runtime.spawnBrown(for: taskB)
         #expect(workerB == nil, "capacity never evicts — the spawn fails cleanly")
-        #expect(await runtime.agentIDForRole(.brown) == workerA2, "task A's worker survives")
+        #expect(await runtime.liveWorkerID(taskID: taskA.id) == workerA2, "task A's worker survives")
+        #expect(await runtime.liveWorkerID(taskID: taskB.id) == nil, "task B got no worker")
 
         await runtime.stopAll()
     }
@@ -183,7 +185,7 @@ struct Phase2LongLivedSmithTests {
         let taskA = await store.addTask(title: "A", description: "d")
         await runtime.restartForNewTask(taskID: taskA.id, origin: .explicitUser)
         await runtime.waitForPendingRestarts()
-        let workerA = await runtime.agentIDForRole(.brown)
+        let workerA = await runtime.liveWorkerID(taskID: taskA.id)
         #expect(workerA != nil)
 
         // A second start arrives anyway (the tool-check race). The lifecycle-queue gate
@@ -194,7 +196,8 @@ struct Phase2LongLivedSmithTests {
 
         #expect(await store.task(id: taskB.id)?.status == .pending, "the race loser queues")
         #expect(await store.task(id: taskA.id)?.status == .running, "the incumbent keeps running")
-        #expect(await runtime.agentIDForRole(.brown) == workerA, "task A's worker is untouched")
+        #expect(await runtime.liveWorkerID(taskID: taskA.id) == workerA, "task A's worker is untouched")
+        #expect(await runtime.liveWorkerID(taskID: taskB.id) == nil, "the pended task has no worker")
 
         await runtime.stopAll()
     }
