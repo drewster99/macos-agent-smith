@@ -130,19 +130,39 @@ struct RoleModelConfigOverrideEditor: View {
 
     // MARK: Rows
 
+    /// The slider's ceiling when the model publishes none — the most providers accept.
+    private static let defaultTemperatureCeiling = 2.0
+    /// Where a newly switched-on override starts when the model publishes no default.
+    private static let fallbackTemperatureSeed = 0.7
+
+    /// The temperatures the slider offers: up to the model's own published maximum (only some
+    /// providers publish one), else the usual ceiling. A nonsensical maximum (zero, negative, not
+    /// finite) is ignored rather than allowed to make an empty or invalid range.
+    private var temperatureRange: ClosedRange<Double> {
+        guard let maximum = modelInfo?.maxTemperature, maximum.isFinite, maximum > 0 else {
+            return 0...Self.defaultTemperatureCeiling
+        }
+        return 0...maximum
+    }
+
     private func temperatureRow() -> some View {
-        overrideRow(
+        let range = temperatureRange
+        return overrideRow(
             title: "Temperature",
             help: "Sampling randomness. Model default is used when off.",
             isOn: Binding(get: { override.temperature != nil },
-                          set: { override.temperature = $0 ? (modelInfo?.samplingDefaults?.temperature ?? 0.7) : nil }),
+                          set: { override.temperature = $0 ? min(modelInfo?.samplingDefaults?.temperature ?? Self.fallbackTemperatureSeed, range.upperBound) : nil }),
             defaultText: modelInfo?.samplingDefaults?.temperature.map { String(format: "%.2f", $0) } ?? "provider default",
             warning: warnings[.temperature]
         ) {
             HStack(spacing: 10) {
-                Slider(value: Binding(get: { override.temperature ?? 0.7 }, set: { override.temperature = $0 }),
-                       in: 0...2, step: 0.05)
-                Text(String(format: "%.2f", override.temperature ?? 0.7))
+                // The slider SHOWS a saved value above the model's maximum at the maximum, but writes
+                // only when dragged: the saved value is never changed behind the user's back — the
+                // row's warning says it is out of range, and the number beside it is the real value.
+                Slider(value: Binding(get: { min(override.temperature ?? Self.fallbackTemperatureSeed, range.upperBound) },
+                                      set: { override.temperature = $0 }),
+                       in: range, step: 0.05)
+                Text(String(format: "%.2f", override.temperature ?? Self.fallbackTemperatureSeed))
                     .font(.callout.monospaced()).frame(width: 44, alignment: .trailing)
             }
         }
