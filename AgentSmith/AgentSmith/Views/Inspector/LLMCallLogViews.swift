@@ -30,6 +30,7 @@ extension LLMCallAnnotation.Operation {
         case .memoryReconciliation: return "Memory consolidation"
         case .webContentExtraction: return "Web extraction"
         case .contextCompaction: return "Context compaction"
+        case .outageRecheck: return "Outage re-check"
         }
     }
 }

@@ -59,7 +59,8 @@ struct ProviderOutageTests {
         func kind(_ body: String) -> ProviderUnavailableKind? {
             ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 429, body: body))
         }
-        #expect(kind(#"{"error":{"rate_limit_reached_type":"workspace_owner_credits_depleted"}}"#) == .paymentRequired)
+        #expect(kind(#"{"error":{"rate_limit_reached_type":"workspace_owner_credits_depleted"}}"#) == .creditsDepleted(userCanResolve: true))
+        #expect(kind(#"{"error":{"rate_limit_reached_type":"workspace_member_credits_depleted"}}"#) == .creditsDepleted(userCanResolve: false))
         #expect(kind(#"{"error":{"spend_control_reached":true}}"#) == .spendLimitReached)
         #expect(kind(#"{"error":{"type":"usage_limit_reached","resets_in_seconds":60}}"#) == nil)
         #expect(kind(#"{"error":{"type":"rate_limit_exceeded"}}"#) == nil)
@@ -77,6 +78,19 @@ struct ProviderOutageTests {
         #expect(ProviderUnavailableKind.afterRetriesExhausted(on: URLError(.timedOut)) == nil)
         #expect(ProviderUnavailableKind.of(LLMProviderError.httpError(statusCode: 429, body: "{}")) == nil,
                 "a single 429 is transient")
+    }
+
+    /// Depleted credits are a balance someone may top up at any time, so that outage is re-checked
+    /// on a slow cadence and lifts on its own (ROADMAP, settled 2026-09-16; #16). Every other
+    /// account problem waits for a person.
+    @Test("only depleted credits are re-checked, on the hour; a member is told to ask an owner")
+    func creditsRecheckPolicy() {
+        #expect(ProviderUnavailableKind.creditsDepleted(userCanResolve: true).recheckInterval == ProviderUnavailableKind.creditsRecheckInterval)
+        #expect(ProviderUnavailableKind.creditsRecheckInterval == 3600)
+        for kind: ProviderUnavailableKind in [.paymentRequired, .spendLimitReached, .unauthorized, .forbidden, .modelNotFound, .rateLimitExhausted] {
+            #expect(kind.recheckInterval == nil, "\(kind) needs a person, not a re-check")
+        }
+        #expect(ProviderUnavailableKind.creditsDepleted(userCanResolve: false).retryCondition.contains("workspace owner"))
     }
 
     // MARK: - Runtime
@@ -451,6 +465,118 @@ struct ProviderOutageTests {
     }
 
     private static let paymentRequired = LLMProviderError.httpError(statusCode: 402, body: #"{"error":{"message":"This model is not in the Free plan."}}"#)
+
+    /// Refuses every call with the Codex backend's depleted-credits limit (or `refusal`) until
+    /// `topUp()`, then answers. Counts calls, worker turns and re-check probes alike.
+    private final class CreditsProvider: LLMProvider, @unchecked Sendable {
+        private let lock = NSLock()
+        private var depleted = true
+        private var calls = 0
+        private var refusal: LLMProviderError
+        init(refusal: LLMProviderError = LLMProviderError.httpError(statusCode: 429, body: #"{"error":{"rate_limit_reached_type":"workspace_owner_credits_depleted"}}"#)) {
+            self.refusal = refusal
+        }
+        var callCount: Int { lock.withLock { calls } }
+        func topUp() { lock.withLock { depleted = false } }
+        func refuse(with error: LLMProviderError) { lock.withLock { refusal = error } }
+        func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {
+            let refusalNow = lock.withLock { () -> LLMProviderError? in
+                calls += 1
+                return depleted ? refusal : nil
+            }
+            if let refusalNow { throw refusalNow }
+            // A worker turn (tools offered) keeps working; a re-check probe (no tools) is answered.
+            if tools.isEmpty { return LLMResponse(text: "OK") }
+            try await Task.sleep(for: .seconds(30))
+            return LLMResponse(text: "working")
+        }
+    }
+
+    @Test("depleted credits hold the task, are re-checked quietly, and the task resumes on its own after a top-up")
+    func creditsSelfResume() async throws {
+        let provider = CreditsProvider()
+        try await withRuntime(brownProvider: provider, capacity: 1) { runtime, store in
+            await runtime.setWorkerOutageRecheckIntervalForTesting(0.1)
+            let task = await store.addTask(title: "Needs credits", description: "d")
+            await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
+            try await settle(runtime, stopLines: 1)
+            #expect(await store.task(id: task.id)?.status == .interrupted)
+            #expect(await runtime.workerProviderOutage()?.kind == .creditsDepleted(userCanResolve: true))
+
+            // Several re-checks, all still refused: nothing changes and nobody is told again.
+            let probed = try await waitUntil { provider.callCount >= 4 }
+            #expect(probed, "the outage was not re-checked")
+            #expect(await runtime.workerProviderOutage() != nil)
+            #expect(await outageAdvisories(runtime).count == 1, "a still-refused re-check must not repeat the advisory")
+            #expect(await store.task(id: task.id)?.updates.filter { $0.message.hasPrefix("On hold:") }.count == 1)
+
+            provider.topUp()
+            let resumed = try await waitUntil {
+                let outageGone = await runtime.workerProviderOutage() == nil
+                let running = await store.task(id: task.id)?.status == .running
+                return outageGone && running
+            }
+            #expect(resumed, "the held task did not resume after the credits came back")
+            #expect(await runtime.channel.allMessages().contains { $0.kind == .advisory && $0.content.contains("can be used again") })
+        }
+    }
+
+    @Test("a spend cap is never re-checked")
+    func spendCapNotRechecked() async throws {
+        let provider = CreditsProvider(refusal: LLMProviderError.httpError(statusCode: 429, body: #"{"error":{"spend_control_reached":true}}"#))
+        try await withRuntime(brownProvider: provider, capacity: 1) { runtime, store in
+            await runtime.setWorkerOutageRecheckIntervalForTesting(0.1)
+            let task = await store.addTask(title: "Capped", description: "d")
+            await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
+            try await settle(runtime, stopLines: 1)
+            #expect(await runtime.workerProviderOutage()?.kind == .spendLimitReached)
+            let callsAtHold = provider.callCount
+            try await Task.sleep(for: .milliseconds(600))
+            #expect(provider.callCount == callsAtHold, "a spend cap was probed (\(callsAtHold) → \(provider.callCount))")
+        }
+    }
+
+    @Test("Stop ends the re-check: nothing probes, or restarts work, in a stopped session")
+    func stopEndsRecheck() async throws {
+        let provider = CreditsProvider()
+        try await withRuntime(brownProvider: provider, capacity: 1) { runtime, store in
+            await runtime.setWorkerOutageRecheckIntervalForTesting(0.1)
+            let task = await store.addTask(title: "Needs credits", description: "d")
+            await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
+            try await settle(runtime, stopLines: 1)
+            await runtime.stopAll()
+            let callsAtStop = provider.callCount
+            provider.topUp()
+            try await Task.sleep(for: .milliseconds(600))
+            #expect(provider.callCount == callsAtStop, "a stopped session was re-checked")
+            #expect(await runtime.workerProviderOutage() != nil, "the outage stands until something re-checks it")
+
+            // The next start resumes the re-check, which finds the credits back and releases it.
+            await runtime.start()
+            let released = try await waitUntil { await runtime.workerProviderOutage() == nil }
+            #expect(released, "start() did not resume the re-check")
+        }
+    }
+
+    @Test("a re-check refused for a different account reason replaces the outage, tells the held tasks, and stops if that reason isn't re-checked")
+    func recheckReplacesOutage() async throws {
+        let provider = CreditsProvider()
+        try await withRuntime(brownProvider: provider, capacity: 1) { runtime, store in
+            await runtime.setWorkerOutageRecheckIntervalForTesting(0.1)
+            let task = await store.addTask(title: "Needs credits", description: "d")
+            await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
+            try await settle(runtime, stopLines: 1)
+            provider.refuse(with: LLMProviderError.httpError(statusCode: 404, body: "{}"))
+
+            let replaced = try await waitUntil { await runtime.workerProviderOutage()?.kind == .modelNotFound }
+            #expect(replaced, "the outage was not replaced by the new reason")
+            #expect(await outageAdvisories(runtime).count == 2, "the new reason is told once")
+            #expect(await store.task(id: task.id)?.updates.contains { $0.message.hasPrefix("Still on hold:") } == true)
+            let callsAfterReplacement = provider.callCount
+            try await Task.sleep(for: .milliseconds(600))
+            #expect(provider.callCount == callsAfterReplacement, "a reason that isn't re-checked was probed again")
+        }
+    }
 
     /// Every call is refused with HTTP 402, as Ollama answers for a model outside the plan.
     private struct PaymentRequiredProvider: LLMProvider {

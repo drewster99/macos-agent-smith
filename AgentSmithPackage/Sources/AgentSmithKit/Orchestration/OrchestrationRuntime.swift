@@ -601,6 +601,17 @@ public actor OrchestrationRuntime {
     /// failed within seconds. Only the worker role has one: it is the role tasks start on. In memory
     /// only: a relaunch is a retry, and the first task that fails again trips it again.
     private var workerOutage: ProviderOutage?
+    /// Bumped every time the worker's outage is tripped. A re-check that finishes after its outage
+    /// was released — and perhaps tripped again — compares this and stands down, so it can never
+    /// release (or rewrite) an outage it did not observe.
+    private var workerOutageGeneration = 0
+    /// The re-check of the worker's outage, while one stands whose kind is re-checked
+    /// (`ProviderUnavailableKind.recheckInterval`). Cancelled by the release and by Stop.
+    private var workerOutageRecheck: Task<Void, Never>?
+    /// Tests shorten the re-check cadence of a kind that is re-checked; nil uses the kind's own.
+    private var workerOutageRecheckIntervalForTesting: TimeInterval?
+    /// One inspector identity for every re-check call, so they collect in one call log.
+    private let workerOutageRecheckInspectorRef = AgentInstanceRef(role: .brown, instanceID: UUID())
 
     /// A start held for the worker's model, and the task's status revision when it was held: at the
     /// release it is started only if nothing has happened to the task since (a user pause, an
@@ -668,23 +679,206 @@ public actor OrchestrationRuntime {
             return .taskRestarting
         }
         holdStart(held)
-        let isNewOutage = workerOutage == nil
-        if isNewOutage { workerOutage = outage }   // keep the first report (its `since`)
-        await taskStore.addUpdate(id: task.id, message: "On hold: the worker's model '\(outage.modelID)' can't be used — \(outage.kind.displayDescription). The task resumes when the worker's model is changed, or when you press Play \(outage.kind.retryCondition). If the app is relaunched first, press Play.")
+        let isNewOutage = tripWorkerOutage(outage)
+        await taskStore.addUpdate(id: task.id, message: "On hold: the worker's model '\(outage.modelID)' can't be used — \(outage.kind.displayDescription). \(outage.kind.resumeSentence) If the app is relaunched first, press Play.")
         if isNewOutage { await postProviderOutageAdvisory(outage) }
         return .taskOnHold
     }
 
     /// Trips the worker breaker, telling the user once per outage.
     private func recordWorkerOutage(_ outage: ProviderOutage) async {
-        guard workerOutage == nil else { return }   // keep the first report (its `since`)
-        workerOutage = outage
+        guard tripWorkerOutage(outage) else { return }
         await postProviderOutageAdvisory(outage)
+    }
+
+    /// The ONE place the worker's breaker trips. Keeps the first report (its `since`) of an outage
+    /// that already stands; otherwise records this one, starts a new generation, and starts the
+    /// re-check if its kind is re-checked. Returns whether this report tripped it.
+    private func tripWorkerOutage(_ outage: ProviderOutage) -> Bool {
+        guard workerOutage == nil else { return false }
+        workerOutage = outage
+        workerOutageGeneration += 1
+        startWorkerOutageRecheck()
+        return true
+    }
+
+    /// Starts re-checking the standing worker outage when its kind is re-checked, replacing any
+    /// re-check already running. Nothing to do while the runtime is stopped: `start()` calls this
+    /// again, and a re-check that succeeded with no session running would start tasks into it.
+    private func startWorkerOutageRecheck() {
+        workerOutageRecheck?.cancel()
+        workerOutageRecheck = nil
+        guard let outage = workerOutage, supervisor.currentGeneration != nil,
+              let kindInterval = outage.kind.recheckInterval else { return }
+        let interval = workerOutageRecheckIntervalForTesting ?? kindInterval
+        let generation = workerOutageGeneration
+        workerOutageRecheck = Task { [weak self] in
+            await self?.recheckWorkerOutage(generation: generation, every: interval)
+        }
+    }
+
+    /// Re-checks the worker's outage every `interval`, publishing each wait on the provider wait
+    /// board, until a probe call on the worker's model succeeds — then releases the outage, which
+    /// restarts the held tasks — or the outage ends some other way. A probe that is refused for the
+    /// same reason changes nothing and tells nobody (the user was told once, when it tripped). One
+    /// refused for a different account reason replaces the outage and says so; if that reason is
+    /// not re-checked, the re-check stops. Any other failure is tried again at the next interval.
+    private func recheckWorkerOutage(generation: Int, every interval: TimeInterval) async {
+        var attempt = 0
+        while true {
+            guard let outage = workerOutage, workerOutageGeneration == generation,
+                  let reason = outage.kind.recheckWaitReason else { return }
+            attempt += 1
+            let wait = ProviderWait(
+                holder: ProviderWaitHolder(role: .brown, purpose: .outageRecheck),
+                reason: reason,
+                providerID: outage.providerID,
+                modelID: outage.modelID,
+                streakStartedAt: outage.since,
+                resumesAt: Date().addingTimeInterval(interval),
+                attempt: attempt
+            )
+            let modelEpoch = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .brown)
+            switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: interval, wait, modelEpochAtAttempt: modelEpoch) {
+            case .elapsed: break
+            // A model change releases the outage itself (`setProviders`); a cancel is the release or Stop.
+            case .wokenForModelChange, .cancelled: return
+            }
+            guard !Task.isCancelled, !stopRequested, supervisor.currentGeneration != nil,
+                  workerOutageGeneration == generation,
+                  let standing = workerOutage, isCurrentModel(of: .brown, in: standing) else { return }
+            let probe = await probeWorkerModel()
+            // Everything is re-read after the call: the outage may have been released, replaced, or
+            // the runtime stopped while it was in flight.
+            guard !Task.isCancelled, !stopRequested, supervisor.currentGeneration != nil,
+                  workerOutageGeneration == generation,
+                  let current = workerOutage, isCurrentModel(of: .brown, in: current) else { return }
+            switch probe {
+            case .usable:
+                await releaseProviderOutage(because: .recheckSucceeded)
+                return
+            case .unavailable(let kind, let detail):
+                guard kind != current.kind else { continue }
+                let replaced = ProviderOutage(role: .brown, providerID: current.providerID, modelID: current.modelID,
+                                              kind: kind, detail: detail, since: current.since)
+                workerOutage = replaced
+                await postProviderOutageAdvisory(replaced)
+                // Each held task was told how it would resume; that has changed.
+                for held in startsHeldByWorkerOutage {
+                    await taskStore.addUpdate(id: held.taskID, message: "Still on hold: the worker's model '\(replaced.modelID)' now can't be used because \(kind.displayDescription). \(kind.resumeSentence)")
+                }
+                guard kind.recheckInterval != nil else { return }
+            case .failed(let error):
+                stopLogger.notice("worker outage re-check failed, retrying at the next interval: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// Why a re-check couldn't make its call.
+    private enum ProviderOutageProbeError: Error, LocalizedError {
+        case noWorkerModel
+        var errorDescription: String? { "the worker role has no model configured" }
+    }
+
+    /// What one re-check call on the worker's model found.
+    private enum WorkerModelProbe {
+        case usable
+        /// Refused for an account or model reason (`ProviderUnavailableKind`), with the provider's error.
+        case unavailable(ProviderUnavailableKind, detail: String)
+        /// Any other failure — says nothing about whether the outage has lifted.
+        case failed(Error)
+    }
+
+    /// The smallest useful call on the worker's model: a one-word prompt, no tools. A transient
+    /// failure is retried through the one retry policy, its waits on the board like any caller's,
+    /// so a blip doesn't cost a whole re-check interval. Recorded like every other LLM call — in
+    /// the inspector's call log and the usage store — because it is billed.
+    private func probeWorkerModel() async -> WorkerModelProbe {
+        let messages: [LLMMessage] = [.user("Reply with the single word OK.")]
+        let annotation = LLMCallAnnotation(operation: .outageRecheck)
+        let streakStartedAt = Date()
+        var attempt = 0
+        while true {
+            attempt += 1
+            // Read per attempt: a model change during a wait ends the outage anyway, and the next
+            // attempt is then on the new model's provider.
+            guard let provider = llmProviders[.brown], let config = llmConfigs[.brown] else {
+                return .failed(ProviderOutageProbeError.noWorkerModel)
+            }
+            let modelEpochAtAttempt = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .brown)
+            let callStart = Date()
+            let response: LLMResponse
+            do {
+                response = try await provider.send(messages: messages, tools: [], overrides: LLMCallOverrides())
+            } catch {
+                onLLMCallRecorded?(workerOutageRecheckInspectorRef, .failed(LLMCallFailureRecord(
+                    error: error, startedAt: callStart, modelID: config.model, providerID: config.providerID,
+                    annotation: annotation)))
+                if let kind = ProviderUnavailableKind.of(error) {
+                    return .unavailable(kind, detail: error.localizedDescription)
+                }
+                guard case .transient(let retryAfter, _) = LLMRetryPolicy.classify(error),
+                      attempt < LLMRetryPolicy.maxAttempts else {
+                    return .failed(error)
+                }
+                let delay = LLMRetryPolicy.delay(attempt: attempt, retryAfter: retryAfter)
+                let wait = ProviderWait(
+                    holder: ProviderWaitHolder(role: .brown, purpose: .outageRecheck),
+                    reason: LLMRetryPolicy.waitReason(for: error),
+                    providerID: config.providerID,
+                    modelID: config.model,
+                    streakStartedAt: streakStartedAt,
+                    resumesAt: Date().addingTimeInterval(delay),
+                    attempt: attempt
+                )
+                switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: delay, wait, modelEpochAtAttempt: modelEpochAtAttempt) {
+                case .elapsed: continue
+                case .wokenForModelChange, .cancelled: return .failed(error)
+                }
+            }
+            let latencyMs = Int(Date().timeIntervalSince(callStart) * 1000)
+            onLLMCallRecorded?(workerOutageRecheckInspectorRef, .completed(LLMTurnRecord(
+                inputDelta: [],
+                response: response,
+                totalMessageCount: messages.count,
+                contextSnapshot: messages,
+                latencyMs: latencyMs,
+                modelID: config.model,
+                providerType: providerAPITypes[.brown]?.rawValue ?? "",
+                providerID: config.providerID,
+                temperature: config.temperature,
+                maxOutputTokens: config.maxTokens,
+                thinkingBudget: config.thinkingBudget,
+                usage: response.usage,
+                annotation: annotation,
+                isSelfContainedRequest: true
+            )))
+            await UsageRecorder.record(
+                response: response,
+                context: LLMCallContext(
+                    agentRole: .brown,
+                    taskID: nil,
+                    modelID: config.model,
+                    providerType: providerAPITypes[.brown]?.rawValue ?? "",
+                    providerID: config.providerID,
+                    configuration: config,
+                    sessionID: currentSessionID
+                ),
+                latencyMs: latencyMs,
+                to: usageStore
+            )
+            return .usable
+        }
+    }
+
+    /// Tests set the re-check cadence (seconds) so a re-check runs within a test.
+    func setWorkerOutageRecheckIntervalForTesting(_ seconds: TimeInterval?) {
+        workerOutageRecheckIntervalForTesting = seconds
     }
 
     private func postProviderOutageAdvisory(_ outage: ProviderOutage) async {
         let consequence = outage.role == .brown
-            ? "No task will start on it until it is fixed. Tasks it stopped are on hold, not failed, and resume on their own when you change the worker's model in Settings — or press Play on one of them \(outage.kind.retryCondition)."
+            ? "No task will start on it until it is fixed. Tasks it stopped are on hold, not failed. \(outage.kind.resumeSentence)"
             : "\(outage.role.displayName) stopped and can't work until it is fixed: change its model in Settings, or start it again \(outage.kind.retryCondition)."
         await channel.post(ChannelMessage(
             sender: .system,
@@ -749,6 +943,8 @@ public actor OrchestrationRuntime {
         case modelChanged
         /// The user pressed Play on a task — after fixing the account, presumably.
         case userRetried
+        /// A re-check call on the worker's model succeeded (`recheckWorkerOutage`).
+        case recheckSucceeded
     }
 
     /// Ends the worker's outage: the held starts move onto `providerRecoveredQueue`, and a drain —
@@ -758,6 +954,8 @@ public actor OrchestrationRuntime {
     private func releaseProviderOutage(because reason: ProviderOutageRelease) async {
         guard let outage = workerOutage else { return }
         workerOutage = nil
+        workerOutageRecheck?.cancel()
+        workerOutageRecheck = nil
         let held = startsHeldByWorkerOutage
         startsHeldByWorkerOutage.removeAll()
         // Only starts nothing has happened to since: a task archived, deleted, paused by the user or
@@ -773,12 +971,18 @@ public actor OrchestrationRuntime {
         let lead = switch reason {
         case .modelChanged: "The worker's model was changed."
         case .userRetried: "Retrying the worker's model '\(outage.modelID)' because you started a task."
+        case .recheckSucceeded: "The worker's model '\(outage.modelID)' can be used again — its hourly re-check succeeded."
         }
         await channel.post(ChannelMessage(
             sender: .system,
             content: released.isEmpty ? lead : "\(lead) Starting \(released.count) waiting task(s) as worker slots allow.",
             metadata: ["messageKind": .kind(.advisory), "severity": .severity(.info)]
         ))
+        // A re-check's release can land after a Stop that came during this function's suspensions:
+        // the drain would then start a task cold, bringing the session back up behind the user's
+        // Stop. The released starts stay on `providerRecoveredQueue` for the next start's drain.
+        // (Every other release is a person's action or a model change on a running session.)
+        if reason == .recheckSucceeded, stopRequested || supervisor.currentGeneration == nil { return }
         drainAfterOutageRelease()
     }
 
@@ -3646,6 +3850,10 @@ public actor OrchestrationRuntime {
     /// stamp. Nothing else exists yet by construction (agents register after the guards),
     /// so this is the complete failure-path teardown.
     private func abandonFailedStart() async {
+        // Started by `performStart` before it could fail; a session that never came up has nothing
+        // for a re-check to resume into.
+        workerOutageRecheck?.cancel()
+        workerOutageRecheck = nil
         await powerManager?.shutdown()
         powerManager = nil
         // `taskSummarizer` is deliberately KEPT (matching performStopAll): late
@@ -3685,6 +3893,8 @@ public actor OrchestrationRuntime {
         // and summarizer so their UsageRecords carry it, and published to the
         // MessageChannel so every posted message is auto-stamped with the session.
         let generation = supervisor.beginGeneration()
+        // An outage that outlived a Stop is re-checked again now that there is a session to resume into.
+        startWorkerOutageRecheck()
         let sessionID = generation.sessionID
         await channel.setCurrentSessionID(sessionID)
         onRunSessionChanged?(sessionID)
@@ -4683,6 +4893,10 @@ public actor OrchestrationRuntime {
     private func performStopAll(preserveObserverCallbacks: Bool = false) async {
         // This stop is the answer to any pending stop request.
         stopRequested = false
+        // A worker-outage re-check that succeeded with nothing running would start tasks into a
+        // stopped session; the outage itself stands, and `start()` resumes its re-check.
+        workerOutageRecheck?.cancel()
+        workerOutageRecheck = nil
         // FULL teardown only (a restartForNewTask preserves callbacks and KEEPS the scheduler live):
         // cancel the WakeScheduler's armed timer FIRST — before `endGeneration` frees the workers —
         // so a wall-clock wake can't fire during teardown, hit `dispatchAutoRunWake` with a now-free

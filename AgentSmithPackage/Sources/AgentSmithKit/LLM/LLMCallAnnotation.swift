@@ -20,6 +20,9 @@ public struct LLMCallAnnotation: Sendable, Equatable {
         case webContentExtraction
         /// Summarizing Smith's working conversation so it can continue in a smaller context.
         case contextCompaction
+        /// Checking whether the worker's model can be used again after an outage
+        /// (`ProviderUnavailableKind.recheckInterval`).
+        case outageRecheck
     }
 
     public let operation: Operation

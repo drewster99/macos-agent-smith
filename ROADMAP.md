@@ -19,7 +19,7 @@ contributor.
    [#14](https://github.com/drewster99/macos-agent-smith/issues/14) — S
 4. **A task restored from another session can run in place.** —
    [#15](https://github.com/drewster99/macos-agent-smith/issues/15) — S
-5. **Codex credits-depleted fails the task permanently** instead of park + re-check. —
+5. ✅ **Codex credits-depleted fails the task permanently** instead of park + re-check. —
    [#16](https://github.com/drewster99/macos-agent-smith/issues/16) — M
 
 ### P1 — high-value work
@@ -3126,10 +3126,24 @@ the work — not the OAuth, which is comparatively small.
    no PKCE implementation of our own), status (plan, expiry, signed-out), and suppressing the
    `readAPIKey` "API key missing" error path for a provider that legitimately has no key.
 5. ⚠️ **Limits UX — PARTIAL (audit 2026-09-24).** Built: proactive window display from the response
-   headers; the `usage_limit_reached` wait-and-resume flow above. **Not built:** the settled
-   credits-depleted "park + slow re-check" (`LLMRetryPolicy` classifies `.creditsDepleted` /
-   `.spendControlReached` as `.permanent`, so the task fails and never self-resumes after a top-up),
-   and the low-balance UI warning.
+   headers; the `usage_limit_reached` wait-and-resume flow above; ✅ the settled credits-depleted
+   "park + slow re-check" (2026-10-09, #16 — see below). **Not built:** the low-balance UI warning.
+   *Was:* `LLMRetryPolicy` classifies `.creditsDepleted` / `.spendControlReached` as `.permanent`;
+   the runtime's provider-outage hold (2026-10-06) then parked the task, but as a generic
+   `.paymentRequired` that nothing re-checked, so it never self-resumed after a top-up.
+   **Built (#16):** `ProviderUnavailableKind.creditsDepleted(userCanResolve:)` keeps the reason and
+   the owner/member difference; its `recheckInterval` is the named
+   `ProviderUnavailableKind.creditsRecheckInterval` (3600s, its own constant as settled). While the
+   worker's outage stands, `recheckWorkerOutage` waits on the `ProviderWaitBoard` (reason
+   `.creditsDepleted`, purpose `.outageRecheck`) and makes one minimal probe call on the worker's
+   model — recorded in the inspector and the usage store like any call — then releases the outage
+   (held tasks restart) on success, stays silent while still refused, replaces the outage and says
+   so when refused for a different account reason, and retries at the next interval on any other
+   failure. A generation token keeps a late probe from releasing a newer outage; Stop cancels the
+   re-check and `start()` resumes it. The retry policy still classifies both as `.permanent` —
+   that means "don't retry inside the agent's loop", which stays right. **Deviations:** no
+   balance is shown (the kit has no balance API); the spend cap is NOT re-checked — an
+   administrative cap has no balance to watch, so it waits for Play or a model change.
 6. ✅ **Security — mostly dissolved on inspection.** Never copy tokens into our own storage; read and
    refresh `~/.codex/auth.json` only (already how Phase 1 works). `LLMRequestLogger` needs NO change:
    `logRequest(label:url:model:body:rawData:)` takes no headers at all, so the account-linked

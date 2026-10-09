@@ -20,6 +20,9 @@ public enum ProviderWaitReason: String, Sendable, Equatable, CaseIterable {
     case networkError = "network_error"
     /// Any other failure the retry policy classifies as transient.
     case transientError = "transient_error"
+    /// The account's credits are used up; the worker's model is re-checked on a slow cadence until
+    /// they are back (`ProviderUnavailableKind.recheckInterval`).
+    case creditsDepleted = "credits_depleted"
 }
 
 /// What the waiting caller was doing. The inspector names the wait by this, and it is what ties a
@@ -41,6 +44,8 @@ public enum ProviderWaitPurpose: Sendable, Hashable {
     case webContentExtraction
     /// The summarizer compacting Smith's context.
     case contextCompaction
+    /// The runtime checking whether the worker's model can be used again after an outage.
+    case outageRecheck
 }
 
 /// Who is waiting.
@@ -111,6 +116,7 @@ extension ProviderWaitReason {
         case .serverError: return "server error"
         case .networkError: return "network error"
         case .transientError: return "temporary error"
+        case .creditsDepleted: return "credits used up"
         }
     }
 }
@@ -131,7 +137,7 @@ extension ProviderWait {
     /// threshold the agent run loop uses — so a brief hiccup never spams the transcript.
     public var warrantsAnnouncement: Bool {
         switch reason {
-        case .usageLimitReached, .rateLimited, .serverRequestedDelay, .serverOutOfMemory:
+        case .usageLimitReached, .rateLimited, .serverRequestedDelay, .serverOutOfMemory, .creditsDepleted:
             return attempt == 1
         case .serverError, .networkError, .transientError:
             return attempt == 5

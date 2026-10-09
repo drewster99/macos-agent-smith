@@ -166,9 +166,12 @@ public enum LLMRetryPolicy {
                         let wait = resetsAt.map { max(60, $0.timeIntervalSinceNow) } ?? serverDelay
                         return .transient(retryAfter: wait, isThrottle: true)
                     case .creditsDepleted, .spendControlReached:
-                        // No reset exists. Credits are a BALANCE and a spend cap is administrative,
-                        // so waiting may never help — this genuinely needs a person, and retrying
-                        // would hide that behind an indefinite stall.
+                        // No reset exists, so this caller's retry loop must not wait it out: that
+                        // would be an indefinite, invisible stall. `.permanent` means only that.
+                        // The runtime then holds the worker's task as a provider outage
+                        // (`ProviderUnavailableKind`), and re-checks depleted credits — a balance
+                        // that may be topped up — on its own slow cadence (`recheckInterval`, #16).
+                        // A spend cap is administrative and waits for a person.
                         return .permanent
                     case .rateLimited:
                         break   // ordinary throttle; the existing 429 handling is exactly right
