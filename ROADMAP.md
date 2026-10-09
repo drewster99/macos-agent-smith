@@ -2672,6 +2672,11 @@ re-verified where the runtime can. (3) Vision/PDF are checked against the same c
 attachments use; the app's fail-open for missing metadata still applies (a second capability channel
 would be a sidecar). (4) No user editing UI yet — Task Detail lists them read-only. Known downgrade
 risk: an older build drops `preconditions` when it rewrites `tasks.json`.
+**Changed 2026-10-09 (final review, a5f3d9fb):** the fail-open in (3) is gone for preconditions — a
+capability the catalog doesn't state now reads as UNMET, as the plan originally required; attachment
+gating keeps its own assumption. Also: a start-time block applies only if the task's `statusRevision`
+is unchanged (a pause during the lookup wins), and a worker's report frees its slot through
+`terminateAgent`, which drains the queue.
 
 **Motivating failure.** A "Test App Localization" task described a hard gate — *"if the assigned model is not vision-capable, the task MUST FAIL immediately."* Smith flattened it into a soft acceptance criterion with an OR-escape; the worker documented the limitation, continued, the validator ACCEPTed, and the task read **Completed / Success**. The 2026-07-17 prompt fix (`SmithBehavior` + `create_task`/`set_acceptance_criteria` hard-gate rule) makes Smith author such a gate as a non-waivable failing criterion — which fixes the *verdict* (a correctly-authored hard criterion REJECTs → stalls → `.failed`), but **cannot fail *immediately***: today the only validation→`.failed` path is the stall rule (`maxConsecutiveValidationRoundsWithoutProgress`), so a hard criterion still burns several pointless Brown rounds first. This item is the mechanism that makes "fail immediately" literal and gives the outcome the right shape.
 
