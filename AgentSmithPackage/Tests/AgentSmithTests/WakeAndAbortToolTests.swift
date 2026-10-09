@@ -37,16 +37,6 @@ struct WakeAndAbortToolTests {
         )
     }
 
-    private static func expectMissingArgument(_ name: String, _ call: () async throws -> ToolExecutionResult) async {
-        do {
-            _ = try await call()
-            Issue.record("expected missingRequiredArgument(\(name))")
-        } catch ToolCallError.missingRequiredArgument(let missing) {
-            #expect(missing == name)
-        } catch {
-            Issue.record("unexpected error \(error)")
-        }
-    }
 
     // MARK: - abort
 
@@ -61,7 +51,7 @@ struct WakeAndAbortToolTests {
         let aborts = Calls<String>()
         let context = Self.smithContext(aborts: aborts)
         for arguments: [String: AnyCodable] in [[:], ["reason": .string("")], ["reason": .string("  \n ")], ["reason": .int(3)]] {
-            await Self.expectMissingArgument("reason") { try await AbortTool().execute(arguments: arguments, context: context) }
+            await expectMissingArgument("reason") { try await AbortTool().execute(arguments: arguments, context: context) }
         }
         #expect(await aborts.values.isEmpty)
     }
@@ -98,7 +88,7 @@ struct WakeAndAbortToolTests {
 
     @Test("cancel_wake: a missing wake_id is refused")
     func cancelMissing() async {
-        await Self.expectMissingArgument("wake_id") { try await CancelWakeTool().execute(arguments: [:], context: Self.smithContext()) }
+        await expectMissingArgument("wake_id") { try await CancelWakeTool().execute(arguments: [:], context: Self.smithContext()) }
     }
 
     @Test("cancel_wake: a malformed wake_id is refused without calling the runtime")
@@ -126,7 +116,7 @@ struct WakeAndAbortToolTests {
 
     @Test("reschedule_wake: a missing wake_id is refused")
     func rescheduleMissing() async {
-        await Self.expectMissingArgument("wake_id") { try await RescheduleWakeTool().execute(arguments: ["delay_seconds": .int(60)], context: Self.smithContext()) }
+        await expectMissingArgument("wake_id") { try await RescheduleWakeTool().execute(arguments: ["delay_seconds": .int(60)], context: Self.smithContext()) }
     }
 
     @Test("reschedule_wake: every refusal leaves the schedule untouched")

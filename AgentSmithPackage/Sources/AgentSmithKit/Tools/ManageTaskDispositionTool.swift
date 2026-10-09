@@ -5,8 +5,7 @@ struct ManageTaskDispositionTool: AgentTool {
     let name = "manage_task_disposition"
     let toolDescription = """
         Move a task between active, archived, and recently-deleted buckets. \
-        A task that is in progress (starting, running, paused, validating, or waiting on help or \
-        review) can't be archived or deleted until it stops. \
+        A task that is in progress can't be archived or deleted until it stops. \
         Use unarchive or undelete to restore tasks back to the active list.
         """
 
@@ -63,14 +62,18 @@ struct ManageTaskDispositionTool: AgentTool {
             if success {
                 return .success("Task '\(task.title)' archived.")
             }
-            return .failure("Cannot archive task '\(task.title)' — it is currently \(task.status.rawValue). A task that is in progress can't be archived.")
+            return .failure(task.status.isInProgress
+                ? "Cannot archive task '\(task.title)' — it is currently \(task.status.rawValue), and a task in progress can't be archived."
+                : "Task '\(task.title)' could not be archived — the change couldn't be saved.")
 
         case "delete":
             let success = await context.taskStore.softDelete(id: taskID)
             if success {
                 return .success("Task '\(task.title)' moved to Recently Deleted.")
             }
-            return .failure("Cannot delete task '\(task.title)' — it is currently \(task.status.rawValue). A task that is in progress can't be deleted.")
+            return .failure(task.status.isInProgress
+                ? "Cannot delete task '\(task.title)' — it is currently \(task.status.rawValue), and a task in progress can't be deleted."
+                : "Task '\(task.title)' could not be moved to Recently Deleted — the change couldn't be saved.")
 
         case "unarchive":
             guard task.disposition == .archived else {

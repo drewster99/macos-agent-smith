@@ -8,16 +8,6 @@ import Foundation
 @Suite("Scripting and memory tool arguments")
 struct ScriptingAndMemoryToolArgumentTests {
 
-    private static func expectMissingArgument(_ name: String, _ call: () async throws -> ToolExecutionResult) async {
-        do {
-            _ = try await call()
-            Issue.record("expected missingRequiredArgument(\(name))")
-        } catch ToolCallError.missingRequiredArgument(let missing) {
-            #expect(missing == name)
-        } catch {
-            Issue.record("unexpected error \(error)")
-        }
-    }
 
     @Test("run_applescript: available to the worker only")
     func appleScriptAvailability() {
@@ -28,7 +18,7 @@ struct ScriptingAndMemoryToolArgumentTests {
     @Test("run_applescript: a missing, empty or non-string script is refused")
     func appleScriptMissing() async {
         for arguments: [String: AnyCodable] in [[:], ["script": .string("")], ["script": .string("   \n")], ["script": .int(1)]] {
-            await Self.expectMissingArgument("script") { try await RunAppleScriptTool().execute(arguments: arguments, context: TestToolContext.make()) }
+            await expectMissingArgument("script") { try await RunAppleScriptTool().execute(arguments: arguments, context: TestToolContext.make()) }
         }
     }
 
@@ -70,7 +60,7 @@ struct ScriptingAndMemoryToolArgumentTests {
     @Test("search_memory: a missing, blank or non-string query is refused before any search")
     func searchMemoryMissing() async {
         for arguments: [String: AnyCodable] in [[:], ["query": .string("")], ["query": .string(" \t\n")], ["query": .int(4)]] {
-            await Self.expectMissingArgument("query") { try await SearchMemoryTool().execute(arguments: arguments, context: TestToolContext.make()) }
+            await expectMissingArgument("query") { try await SearchMemoryTool().execute(arguments: arguments, context: TestToolContext.make()) }
         }
     }
 
@@ -79,6 +69,7 @@ struct ScriptingAndMemoryToolArgumentTests {
         for limit: AnyCodable in [.string("lots"), .string("2.5"), .double(2.5), .bool(true)] {
             let result = try await SearchMemoryTool().execute(arguments: ["query": .string("x"), "limit": limit], context: TestToolContext.make())
             #expect(!result.succeeded, "\(limit)")
+            #expect(result.output.contains("limit"), "\(limit)")
         }
     }
 }

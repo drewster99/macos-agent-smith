@@ -150,6 +150,38 @@ enum ToolArguments {
         }
     }
 
+    /// How an optional integer argument read, when reading a wrong-typed value as absent is unsafe.
+    /// Three outcomes for the same reason as `OptionalBool`.
+    enum OptionalInt: Equatable {
+        /// Not supplied — absent, null, or a blank-string placeholder.
+        case absent
+        case value(Int)
+        /// Supplied as something other than a whole number. Carries a rendering for the error.
+        case malformed(String)
+    }
+
+    /// An integer argument whose wrong-typed value must be refused, not dropped. A JSON integer, or
+    /// a double that is exactly integral, reads as itself; a string holding a whole number reads as
+    /// that number, since a model that quotes a number means that number. See `OptionalInt`.
+    static func strictOptionalInt(_ arguments: [String: AnyCodable], _ key: String) -> OptionalInt {
+        switch arguments[key] {
+        case nil, .null?:
+            return .absent
+        case .string(let raw)?:
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { return .absent }
+            if let value = Int(trimmed) { return .value(value) }
+            return .malformed("\"\(raw)\"")
+        case .int(let value)?:
+            return .value(value)
+        case .double(let value)?:
+            guard value.rounded() == value, let exact = Int(exactly: value) else { return .malformed(String(value)) }
+            return .value(exact)
+        case let other?:
+            return .malformed(String(describing: other))
+        }
+    }
+
     /// How an optional list-of-strings argument read, when dropping part of it silently is unsafe.
     /// Three outcomes for the same reason as `OptionalUUID`.
     enum OptionalStringList: Equatable {

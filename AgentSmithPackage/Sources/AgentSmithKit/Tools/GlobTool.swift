@@ -260,14 +260,15 @@ final class GlobTool: AgentTool {
         }
 
         // What git ignores under the root, read once, so every filter below is a set lookup.
-        // It spends the same `timeout` budget the search does: whatever git took is taken off the
-        // Spotlight and walk budgets below.
+        // It spends the same `timeout` budget the search does — at most half of it, so a work tree
+        // too large to list quickly still leaves the search its time — and whatever git took is
+        // taken off the Spotlight and walk budgets below.
         var gitIgnore: GitIgnoreSnapshot?
         var gitIgnoreNote: String?
         var gitSeconds = 0
         if respectGitignore {
             let gitStarted = Date()
-            switch await GitIgnoreSnapshot.take(forRoot: resolvedBase, budget: TimeInterval(timeoutSec)) {
+            switch await GitIgnoreSnapshot.take(forRoot: resolvedBase, budget: TimeInterval(max(1, timeoutSec / 2))) {
             case .success(let snapshot):
                 gitIgnore = snapshot
                 if snapshot.rootIgnored {
@@ -532,7 +533,7 @@ final class GlobTool: AgentTool {
         var entriesScanned: Int = 0
 
         init(pattern: String, segments: [PatternSegment], resolvedBase: String, homePruneSet: Set<String>, fullRegex: NSRegularExpression,
-             gitIgnore: GitIgnoreSnapshot? = nil, note: String? = nil) {
+             gitIgnore: GitIgnoreSnapshot?, note: String?) {
             self.pattern = pattern
             self.segments = segments
             self.resolvedBase = resolvedBase
@@ -590,7 +591,7 @@ final class GlobTool: AgentTool {
     }
 
     private func executeWalk(pattern: String, segments: [PatternSegment], fullRegex: NSRegularExpression, resolvedBase: String, limit: Int, timeoutSeconds: Int,
-                             gitIgnore: GitIgnoreSnapshot? = nil, note: String? = nil) -> ToolExecutionResult {
+                             gitIgnore: GitIgnoreSnapshot?, note: String?) -> ToolExecutionResult {
         let homePruneSet = FilesystemSearch.homePruneAbsolutePaths(forBase: resolvedBase)
         let state = WalkState(pattern: pattern, segments: segments, resolvedBase: resolvedBase, homePruneSet: homePruneSet, fullRegex: fullRegex,
                               gitIgnore: gitIgnore, note: note)

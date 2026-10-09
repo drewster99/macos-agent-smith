@@ -2,11 +2,57 @@ import Testing
 import Foundation
 @testable import AgentSmithKit
 
+/// Facts about the machine the suite's traits read. Outside the suite: a suite's trait can't
+/// refer to the suite's own members.
+private enum GitIgnoreTestEnvironment {
+    static let gitIsInstalled: Bool = {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        probe.arguments = ["-p"]
+        probe.standardOutput = FileHandle.nullDevice
+        probe.standardError = FileHandle.nullDevice
+        do { try probe.run() } catch { return false }
+        probe.waitUntilExit()
+        return probe.terminationStatus == 0
+    }()
+
+    static let tempVolumeIsCaseInsensitive: Bool = {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        do {
+            return try dir.url.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]).volumeSupportsCaseSensitiveNames == false
+        } catch {
+            return false
+        }
+    }()
+}
+
 /// `glob`'s `respect_gitignore` (#29): what git ignores is left out, tracked files never are, and a
 /// root git can't speak for says so instead of silently returning everything. Walk path only
 /// (`useSpotlight: false`) — Spotlight doesn't index the temp directory.
-@Suite("GlobTool respect_gitignore")
+///
+/// Skipped where git isn't installed: running `/usr/bin/git` without the Command Line Tools opens
+/// an install dialog rather than failing.
+@Suite("GlobTool respect_gitignore", .enabled(if: GitIgnoreTestEnvironment.gitIsInstalled))
 struct GlobToolGitIgnoreTests {
+
+    /// Keeps the machine's git setup out of every git this suite runs — its own and the tool's,
+    /// which inherit this process's environment: no global or system config (a developer's global
+    /// excludes file would change what is ignored) and no `GIT_*` overrides (a `GIT_DIR` set by a
+    /// hook would point git at another repository). Process-wide, set once.
+    private static let isolatedGit: Void = {
+        for name in ProcessInfo.processInfo.environment.keys where name.hasPrefix("GIT_") {
+            unsetenv(name)
+        }
+        setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1)
+        setenv("GIT_CONFIG_NOSYSTEM", "1", 1)
+    }()
+
+    struct GitCommandFailed: Error, CustomStringConvertible {
+        let arguments: [String]
+        let status: Int32
+        var description: String { "git \(arguments.joined(separator: " ")) exited \(status)" }
+    }
 
     private static func decode(_ result: ToolExecutionResult) -> [String: Any]? {
         guard let data = result.output.data(using: .utf8),
@@ -15,8 +61,9 @@ struct GlobToolGitIgnoreTests {
         return json
     }
 
-    /// Runs git in `directory`, failing the test on a non-zero exit.
+    /// Runs git in `directory`, throwing on a non-zero exit so a broken fixture fails where it broke.
     private static func git(_ arguments: [String], in directory: String) throws {
+        Self.isolatedGit
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = ["-C", directory] + arguments
@@ -24,7 +71,7 @@ struct GlobToolGitIgnoreTests {
         process.standardError = FileHandle.nullDevice
         try process.run()
         process.waitUntilExit()
-        #expect(process.terminationStatus == 0, "git \(arguments.joined(separator: " ")) failed")
+        guard process.terminationStatus == 0 else { throw GitCommandFailed(arguments: arguments, status: process.terminationStatus) }
     }
 
     /// A repository with an ignored generated directory, an ignored log, and a force-tracked ignored log.
@@ -42,6 +89,7 @@ struct GlobToolGitIgnoreTests {
     }
 
     private static func run(_ arguments: [String: AnyCodable]) async throws -> [String: Any] {
+        Self.isolatedGit
         let result = try await GlobTool(useSpotlight: false).execute(arguments: arguments, context: TestToolContext.make())
         #expect(result.succeeded)
         return try #require(decode(result))
@@ -209,13 +257,12 @@ struct GlobToolGitIgnoreTests {
         }
     }
 
-    @Test("a literal segment spelled in another case is still filtered on a case-insensitive volume")
+
+    @Test("a literal segment spelled in another case is still filtered on a case-insensitive volume",
+          .enabled(if: GitIgnoreTestEnvironment.tempVolumeIsCaseInsensitive))
     func literalSegmentCase() async throws {
         let dir = try Self.makeRepository()
         defer { dir.cleanup() }
-        let volume = try dir.url.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
-        let caseSensitive = try #require(volume.volumeSupportsCaseSensitiveNames)
-        try #require(!caseSensitive, "this test needs a case-insensitive temp volume")
         let json = try await Self.run([
             "pattern": .string("GENERATED/**/*.swift"), "path": .string(dir.path), "respect_gitignore": .bool(true)
         ])

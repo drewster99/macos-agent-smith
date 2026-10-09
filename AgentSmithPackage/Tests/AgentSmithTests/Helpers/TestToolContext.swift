@@ -8,8 +8,9 @@ import SemanticSearch
 /// rest so each test sets only what it cares about.
 ///
 /// `MemoryStore` is constructed with a default `SemanticSearchEngine`, which is cheap —
-/// the engine doesn't load MLX weights until `prepare()` or `embed()` is invoked, and
-/// none of the wave-1 tools touch `memoryStore`.
+/// the engine doesn't load MLX weights until `prepare()` or `embed()` is invoked. A test that
+/// reaches a search with it fails (the engine isn't ready), so tests of memory tools stop at the
+/// refusals that come first.
 enum TestToolContext {
     /// Captures mutations to the file-read tracker so tests can assert on what got recorded.
     /// Uses an unsynchronized backing store wrapped in an `NSLock` because Swift's actor

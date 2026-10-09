@@ -75,13 +75,17 @@ struct GitIgnoreSnapshot: Sendable, Equatable {
         /// answered "no" (inside `.git`, a bare repository).
         case notInAWorkTree(root: String, gitSays: String)
         case gitFailed(String)
+        /// Whether the root's volume tells case apart couldn't be read, so lookups couldn't be
+        /// matched to it.
+        case volumeUnreadable(String)
 
         var explanation: String {
             switch self {
             case .gitNotInstalled: return "git isn't available (the Xcode Command Line Tools aren't installed)"
             case .notInAWorkTree(let root, let gitSays):
                 return gitSays.isEmpty ? "\(root) isn't inside a git work tree" : "\(root) isn't inside a git work tree (git: \(gitSays))"
-            case .gitFailed(let output): return "git couldn't list ignored files: \(output)"
+            case .gitFailed(let reason): return "git failed: \(reason)"
+            case .volumeUnreadable(let reason): return "couldn't tell whether the volume is case-sensitive: \(reason)"
             }
         }
     }
@@ -131,7 +135,7 @@ struct GitIgnoreSnapshot: Sendable, Equatable {
             // put part of the top level into the prefix, so it is refused rather than guessed at.
             let lines = location.output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             guard location.exitCode == 0, location.outputIsUTF8, lines.count == 3, !lines[0].isEmpty, lines[2].isEmpty else {
-                return .failure(.gitFailed("git couldn't locate the work tree (exit status \(location.exitCode))"))
+                return .failure(.gitFailed("rev-parse couldn't locate the work tree (exit status \(location.exitCode))"))
             }
             let topLevel = lines[0]
             let rootPrefix = lines[1]
@@ -144,12 +148,18 @@ struct GitIgnoreSnapshot: Sendable, Equatable {
                 workingDirectory: nil, timeout: deadline.timeIntervalSinceNow, standardError: .discarded
             )
             guard !listing.timedOut else { return .failure(timedOut) }
-            guard listing.exitCode == 0 else { return .failure(.gitFailed("git ls-files exited with status \(listing.exitCode)")) }
-            guard listing.outputIsUTF8 else { return .failure(.gitFailed("its listing includes a path that isn't valid UTF-8")) }
+            guard listing.exitCode == 0 else { return .failure(.gitFailed("ls-files exited with status \(listing.exitCode)")) }
+            guard listing.outputIsUTF8 else { return .failure(.gitFailed("ls-files listed a path that isn't valid UTF-8")) }
 
-            let volume = try URL(fileURLWithPath: root).resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
-            guard let caseSensitive = volume.volumeSupportsCaseSensitiveNames else {
-                return .failure(.gitFailed("the volume's case sensitivity couldn't be read"))
+            let caseSensitive: Bool
+            do {
+                let volume = try URL(fileURLWithPath: root).resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+                guard let known = volume.volumeSupportsCaseSensitiveNames else {
+                    return .failure(.volumeUnreadable("the volume doesn't say"))
+                }
+                caseSensitive = known
+            } catch {
+                return .failure(.volumeUnreadable(error.localizedDescription))
             }
             return .success(parse(lsFilesOutput: listing.output, rootPrefix: rootPrefix, caseInsensitive: !caseSensitive))
         } catch {
