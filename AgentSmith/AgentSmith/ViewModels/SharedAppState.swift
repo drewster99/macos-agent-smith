@@ -284,6 +284,9 @@ final class SharedAppState {
         removeToolSecurityObserver(sessionID)
         removeModelAssignmentObserver(sessionID)
         removeOrchestrationSettingsObserver(sessionID)
+        if scheduledWakesBySession.removeValue(forKey: sessionID) != nil {
+            rebuildPendingWakeIndex()
+        }
     }
     private static func loadToolPolicies() -> [String: ToolPolicy] {
         guard let data = UserDefaults.standard.data(forKey: "globalToolPolicies"),
@@ -413,6 +416,28 @@ final class SharedAppState {
     /// contents so every window's Library sidebar updates live. Templates are global — unlike active
     /// instance tasks, which stay per-session on each `AppViewModel`.
     private(set) var libraryTemplates: [AgentTask] = []
+
+    /// Each open session's scheduled wakes, as its runtime last reported them (`publishScheduledWakes`).
+    /// Wakes stay owned by their session; this only feeds `pendingWakesByTaskID`.
+    private var scheduledWakesBySession: [UUID: [ScheduledWake]] = [:]
+    /// The task rows' upcoming runs across every open session (`PendingWakeIndex`), because a library
+    /// template — and the recurring wake on it — is listed in every window (#23). Display-only: each
+    /// entry names the session that owns the wake, and only that session can cancel it.
+    private(set) var pendingWakesByTaskID: [UUID: [OwnedScheduledWake]] = [:]
+
+    /// Records `sessionID`'s current wakes and rebuilds the cross-session index.
+    /// Every task row in every window reads `pendingWakesByTaskID`, so it is only reassigned when it
+    /// actually changes — a re-read of an unchanged wake list must not redraw them all.
+    func publishScheduledWakes(_ wakes: [ScheduledWake], forSession sessionID: UUID) {
+        guard scheduledWakesBySession[sessionID] != wakes else { return }
+        scheduledWakesBySession[sessionID] = wakes
+        rebuildPendingWakeIndex()
+    }
+
+    private func rebuildPendingWakeIndex() {
+        let rebuilt = PendingWakeIndex.build(scheduledWakesBySession, now: Date())
+        if rebuilt != pendingWakesByTaskID { pendingWakesByTaskID = rebuilt }
+    }
     /// The Library's groups (single-membership, "Default" seeded), mirrored for the sidebar.
     private(set) var libraryGroups: [TemplateGroup] = []
 

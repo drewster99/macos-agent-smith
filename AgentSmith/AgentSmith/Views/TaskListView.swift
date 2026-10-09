@@ -887,6 +887,7 @@ private struct TaskRowRunningLayout: View {
             }
             HStack(spacing: 6) {
                 TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
+                TaskRowRunningLayoutScheduledRuns(task: task, viewModel: viewModel)
                 Spacer(minLength: 4)
                 TaskStepGlyphStrip(steps: task.steps)
             }
@@ -1464,7 +1465,7 @@ private struct TaskRowStatusIcon: View {
     /// A queued wake outranks the lifecycle glyph, but only for a task that is not itself mid-run —
     /// a running task's own state is the more urgent fact.
     private var showsScheduledClock: Bool {
-        guard style == .active, status != .starting, status != .running, status != .validating else {
+        guard style == .active, !status.isWorkingNow else {
             return false
         }
         return !(viewModel.pendingWakesByTaskID[taskID] ?? []).isEmpty
@@ -1611,22 +1612,11 @@ private struct ScheduledRunsIndicator: View {
     let density: TaskRowDensity
     let viewModel: AppViewModel
 
-    @State private var showingPopover = false
-
     var body: some View {
         let pendingWakes = viewModel.pendingWakesByTaskID[task.id] ?? []
 
-        if let nextWake = pendingWakes.first {
-            Button(action: { showingPopover.toggle() }, label: {
-                ScheduledRunsChip(nextWake: nextWake, additionalCount: pendingWakes.count - 1)
-            })
-            .buttonStyle(.plain)
-            .help(pendingWakes.count == 1 ? "Show scheduled run" : "Show \(pendingWakes.count) scheduled runs")
-            // The popover anchors to its attachment point, so the flag and the popover must stay
-            // together on the button they belong to.
-            .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-                ScheduledRunsPopover(task: task, wakes: pendingWakes, viewModel: viewModel)
-            }
+        if let nextWake = pendingWakes.first?.wake {
+            ScheduledRunsButton(task: task, nextWake: nextWake, wakes: pendingWakes, viewModel: viewModel)
         } else if task.isTemplate {
             // Nothing. A template never ran, so this fell back to its CREATION date — a number that
             // looked like "last run" and wasn't. It is stated properly, and labelled, in the Run
@@ -1636,6 +1626,52 @@ private struct ScheduledRunsIndicator: View {
             Text(density == .compact ? compactTaskTimestamp(task.startedAt ?? task.createdAt) : taskTimestamp(task.startedAt ?? task.createdAt))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+extension AgentTask.Status {
+    /// A worker is on the task right now. Its own state is then the more urgent fact than a queued
+    /// run, so the row shows neither the scheduled clock nor the "Next:" chip.
+    fileprivate var isWorkingNow: Bool {
+        self == .starting || self == .running || self == .validating
+    }
+}
+
+/// The "Next: <time>" chip, opening the list of every pending run for the task.
+private struct ScheduledRunsButton: View {
+    let task: AgentTask
+    let nextWake: ScheduledWake
+    let wakes: [OwnedScheduledWake]
+    let viewModel: AppViewModel
+
+    @State private var showingPopover = false
+
+    var body: some View {
+        Button(action: { showingPopover.toggle() }, label: {
+            ScheduledRunsChip(nextWake: nextWake, additionalCount: wakes.count - 1)
+        })
+        .buttonStyle(.plain)
+        .help(wakes.count == 1 ? "Show scheduled run" : "Show \(wakes.count) scheduled runs")
+        // The popover anchors to its attachment point, so the flag and the popover must stay
+        // together on the button they belong to.
+        .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+            ScheduledRunsPopover(task: task, wakes: wakes, viewModel: viewModel)
+        }
+    }
+}
+
+/// The scheduled-runs chip on a row in the running layout. That layout also carries the paused,
+/// awaiting-help and awaiting-review rows (`Status.isInProgress`), any of which can have a run
+/// queued; a task that is working right now shows none, as the standard row's status line doesn't.
+private struct TaskRowRunningLayoutScheduledRuns: View {
+    let task: AgentTask
+    let viewModel: AppViewModel
+
+    var body: some View {
+        let wakes = viewModel.pendingWakesByTaskID[task.id] ?? []
+        if let nextWake = wakes.first?.wake, !task.status.isWorkingNow {
+            ScheduledRunsButton(task: task, nextWake: nextWake, wakes: wakes, viewModel: viewModel)
         }
     }
 }
@@ -1669,7 +1705,7 @@ private struct ScheduledRunsChip: View {
 
 private struct ScheduledRunsPopover: View {
     let task: AgentTask
-    let wakes: [ScheduledWake]
+    let wakes: [OwnedScheduledWake]
     let viewModel: AppViewModel
 
     var body: some View {
@@ -1690,9 +1726,9 @@ private struct ScheduledRunsPopover: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(wakes, id: \.id) { wake in
-                        ScheduledRunsPopoverItem(wake: wake, onCancel: {
-                            Task { await viewModel.cancelTimer(id: wake.id) }
+                    ForEach(wakes, id: \.id) { owned in
+                        ScheduledRunsPopoverItem(wake: owned.wake, isCancellable: owned.sessionID == viewModel.session.id, onCancel: {
+                            Task { await viewModel.cancelTimer(id: owned.wake.id) }
                         })
                     }
                 }
@@ -1704,6 +1740,8 @@ private struct ScheduledRunsPopover: View {
 
 struct ScheduledRunsPopoverRow: View {
     let wake: ScheduledWake
+    /// False for a wake another session's scheduler owns: only that session can cancel it.
+    let isCancellable: Bool
     let onCancel: () -> Void
 
     var body: some View {
@@ -1732,6 +1770,11 @@ struct ScheduledRunsPopoverRow: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                if !isCancellable {
+                    Text("Scheduled in another session")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
@@ -1741,7 +1784,9 @@ struct ScheduledRunsPopoverRow: View {
                     .foregroundStyle(.secondary)
             })
             .buttonStyle(.plain)
-            .help("Cancel this scheduled run")
+            .disabled(!isCancellable)
+            .help(isCancellable ? "Cancel this scheduled run" : "Scheduled in another session — cancel it from that session's window")
+            .accessibilityLabel("Cancel scheduled run")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

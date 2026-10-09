@@ -152,12 +152,12 @@ final class AppViewModel {
     /// Active scheduled wakes (timers) for this session. Refreshed via runtime callbacks
     /// and on demand from the View → Timers window.
     var activeTimers: [ScheduledWake] = [] {
-        didSet { rebuildPendingWakesByTask() }
+        didSet { shared.publishScheduledWakes(activeTimers, forSession: session.id) }
     }
-    /// Pending (`wakeAt > now`) wakes grouped by task ID, in ascending fire order.
-    /// Maintained by `rebuildPendingWakesByTask()` so each task row only depends on its
-    /// own slice instead of the whole `activeTimers` array.
-    private(set) var pendingWakesByTaskID: [UUID: [ScheduledWake]] = [:]
+    /// Pending wakes by task, soonest first, across EVERY open session — a library template is
+    /// listed in every window, and its recurring wake belongs to whichever session scheduled it.
+    /// Each entry names its owning session; only that session can cancel it.
+    var pendingWakesByTaskID: [UUID: [OwnedScheduledWake]] { shared.pendingWakesByTaskID }
     /// Append-only timer history rows displayed in the Timers history pane. Newest first.
     var timerHistory: [TimerEvent] = []
     // `hasRestoredHistory` / `persistedHistoryCount` are deliberately NOT forwarded here. They were,
@@ -245,7 +245,7 @@ final class AppViewModel {
     }
 
     func scheduledWakes(for taskID: UUID) -> [ScheduledWake] {
-        pendingWakesByTaskID[taskID] ?? []
+        (pendingWakesByTaskID[taskID] ?? []).map(\.wake)
     }
 
     func workspaceReferences(for task: AgentTask) -> [(label: String, path: String)] {
@@ -269,23 +269,6 @@ final class AppViewModel {
         }
         return rows
     }
-
-    /// Builds `pendingWakesByTaskID` from `activeTimers`, dropping wakes whose fire time
-    /// has already passed and sorting each task's wakes ascending. Each task row only
-    /// reads its own slice, so an unrelated timer fire/cancel doesn't re-render every row.
-    private func rebuildPendingWakesByTask() {
-        let now = Date()
-        var grouped: [UUID: [ScheduledWake]] = [:]
-        for wake in activeTimers where wake.wakeAt > now {
-            guard let taskID = wake.taskID else { continue }
-            grouped[taskID, default: []].append(wake)
-        }
-        for key in grouped.keys {
-            grouped[key]?.sort { $0.wakeAt < $1.wakeAt }
-        }
-        pendingWakesByTaskID = grouped
-    }
-
 
     var isRunning = false
     var isAborted = false
@@ -1111,6 +1094,8 @@ final class AppViewModel {
                 self.inspectorStore.clearAll()
                 self.inspectedRunIDs = []
                 self.runtime = nil
+                // No runtime, no wake will fire: a chip for one would promise a run that won't happen.
+                self.activeTimers = []
             }
         }
 
@@ -2489,6 +2474,8 @@ final class AppViewModel {
         // (quiesceChannelStream), so any messages still buffered in the channel are drained
         // and persisted before we tear down rather than dropped here.
         self.runtime = nil
+        // No runtime, no wake will fire: a chip for one would promise a run that won't happen.
+        activeTimers = []
 
         // A running task whose result was already submitted is left `.running`: the next launch's
         // reconciliation (`ColdBootRunningRecovery`) resumes its validation instead of re-running it.
