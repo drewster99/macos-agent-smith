@@ -479,9 +479,7 @@ struct TaskRowButton: View {
             .contentShape(Rectangle())
         })
         .buttonStyle(.plain)
-        .background(task.id == viewModel.selectedTaskID
-            ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.25)
-            : Color.clear)
+        .background(task.id == viewModel.selectedTaskID ? AppColors.selectedTaskBackground : Color.clear)
         // The row Button SELECTS (drives the top transcript pane); a double-click opens the detail
         // window. Nested buttons (cost chip, play/pause) consume their own clicks first, and
         // "Open Details" is also on the context menu.

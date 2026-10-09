@@ -67,6 +67,9 @@ enum AppColors {
 
     // MARK: - Acceptance validation
 
+    /// The selected task — its sidebar row and its card in the top task bar.
+    static let selectedTaskBackground = Color(nsColor: .selectedContentBackgroundColor).opacity(0.25)
+
     static let verdictAccepted = Color.green
     static let verdictRejected = Color(red: 0.90, green: 0.35, blue: 0.35)
     static let verdictWaived = Color.orange

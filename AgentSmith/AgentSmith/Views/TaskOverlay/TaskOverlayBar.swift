@@ -56,9 +56,11 @@ struct TaskOverlayBar: View {
         HStack(spacing: 0) {
             ForEach(barEntries) { entry in
                 if let task = viewModel.tasks.first(where: { $0.id == entry.id }) {
-                    TaskOverlayColumn(
+                    SelectableTaskOverlayColumn(
                         task: task,
                         entry: entry,
+                        isSelected: viewModel.selectedTaskID == task.id,
+                        onSelect: { viewModel.selectedTaskID = task.id },
                         onDismiss: { viewModel.dismissTaskOverlayEntry(taskID: task.id) },
                         onTearOff: {
                             openWindow(value: TaskOverlayPanelTarget(sessionID: viewModel.session.id, taskID: task.id))
@@ -180,18 +182,24 @@ struct TaskOverlayBar: View {
         HStack(spacing: 14) {
             ForEach(barEntries) { entry in
                 if let task = viewModel.tasks.first(where: { $0.id == entry.id }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: task.status.overlaySymbolName)
-                            .font(.caption2)
-                            .foregroundStyle(task.status.overlayColor)
-                        Text(task.title)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .foregroundStyle(.secondary)
-                        Text(Self.stripProgress(task))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
+                    // Same as a card: selecting it shows its transcript below.
+                    Button(action: { viewModel.selectedTaskID = task.id }, label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: task.status.overlaySymbolName)
+                                .font(.caption2)
+                                .foregroundStyle(task.status.overlayColor)
+                            Text(task.title)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .foregroundStyle(.secondary)
+                            Text(Self.stripProgress(task))
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    })
+                    .buttonStyle(.plain)
+                    .help("Show this task's transcript")
                 }
             }
             Spacer(minLength: 0)
@@ -217,6 +225,29 @@ struct TaskOverlayBar: View {
 }
 
 // MARK: - One task column
+
+/// A bar card that SELECTS its task — the same `selectedTaskID` the sidebar drives, which switches
+/// the transcript below to it. The card's own tear-off and dismiss buttons sit inside the label and
+/// take their own clicks, as a sidebar row's nested buttons do. The torn-off window shows the plain
+/// `TaskOverlayColumn`: it has no transcript to switch.
+private struct SelectableTaskOverlayColumn: View {
+    let task: AgentTask
+    let entry: AppViewModel.TaskOverlayEntry
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onDismiss: () -> Void
+    let onTearOff: () -> Void
+
+    var body: some View {
+        Button(action: onSelect, label: {
+            TaskOverlayColumn(task: task, entry: entry, onDismiss: onDismiss, onTearOff: onTearOff)
+                .contentShape(Rectangle())
+        })
+        .buttonStyle(.plain)
+        .background(isSelected ? AppColors.selectedTaskBackground : Color.clear)
+        .help("Show this task's transcript")
+    }
+}
 
 /// One task's live panel — shared by the bar column and the torn-off window.
 struct TaskOverlayColumn: View {

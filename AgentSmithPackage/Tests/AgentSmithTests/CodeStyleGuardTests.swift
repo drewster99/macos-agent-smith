@@ -491,7 +491,7 @@ struct CodeStyleGuardTests {
     /// no `View`-struct form — and says nothing about how long the thing is allowed to be. A
     /// modifier that does too much is the same defect as a view that does too much.
     private static let oversizedBodyBudget: [String: Int] = [
-        "Views/TaskListView.swift": 13,
+        "Views/TaskListView.swift": 12,
         "Views/ChannelLogView.swift": 9,
         "Views/InspectorView.swift": 6,
         "Views/Main/MainViewDetailColumn.swift": 7,
@@ -562,7 +562,7 @@ struct CodeStyleGuardTests {
     /// filter redesign replaced `Views/Main/TranscriptFilterPopover.swift` (two oversized bodies)
     /// with views that fit the limit. Lowered from 127: the security-verdict popover's content in
     /// `ChannelLogView.swift` became its own view.
-    private static let oversizedBodyTotal = 125
+    private static let oversizedBodyTotal = 124
 
     /// Blanks comment bodies AND string-literal CONTENTS, preserving length, newlines, and the
     /// delimiters themselves.
