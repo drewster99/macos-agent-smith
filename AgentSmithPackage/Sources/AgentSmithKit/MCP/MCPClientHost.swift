@@ -125,16 +125,7 @@ public actor MCPClientHost {
     /// Invoked whenever per-server status changes, for the settings UI.
     private var onStatusChanged: (@Sendable ([UUID: MCPServerStatus]) -> Void)?
 
-    /// Ignore SIGPIPE process-wide exactly once. Writing to an MCP server's stdin after
-    /// the server has crashed/exited (a common failure mode — bad command, missing
-    /// package) raises SIGPIPE, which by default terminates the whole app. Ignoring it
-    /// turns those writes into recoverable `EPIPE` errors that surface as tool failures.
-    private static let ignoreSIGPIPE: Void = {
-        signal(SIGPIPE, SIG_IGN)
-    }()
-
     public init(secretStore: MCPSecretStore, clientName: String = "AgentSmith", clientVersion: String = "1.0.0") {
-        _ = Self.ignoreSIGPIPE
         self.secretStore = secretStore
         self.clientName = clientName
         self.clientVersion = clientVersion
@@ -524,6 +515,8 @@ public actor MCPClientHost {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         let stderrBuffer = StderrBuffer()
+        // Before launch, so no write can ever reach a server that has already died.
+        try Self.disableSIGPIPE(onWriteFD: stdinPipe.fileHandleForWriting.fileDescriptor)
 
         let process = Process()
         // Launch through `env` so PATH resolution finds npx/node/uvx; the merged login
@@ -555,6 +548,17 @@ public actor MCPClientHost {
     }
 
     // MARK: - Helpers
+
+    /// Makes a write to `fd` whose reader is gone fail with `EPIPE` instead of raising SIGPIPE,
+    /// whose default action terminates the whole app. An MCP server that crashed or exited (a bad
+    /// command, a missing package) leaves exactly that pipe behind, and the transport turns the
+    /// `EPIPE` into a tool failure. Scoped to this one descriptor on purpose: ignoring SIGPIPE
+    /// process-wide would also hide a broken-pipe bug anywhere else in the app.
+    static func disableSIGPIPE(onWriteFD fd: Int32) throws {
+        guard fcntl(fd, F_SETNOSIGPIPE, 1) != -1 else {
+            throw Errno(rawValue: errno)
+        }
+    }
 
     private func needsRelaunch(old: MCPServerConfig, new: MCPServerConfig) -> Bool {
         old.command != new.command

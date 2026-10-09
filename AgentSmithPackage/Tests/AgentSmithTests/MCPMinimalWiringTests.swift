@@ -52,6 +52,8 @@ struct MCPMinimalWiringTests {
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        // Mirrors MCPClientHost.launchProcess: nothing ignores SIGPIPE process-wide any more.
+        try MCPClientHost.disableSIGPIPE(onWriteFD: stdinPipe.fileHandleForWriting.fileDescriptor)
 
         try process.run()
 
