@@ -32,6 +32,24 @@ struct ProcessRunnerTests {
         #expect(result.output.contains("err"))
     }
 
+    @Test("a discarded stderr leaves the output exactly what the command wrote to stdout")
+    func stderrDiscarded() async throws {
+        let result = try await ProcessRunner.run(
+            executable: "/bin/bash", arguments: ["-c", "echo out; echo err 1>&2; exit 3"],
+            workingDirectory: nil, timeout: 10, standardError: .discarded
+        )
+        #expect(result.output == "out\n")
+        #expect(result.exitCode == 3)
+    }
+
+    @Test("output that isn't UTF-8 is flagged, so a parser never reads the placeholder text")
+    func nonUTF8Flagged() async throws {
+        let bad = try await bash("printf '\\xff\\xfe'")
+        #expect(!bad.outputIsUTF8)
+        let good = try await bash("echo ok")
+        #expect(good.outputIsUTF8)
+    }
+
     @Test("reports a non-zero exit code")
     func nonZeroExit() async throws {
         let result = try await bash("exit 7")

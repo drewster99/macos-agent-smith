@@ -27,6 +27,19 @@ enum ProcessRunner {
         let output: String
         let exitCode: Int32
         let timedOut: Bool
+        /// False when the bytes weren't valid UTF-8 and `output` is only a note saying so — a
+        /// caller that parses the output must check this rather than parse the note.
+        let outputIsUTF8: Bool
+    }
+
+    /// Where the child's standard error goes.
+    enum StandardErrorDestination: Sendable {
+        /// Into `Result.output`, interleaved with standard output — what a person reading a
+        /// terminal would see.
+        case mergedIntoOutput
+        /// To `/dev/null`, for output a caller parses: a warning interleaved into it would corrupt
+        /// the format.
+        case discarded
     }
 
     private static let logger = Logger(subsystem: "AgentSmith", category: "ProcessRunner")
@@ -35,7 +48,8 @@ enum ProcessRunner {
         executable: String,
         arguments: [String],
         workingDirectory: String?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        standardError: StandardErrorDestination = .mergedIntoOutput
     ) async throws -> Result {
         enum State {
             case pending
@@ -169,13 +183,18 @@ enum ProcessRunner {
                     }
                     readSource.resume()
 
-                    // --- file actions: stdin ← /dev/null, stdout+stderr → pipe write end ---
+                    // --- file actions: stdin ← /dev/null, stdout (+ stderr unless discarded) → pipe write end ---
                     // Opaque-pointer types on Darwin (imported as optionals); `_init` allocates them.
                     var fileActions: posix_spawn_file_actions_t?
                     posix_spawn_file_actions_init(&fileActions)
                     posix_spawn_file_actions_addopen(&fileActions, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
                     posix_spawn_file_actions_adddup2(&fileActions, writeFD, STDOUT_FILENO)
-                    posix_spawn_file_actions_adddup2(&fileActions, writeFD, STDERR_FILENO)
+                    switch standardError {
+                    case .mergedIntoOutput:
+                        posix_spawn_file_actions_adddup2(&fileActions, writeFD, STDERR_FILENO)
+                    case .discarded:
+                        posix_spawn_file_actions_addopen(&fileActions, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
+                    }
                     // The child only needs the dup'd stdout/stderr; close both original pipe fds in
                     // it so it can't hold the read end open or leak the raw write fd.
                     posix_spawn_file_actions_addclose(&fileActions, writeFD)
@@ -312,8 +331,8 @@ enum ProcessRunner {
                     }
 
                     let (data, rawStatus) = readState.withLock { ($0.buffer, $0.exitStatus) }
-                    let output = String(data: data, encoding: .utf8)
-                        ?? "Error: output could not be decoded as UTF-8 (\(data.count) bytes)"
+                    let decoded = String(data: data, encoding: .utf8)
+                    let output = decoded ?? "Error: output could not be decoded as UTF-8 (\(data.count) bytes)"
                     let timedOut = didTimeout.withLock { $0 }
 
                     if case .cancelled = finalState {
@@ -324,7 +343,8 @@ enum ProcessRunner {
                     continuation.resume(returning: Result(
                         output: output,
                         exitCode: Self.exitCode(fromWaitStatus: rawStatus),
-                        timedOut: timedOut
+                        timedOut: timedOut,
+                        outputIsUTF8: decoded != nil
                     ))
                 }
             }

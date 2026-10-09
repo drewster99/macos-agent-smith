@@ -89,6 +89,10 @@ final class GlobTool: AgentTool {
                     "type": .string("integer"),
                     "description": .string("Wall-clock budget in seconds for the whole call. Default 30, max 120. Almost never bites when Spotlight handles the query; mainly bounds the walk fallback.")
                 ]),
+                "respect_gitignore": .dictionary([
+                    "type": .string("boolean"),
+                    "description": .string("Optional, default false. When true and `path` is inside a git work tree, leave out what git ignores (build output, dependencies — whatever `.gitignore` and git's other exclude files say; tracked files are never left out; a nested repository that isn't a submodule keeps its own rules to itself). The result says so if it couldn't be applied. Reading git's view counts against `timeout`. Ignored when `resume` is set: a resumed search keeps its original setting.")
+                ]),
                 "resume": .dictionary([
                     "type": .string("string"),
                     "description": .string("Opaque token from a prior truncated walk result (`resume_token`). When set, continues that walk with a fresh `timeout` budget; `pattern` and `path` are ignored.")
@@ -144,6 +148,12 @@ final class GlobTool: AgentTool {
         let matches: [String]
     }
 
+    /// Joins the notes a result carries, nil when there are none.
+    private static func combinedMessage(_ notes: String?...) -> String? {
+        let present = notes.compactMap { $0 }
+        return present.isEmpty ? nil : present.joined(separator: " ")
+    }
+
     private func encode(_ result: GlobResult, succeeded: Bool) -> ToolExecutionResult {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -197,6 +207,13 @@ final class GlobTool: AgentTool {
         }
         let limit = clampLimit(arguments["limit"])
         let timeoutSec = clampTimeout(arguments["timeout"])
+        let respectGitignore: Bool
+        switch ToolArguments.strictOptionalBool(arguments, "respect_gitignore") {
+        case .absent: respectGitignore = false
+        case .value(let value): respectGitignore = value
+        case .malformed(let raw):
+            return badRequest(searchRoot: rawPath, pattern: pattern, message: "`respect_gitignore` must be true or false, not \(raw).")
+        }
 
         if pattern.contains("..") {
             return badRequest(searchRoot: rawPath, pattern: pattern,
@@ -242,15 +259,40 @@ final class GlobTool: AgentTool {
                               message: "Invalid glob pattern '\(pattern)': \(error.localizedDescription)")
         }
 
+        // What git ignores under the root, read once, so every filter below is a set lookup.
+        // It spends the same `timeout` budget the search does: whatever git took is taken off the
+        // Spotlight and walk budgets below.
+        var gitIgnore: GitIgnoreSnapshot?
+        var gitIgnoreNote: String?
+        var gitSeconds = 0
+        if respectGitignore {
+            let gitStarted = Date()
+            switch await GitIgnoreSnapshot.take(forRoot: resolvedBase, budget: TimeInterval(timeoutSec)) {
+            case .success(let snapshot):
+                gitIgnore = snapshot
+                if snapshot.rootIgnored {
+                    gitIgnoreNote = "Everything under this path is ignored by git, so respect_gitignore leaves nothing to match."
+                }
+            case .failure(let why):
+                gitIgnoreNote = "respect_gitignore was not applied: \(why.explanation)."
+            }
+            gitSeconds = Int(Date().timeIntervalSince(gitStarted).rounded(.up))
+        }
+        let searchSeconds = max(1, timeoutSec - gitSeconds)
+
         // --- Spotlight first ---
         if useSpotlight {
             let plan = Self.spotlightPlan(forSegments: segments, resolvedBase: resolvedBase, fullRegexBody: Self.globToRegex(pattern))
-            let outcome = await SpotlightSearch.run(scope: plan.scope, nameQuery: plan.nameQuery, timeoutSeconds: min(timeoutSec, 10))
-            if case .ok(let raw) = outcome {
+            let outcome = await SpotlightSearch.run(scope: plan.scope, nameQuery: plan.nameQuery, timeoutSeconds: min(searchSeconds, 10))
+            if case .ok(let indexed) = outcome {
+                // Ignored paths go before the breadth check: a `node_modules` holding 50,000 files
+                // is exactly what respect_gitignore is asked to see past.
+                let raw = gitIgnore.map { snapshot in indexed.filter { !Self.isGitIgnoredSpotlightPath($0, resolvedBase: resolvedBase, snapshot: snapshot) } } ?? indexed
                 if raw.count > Self.spotlightResultCeiling {
                     return tooBroad(
                         searchRoot: resolvedBase, pattern: pattern,
-                        message: "Spotlight matched \(raw.count)+ files under '\(resolvedBase)' — far too broad to enumerate. Narrow `path` to a specific project/subdirectory, or narrow `pattern`."
+                        message: ["Spotlight matched \(raw.count)+ files under '\(resolvedBase)' — far too broad to enumerate. Narrow `path` to a specific project/subdirectory, or narrow `pattern`.", gitIgnoreNote]
+                            .compactMap { $0 }.joined(separator: " ")
                     )
                 }
                 var survivors: [(rel: String, mtime: Date)] = []
@@ -263,6 +305,8 @@ final class GlobTool: AgentTool {
                         staleCount += 1
                         continue
                     }
+                    // Before paging and counting, so an ignored file neither fills a page nor counts.
+                    if let gitIgnore, gitIgnore.isIgnored(entry.rel) { continue }
                     survivors.append(entry)
                 }
                 if !survivors.isEmpty {
@@ -284,7 +328,7 @@ final class GlobTool: AgentTool {
                         returned: page.count,
                         more_available: total > limit,
                         resume_token: nil,
-                        message: staleNote,
+                        message: Self.combinedMessage(staleNote, gitIgnoreNote),
                         matches: page.map(\.rel)
                     )
                     return encode(result, succeeded: true)
@@ -298,7 +342,8 @@ final class GlobTool: AgentTool {
         // --- Filesystem walk fallback (fresh) ---
         return executeWalk(
             pattern: pattern, segments: segments, fullRegex: fullRegex,
-            resolvedBase: resolvedBase, limit: limit, timeoutSeconds: timeoutSec
+            resolvedBase: resolvedBase, limit: limit, timeoutSeconds: searchSeconds,
+            gitIgnore: gitIgnore, note: gitIgnoreNote
         )
     }
 
@@ -366,6 +411,17 @@ final class GlobTool: AgentTool {
             nameQuery = #"kMDItemFSName == "*""#
         }
         return SpotlightPlan(scope: scope, nameQuery: nameQuery, postFilterPattern: fullRegexBody)
+    }
+
+    /// Whether a Spotlight path lexically under the root is one git ignores. Only a cheap prefix
+    /// test, against the root and its `/private` spelling (Spotlight reports `/private/var/…` for a
+    /// root that resolves to `/var/…`) — a path spelled any other way is left for
+    /// `validatedSpotlightCandidate`, and filtered again after it resolves.
+    static func isGitIgnoredSpotlightPath(_ path: String, resolvedBase: String, snapshot: GitIgnoreSnapshot) -> Bool {
+        for base in [resolvedBase, "/private" + resolvedBase] where path.hasPrefix(base + "/") {
+            return snapshot.isIgnored(String(path.dropFirst(base.count + 1)))
+        }
+        return false
     }
 
     /// Stat-validates one Spotlight candidate. Returns `nil` when the candidate is stale (gone or
@@ -459,6 +515,11 @@ final class GlobTool: AgentTool {
         let resolvedBase: String
         let homePruneSet: Set<String>
         let fullRegex: NSRegularExpression
+        /// What git ignores under the root, when `respect_gitignore` was asked for and could be
+        /// applied; kept here so a resumed walk filters the same way.
+        let gitIgnore: GitIgnoreSnapshot?
+        /// Said on every page of this walk (why `respect_gitignore` couldn't be applied).
+        let note: String?
         // Queue entries: (dirPath, segmentIdx). segmentIdx == segments.count means "match all
         // regular files at-or-below dirPath" (trailing-`**` / `**`-was-last semantics).
         var queue: [(dirPath: String, segmentIdx: Int)] = []
@@ -470,12 +531,20 @@ final class GlobTool: AgentTool {
         var overflow: [(rel: String, mtime: Date)] = []
         var entriesScanned: Int = 0
 
-        init(pattern: String, segments: [PatternSegment], resolvedBase: String, homePruneSet: Set<String>, fullRegex: NSRegularExpression) {
+        init(pattern: String, segments: [PatternSegment], resolvedBase: String, homePruneSet: Set<String>, fullRegex: NSRegularExpression,
+             gitIgnore: GitIgnoreSnapshot? = nil, note: String? = nil) {
             self.pattern = pattern
             self.segments = segments
             self.resolvedBase = resolvedBase
             self.homePruneSet = homePruneSet
             self.fullRegex = fullRegex
+            self.gitIgnore = gitIgnore
+            self.note = note
+        }
+
+        /// Whether a path relative to the root is one git ignores (never, without a snapshot).
+        func isGitIgnored(_ relativePath: String) -> Bool {
+            gitIgnore?.isIgnored(relativePath) ?? false
         }
     }
 
@@ -520,9 +589,11 @@ final class GlobTool: AgentTool {
         }
     }
 
-    private func executeWalk(pattern: String, segments: [PatternSegment], fullRegex: NSRegularExpression, resolvedBase: String, limit: Int, timeoutSeconds: Int) -> ToolExecutionResult {
+    private func executeWalk(pattern: String, segments: [PatternSegment], fullRegex: NSRegularExpression, resolvedBase: String, limit: Int, timeoutSeconds: Int,
+                             gitIgnore: GitIgnoreSnapshot? = nil, note: String? = nil) -> ToolExecutionResult {
         let homePruneSet = FilesystemSearch.homePruneAbsolutePaths(forBase: resolvedBase)
-        let state = WalkState(pattern: pattern, segments: segments, resolvedBase: resolvedBase, homePruneSet: homePruneSet, fullRegex: fullRegex)
+        let state = WalkState(pattern: pattern, segments: segments, resolvedBase: resolvedBase, homePruneSet: homePruneSet, fullRegex: fullRegex,
+                              gitIgnore: gitIgnore, note: note)
         state.queue.append((dirPath: resolvedBase, segmentIdx: 0))
         return driveWalk(state: state, limit: limit, timeoutSeconds: timeoutSeconds, existingToken: nil)
     }
@@ -573,6 +644,13 @@ final class GlobTool: AgentTool {
             // Matches outside the base are already filtered by `baseRelativePath`, but without
             // this we'd still *descend* the foreign tree and burn the whole budget there.
             guard dirPath == state.resolvedBase || dirPath.hasPrefix(state.resolvedBase + "/") else {
+                continue outer
+            }
+            // An ignored directory is never descended: nothing under it could be a match, and the
+            // walk's budget is better spent elsewhere (generated or vendored trees are where it goes).
+            // The root is "" — ignored only when it sits inside an ignored directory itself.
+            let dirRelativePath = dirPath == state.resolvedBase ? "" : String(dirPath.dropFirst(state.resolvedBase.count + 1))
+            if state.isGitIgnored(dirRelativePath) {
                 continue outer
             }
 
@@ -638,7 +716,7 @@ final class GlobTool: AgentTool {
             returned: matches.count,
             more_available: moreAvailable,
             resume_token: resumeToken,
-            message: nil,
+            message: state.note,
             matches: matches.map(\.rel)
         )
         return encode(result, succeeded: true)
@@ -659,7 +737,7 @@ final class GlobTool: AgentTool {
                 values = try entry.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey])
             } catch { continue }
             if values.isRegularFile == true {
-                if let rel = baseRelativePath(of: entry, base: state.resolvedBase) {
+                if let rel = baseRelativePath(of: entry, base: state.resolvedBase), !state.isGitIgnored(rel) {
                     let entryTuple = (rel: rel, mtime: values.contentModificationDate ?? Date.distantPast)
                     if matches.count < limit {
                         matches.append(entryTuple)
@@ -720,7 +798,7 @@ final class GlobTool: AgentTool {
             // still applies (defense in depth).
             let resolved = url.resolvingSymlinksInPath().path
             guard resolved.hasPrefix(state.resolvedBase + "/") || resolved == state.resolvedBase else { return }
-            if let rel = baseRelativePath(of: url, base: state.resolvedBase) {
+            if let rel = baseRelativePath(of: url, base: state.resolvedBase), !state.isGitIgnored(rel) {
                 let entry = (rel: rel, mtime: values.contentModificationDate ?? Date.distantPast)
                 if matches.count < limit {
                     matches.append(entry)
@@ -753,7 +831,7 @@ final class GlobTool: AgentTool {
             } catch { continue }
             if isLast {
                 guard values.isRegularFile == true else { continue }
-                if let rel = baseRelativePath(of: entry, base: state.resolvedBase) {
+                if let rel = baseRelativePath(of: entry, base: state.resolvedBase), !state.isGitIgnored(rel) {
                     let tuple = (rel: rel, mtime: values.contentModificationDate ?? Date.distantPast)
                     if matches.count < limit {
                         matches.append(tuple)
