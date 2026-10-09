@@ -220,7 +220,7 @@ struct TaskCostDetailSheet: View {
             }
             byKey[key]?.roles.insert(record.agentRole)
             byKey[key]?.calls += 1
-            byKey[key]?.cost += computeTurnCost(record)
+            byKey[key]?.cost += computeTurnCost(record) ?? 0
         }
         
         return order.compactMap { key in
@@ -256,8 +256,9 @@ struct TaskCostDetailSheet: View {
         ].joined(separator: "|")
     }
 
-    private func computeTurnCost(_ record: UsageRecord) -> Double {
-        UsageRecord.cost(of: record, pricingLookup: aggregator.pricingLookup) ?? 0
+    /// Nil when the model has no pricing — a turn row shows that as unpriced, never as free.
+    private func computeTurnCost(_ record: UsageRecord) -> Double? {
+        UsageRecord.cost(of: record, pricingLookup: aggregator.pricingLookup)
     }
 
     private func computeTurnRows(_ turns: [UsageRecord]) -> [TurnRow] {
@@ -293,8 +294,9 @@ struct TaskCostDetailSheet: View {
         return String(format: "$%.2f\u{2007}\u{2007}", cost)
     }
 
-    private func formatTurnCost(_ cost: Double) -> String {
-        String(format: "$%.3f", cost)
+    private func formatTurnCost(_ cost: Double?) -> String {
+        guard let cost else { return "—" }
+        return String(format: "$%.3f", cost)
     }
 
     private func formatTokenCount(_ count: Int) -> String {
