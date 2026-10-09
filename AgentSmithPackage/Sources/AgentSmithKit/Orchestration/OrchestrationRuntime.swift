@@ -576,9 +576,9 @@ public actor OrchestrationRuntime {
     /// and by the spawn's own backstop so the two can never disagree: below capacity, or a child of
     /// a coordinator blocked on capacity (`coordinatorsBlockedOnCapacity`). Any other child — an
     /// orphan, or one Smith runs while its coordinator works — waits for a slot like any task.
-    private func admitsWorker(for task: AgentTask?) -> Bool {
+    private func admitsWorker(for task: AgentTask) -> Bool {
         if supervisor.handles(role: .brown).count < maxConcurrentWorkers { return true }
-        guard let coordinatorTaskID = task?.coordinatorTaskID else { return false }
+        guard let coordinatorTaskID = task.coordinatorTaskID else { return false }
         return coordinatorsBlockedOnCapacity().contains(coordinatorTaskID)
     }
 
@@ -1895,8 +1895,7 @@ public actor OrchestrationRuntime {
             // The worker re-scopes at its next turn boundary, against the task as it then reads —
             // the same stateless pass a changed candidate set triggers. A task with no live worker
             // needs nothing: its next spawn scopes against the new list.
-            // Task → worker through `liveWorkerID`: a handle's task stamp misses a worker assigned
-            // after a task-less spawn.
+            // Task → worker through `liveWorkerID`, the one task-to-worker lookup.
             if let workerID = await liveWorkerID(taskID: taskID) {
                 await supervisor.agent(id: workerID)?.requestToolRescope()
             }
@@ -5006,8 +5005,10 @@ public actor OrchestrationRuntime {
         liveActivityTracker.setBrownWorkers(source: ObjectIdentifier(self), to: supervisor.handles(role: .brown).count)
     }
 
-    /// Spawns a Brown+Security Agent pair. Terminates any existing Brown first (single Brown policy).
-    public func spawnBrown(for task: AgentTask? = nil) async -> UUID? {
+    /// Spawns a Brown+Security Agent pair for `task`, cycling that task's existing worker first. A
+    /// worker always belongs to a task: its tool set is scoped to that task, and a task-less spawn
+    /// would hand it Brown's FULL tool set (#14).
+    public func spawnBrown(for task: AgentTask) async -> UUID? {
         await lifecycleQueue.run { [weak self] in
             await self?.performSpawnBrown(for: task)
         }
@@ -5015,7 +5016,7 @@ public actor OrchestrationRuntime {
 
     /// The actual spawn implementation. Runs ONLY as a lifecycle-queue item (or from
     /// `performStart`, which already is one).
-    private func performSpawnBrown(for task: AgentTask? = nil) async -> UUID? {
+    private func performSpawnBrown(for task: AgentTask) async -> UUID? {
         // Fail fast on a stopped runtime: without this, the standalone (tool-driven)
         // spawn path paid a full scoping LLM call before registration failed at the end.
         guard supervisor.currentGeneration != nil else { return nil }
@@ -5027,15 +5028,14 @@ public actor OrchestrationRuntime {
         // untouchable. Callers gate before spawning (tool checks, the race-free pend
         // gate in performStartTaskWithLiveSmith); reaching capacity here fails the
         // spawn cleanly as the runtime's own invariant.
-        if let task {
-            // Match by the handle's task binding AND by task assignment — legacy paths
-            // (review_work respawn) assign via the task store after a task-less spawn.
-            let sameTaskWorkers = supervisor.handles(role: .brown).filter {
-                $0.taskID == task.id || task.assigneeIDs.contains($0.id)
-            }
-            for worker in sameTaskWorkers {
-                _ = await performTerminateAgent(id: worker.id)
-            }
+        // The same two bindings `liveWorkerID(taskID:)` reads — the handle's task stamp and the
+        // task's assignment. Every spawn stamps the handle, so they agree; matching both keeps a
+        // worker bound only one way from surviving its own task's respawn.
+        let sameTaskWorkers = supervisor.handles(role: .brown).filter {
+            $0.taskID == task.id || task.assigneeIDs.contains($0.id)
+        }
+        for worker in sameTaskWorkers {
+            _ = await performTerminateAgent(id: worker.id)
         }
         guard admitsWorker(for: task) else {
             stopLogger.notice("spawnBrown refused — worker capacity \(self.maxConcurrentWorkers, privacy: .public) reached")
@@ -5095,7 +5095,7 @@ public actor OrchestrationRuntime {
         // Brown already receives all security feedback directly as tool results — approved calls
         // return the tool output, denied calls return "Tool execution denied: <reason>".
         // Echoing these through the channel as [System] messages wastes tokens and adds noise.
-        let workerTaskID = task?.id
+        let workerTaskID = task.id
         let brownMessageFilter: @Sendable (ChannelMessage) -> Bool = { message in
             Self.workerAccepts(message, workerTaskID: workerTaskID)
         }
@@ -5103,9 +5103,9 @@ public actor OrchestrationRuntime {
         let filesRead = FileReadTracker()
         // Provision this task's working directories (ephemeral temp + persistent evidence) and
         // hand Brown its evidence dir so file_write can auto-ingest artifacts written there.
-        let brownWorkspace = task.map { taskWorkspace(for: $0.id) }
-        brownWorkspace?.ensureDirectories()
-        if let parentTaskID = task?.parentTaskID {
+        let brownWorkspace = taskWorkspace(for: task.id)
+        brownWorkspace.ensureDirectories()
+        if let parentTaskID = task.parentTaskID {
             taskWorkspace(for: parentTaskID).ensureDirectories()
         }
         let brownContext = makeToolContext(
@@ -5113,8 +5113,8 @@ public actor OrchestrationRuntime {
             role: .brown,
             filesReadInSession: filesRead,
             executionTracker: executionTracker,
-            taskEvidenceDirectory: brownWorkspace?.evidenceDirectory,
-            taskTemporaryDirectory: brownWorkspace?.temporaryDirectory
+            taskEvidenceDirectory: brownWorkspace.evidenceDirectory,
+            taskTemporaryDirectory: brownWorkspace.temporaryDirectory
         )
 
         // Pre-flight `gh auth status` so Brown sees verified GitHub auth state in his tool list
@@ -5137,107 +5137,104 @@ public actor OrchestrationRuntime {
         let builtIns = BrownBehavior.tools(ghAuthStatusSnapshot: ghAuthSnapshot)
 
         // Per-task tool scoping: before the worker starts, let the security agent (Security Agent) pick
-        // the subset of tools it may use for THIS task. Skipped when there's no task context
-        // (e.g. the post-review re-spawn path), which falls back to the unscoped tool set.
+        // the subset of tools it may use for THIS task.
         var scopedApprovedNames: Set<String>?
         var scopedCandidateFingerprint: String?
-        if let task {
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "Preparing task — starting MCP servers and checking security policy…",
+            metadata: ["messageKind": .kind(.preparing)]
+        ))
+        if let host = mcpHost {
+            await host.waitUntilSettled(timeout: .seconds(5))
+        }
+        guard !aborted else {
+            return nil
+        }
+        let mcpTools = await mcpHost?.currentBridgedTools() ?? []
+        let candidateNames = Set((builtIns + mcpTools).map(\.name))
+        // Scoping sees only what the user's policy can offer (`ToolPolicy.scopingCandidates`);
+        // snapshot, filter and fingerprint with no suspension in between. A Never set after
+        // this changes the worker's fingerprint, so its first turn re-scopes.
+        let scopingCandidates = ToolPolicy.scopingCandidates(builtIns + mcpTools, globalPolicies: globalToolPolicy)
+        scopedCandidateFingerprint = ToolRegistry.fingerprint(of: scopingCandidates)
+        guard !scopingCandidates.isEmpty else {
             await channel.post(ChannelMessage(
                 sender: .system,
-                content: "Preparing task — starting MCP servers and checking security policy…",
-                metadata: ["messageKind": .kind(.preparing)]
+                content: "Not starting task \"\(task.title)\": every tool a worker could use is set to Never in Settings › Tools.",
+                metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
             ))
-            if let host = mcpHost {
-                await host.waitUntilSettled(timeout: .seconds(5))
-            }
-            guard !aborted else {
-                return nil
-            }
-            let mcpTools = await mcpHost?.currentBridgedTools() ?? []
-            let candidateNames = Set((builtIns + mcpTools).map(\.name))
-            // Scoping sees only what the user's policy can offer (`ToolPolicy.scopingCandidates`);
-            // snapshot, filter and fingerprint with no suspension in between. A Never set after
-            // this changes the worker's fingerprint, so its first turn re-scopes.
-            let scopingCandidates = ToolPolicy.scopingCandidates(builtIns + mcpTools, globalPolicies: globalToolPolicy)
-            scopedCandidateFingerprint = ToolRegistry.fingerprint(of: scopingCandidates)
-            guard !scopingCandidates.isEmpty else {
+            return nil
+        }
+        if orchestrationSettings.scopeToolSetOnTaskStart {
+            // Circuit breaker: after repeated consecutive scoping failures (usually a
+            // dead/unreachable backend), stop attempting for a cooldown window instead
+            // of hammering it once per restart.
+            if isScopingBreakerOpen, let lastFailure = lastScopingFailureAt {
+                let retryInSeconds = Int(Self.scopingBreakerCooldown - Date().timeIntervalSince(lastFailure))
                 await channel.post(ChannelMessage(
                     sender: .system,
-                    content: "Not starting task \"\(task.title)\": every tool a worker could use is set to Never in Settings › Tools.",
+                    content: "Not starting task \"\(task.title)\": the security agent's tool-scoping has failed \(scopingFailureStreak) times in a row — the model backend looks unreachable. Waiting ~\(max(retryInSeconds, 1))s before allowing another attempt. Check the Security Agent's model configuration or backend, then retry the task.",
                     metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
                 ))
                 return nil
             }
-            if orchestrationSettings.scopeToolSetOnTaskStart {
-                // Circuit breaker: after repeated consecutive scoping failures (usually a
-                // dead/unreachable backend), stop attempting for a cooldown window instead
-                // of hammering it once per restart.
-                if isScopingBreakerOpen, let lastFailure = lastScopingFailureAt {
-                    let retryInSeconds = Int(Self.scopingBreakerCooldown - Date().timeIntervalSince(lastFailure))
-                    await channel.post(ChannelMessage(
-                        sender: .system,
-                        content: "Not starting task \"\(task.title)\": the security agent's tool-scoping has failed \(scopingFailureStreak) times in a row — the model backend looks unreachable. Waiting ~\(max(retryInSeconds, 1))s before allowing another attempt. Check the Security Agent's model configuration or backend, then retry the task.",
-                        metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
-                    ))
-                    return nil
-                }
 
-                // Light the Security Agent card while it scopes — this is a real (often slow) Security Agent
-                // LLM call, so it shouldn't look idle during "Preparing…". Cleared right after.
-                await notifyProcessingStateChange(role: .securityAgent, isProcessing: true)
-                let scoping = await evaluator.scopeTools(
-                    candidateTools: scopingCandidates,
-                    taskTitle: task.title,
-                    taskID: task.id.uuidString,
-                    taskDescription: task.renderedDescriptionWithTemplateInputs(),
-                    requiredCapabilities: task.requiredCapabilities.map(\.renderedLine),
-                    intentProvenance: await taskStore.intentProvenance(of: task)
-                )
-                await notifyProcessingStateChange(role: .securityAgent, isProcessing: false)
-                guard scoping.succeeded else {
-                    // A user-initiated cancellation (Stop/abort during "Preparing…") also
-                    // lands here with the evaluator's cancelled sentinel. That says nothing
-                    // about backend health — don't open the breaker — and the user asked
-                    // for it, so a scary "security agent failed" error would be misleading;
-                    // post a neutral line instead.
-                    guard scoping.rawResponse != ToolScopingResult.cancelledSentinel else {
-                        await channel.post(ChannelMessage(
-                            sender: .system,
-                            content: "Task \"\(task.title)\" start cancelled.",
-                            metadata: ["messageKind": .kind(.preparing)]
-                        ))
-                        return nil
-                    }
-                    // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
-                    // a worker; surface to the user.
-                    scopingFailureStreak += 1
-                    lastScopingFailureAt = Date()
+            // Light the Security Agent card while it scopes — this is a real (often slow) Security Agent
+            // LLM call, so it shouldn't look idle during "Preparing…". Cleared right after.
+            await notifyProcessingStateChange(role: .securityAgent, isProcessing: true)
+            let scoping = await evaluator.scopeTools(
+                candidateTools: scopingCandidates,
+                taskTitle: task.title,
+                taskID: task.id.uuidString,
+                taskDescription: task.renderedDescriptionWithTemplateInputs(),
+                requiredCapabilities: task.requiredCapabilities.map(\.renderedLine),
+                intentProvenance: await taskStore.intentProvenance(of: task)
+            )
+            await notifyProcessingStateChange(role: .securityAgent, isProcessing: false)
+            guard scoping.succeeded else {
+                // A user-initiated cancellation (Stop/abort during "Preparing…") also
+                // lands here with the evaluator's cancelled sentinel. That says nothing
+                // about backend health — don't open the breaker — and the user asked
+                // for it, so a scary "security agent failed" error would be misleading;
+                // post a neutral line instead.
+                guard scoping.rawResponse != ToolScopingResult.cancelledSentinel else {
                     await channel.post(ChannelMessage(
                         sender: .system,
-                        content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Security Agent's model configuration.",
-                        metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
+                        content: "Task \"\(task.title)\" start cancelled.",
+                        metadata: ["messageKind": .kind(.preparing)]
                     ))
                     return nil
                 }
-                scopingFailureStreak = 0
-                lastScopingFailureAt = nil
-                guard !scoping.approvedNames.isEmpty else {
-                    // Refusal — no tools approved for this task. Don't spawn a hamstrung worker.
-                    await channel.post(ChannelMessage(
-                        sender: .system,
-                        content: "The security agent did not approve any tools for task \"\(task.title)\", so it cannot be run.",
-                        metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.warning)]
-                    ))
-                    return nil
-                }
-                scopedApprovedNames = scoping.approvedNames
-                await taskStore.setApprovedTools(id: task.id, approvedTools: Array(scoping.approvedNames))
-            } else {
-                // Pre-flight scoping disabled in Settings: the base approved set is every candidate.
-                // Global Always/Never policy and per-task user overrides still apply at the registry.
-                scopedApprovedNames = candidateNames
-                await taskStore.setApprovedTools(id: task.id, approvedTools: Array(candidateNames))
+                // Hard stop — the security agent could not evaluate the toolset. Do NOT spawn
+                // a worker; surface to the user.
+                scopingFailureStreak += 1
+                lastScopingFailureAt = Date()
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "Could not start task \"\(task.title)\": the security agent failed to evaluate which tools are safe to use. Check Security Agent's model configuration.",
+                    metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
+                ))
+                return nil
             }
+            scopingFailureStreak = 0
+            lastScopingFailureAt = nil
+            guard !scoping.approvedNames.isEmpty else {
+                // Refusal — no tools approved for this task. Don't spawn a hamstrung worker.
+                await channel.post(ChannelMessage(
+                    sender: .system,
+                    content: "The security agent did not approve any tools for task \"\(task.title)\", so it cannot be run.",
+                    metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.warning)]
+                ))
+                return nil
+            }
+            scopedApprovedNames = scoping.approvedNames
+            await taskStore.setApprovedTools(id: task.id, approvedTools: Array(scoping.approvedNames))
+        } else {
+            // Pre-flight scoping disabled in Settings: the base approved set is every candidate.
+            // Global Always/Never policy and per-task user overrides still apply at the registry.
+            scopedApprovedNames = candidateNames
+            await taskStore.setApprovedTools(id: task.id, approvedTools: Array(candidateNames))
         }
 
         // Re-check after the (possibly long) scoping LLM call above: an abort or stop
@@ -5267,7 +5264,7 @@ public actor OrchestrationRuntime {
             dynamicToolsProvider: mcpToolsProvider
         )
         await brownAgent.setSecurityEvaluator(evaluator)
-        if let scopedApprovedNames, let scopedCandidateFingerprint, let task {
+        if let scopedApprovedNames, let scopedCandidateFingerprint {
             await brownAgent.enableToolScoping(approvedNames: scopedApprovedNames, scopedCandidateFingerprint: scopedCandidateFingerprint)
             await brownAgent.setPreflightScopingActive(orchestrationSettings.scopeToolSetOnTaskStart)
             await brownAgent.setGlobalToolPolicy(globalToolPolicy)
@@ -5305,7 +5302,7 @@ public actor OrchestrationRuntime {
         // wiring awaits since the post-scoping barrier must not get a registered, started
         // worker (agy review finding).
         guard !aborted, !stopRequested,
-              supervisor.register(id: brownID, role: .brown, agent: brownAgent, evaluator: evaluator, taskID: task?.id) != nil else {
+              supervisor.register(id: brownID, role: .brown, agent: brownAgent, evaluator: evaluator, taskID: task.id) != nil else {
             await brownAgent.markTerminated()
             stopLogger.warning("spawnBrown: aborted or stopped mid-spawn — discarding unregistered Brown \(brownID.uuidString.prefix(8), privacy: .public)")
             return nil
@@ -5313,31 +5310,29 @@ public actor OrchestrationRuntime {
         // Every task worker is a pull recipient of its task's queue (any task can become a
         // coordinator). Same-task workers were terminated above, so nothing live holds this lease;
         // resetting it re-hands whatever the previous worker never acknowledged.
-        if let task {
-            let broker = await ensureNotificationBroker()
-            let recipient = Recipient.taskWorker(taskID: task.id)
-            let leaseGeneration = await broker.resetLease(for: recipient)
-            await brownAgent.setDrainNotifications(
-                { [weak broker] in await broker?.drainPendingDeliveries(for: recipient) ?? [] },
-                onActedOn: { [weak broker] ids in
-                    await broker?.acknowledgeDeliveries(ids, for: recipient, leaseGeneration: leaseGeneration)
-                }
-            )
-        }
+        let broker = await ensureNotificationBroker()
+        let recipient = Recipient.taskWorker(taskID: task.id)
+        let leaseGeneration = await broker.resetLease(for: recipient)
+        await brownAgent.setDrainNotifications(
+            { [weak broker] in await broker?.drainPendingDeliveries(for: recipient) ?? [] },
+            onActedOn: { [weak broker] ids in
+                await broker?.acknowledgeDeliveries(ids, for: recipient, leaseGeneration: leaseGeneration)
+            }
+        )
         // A Brown worker just went live — refresh the concurrency meter's Brown count.
         refreshBrownWorkerActivityCount()
         await catchUpOnModelChanges(brownAgent, role: .brown, builtAt: brownModelGeneration, builtWith: brownConfig)
         // A capability added while scoping ran found no registered worker to re-scope
         // (`TaskStoreEvent.requiredCapabilitiesChanged` is handled only for a live worker), so
         // compare against the snapshot scoping used, now that later changes do reach this worker.
-        if let task, let current = await taskStore.task(id: task.id),
+        if let current = await taskStore.task(id: task.id),
            current.requiredCapabilities != task.requiredCapabilities {
             await brownAgent.requestToolRescope()
         }
         // Likewise a tool-policy, per-task override or scoping-setting push that landed while this
         // worker was being wired found no registered handle. Re-push the current values now that
         // later pushes reach it: a Never set meanwhile must reach this worker too.
-        if scopedApprovedNames != nil, let task {
+        if scopedApprovedNames != nil {
             await brownAgent.setGlobalToolPolicy(globalToolPolicy)
             await brownAgent.setPreflightScopingActive(orchestrationSettings.scopeToolSetOnTaskStart)
             if let current = await taskStore.task(id: task.id) {
@@ -5348,7 +5343,7 @@ public actor OrchestrationRuntime {
         // over the limit is never unexplained. One over is the designed case; more means nested
         // coordination.
         let liveWorkerCount = supervisor.handles(role: .brown).count
-        if liveWorkerCount > maxConcurrentWorkers, let task {
+        if liveWorkerCount > maxConcurrentWorkers {
             await channel.post(ChannelMessage(
                 sender: .system,
                 content: "Child task \"\(task.title)\" started beyond the limit of \(maxConcurrentWorkers) simultaneous task(s) (\(liveWorkerCount) workers live): every other worker is waiting on its child tasks, so one child runs to keep the work moving.",
@@ -5361,9 +5356,7 @@ public actor OrchestrationRuntime {
 
         // Label the worker's channel messages with its task so the UI can distinguish
         // workers ("Brown" alone is ambiguous once several run concurrently).
-        if let task {
-            await brownAgent.setChannelTaskTitle(task.title)
-        }
+        await brownAgent.setChannelTaskTitle(task.title)
 
         let brownSubID = await channel.subscribe { [weak brownAgent] message in
             guard let brownAgent else { return }

@@ -501,7 +501,7 @@ struct RuntimeLifecycleSerializationTests {
     func spawnOnStoppedRuntimeFails() async {
         let runtime = makeRuntime()
         await runtime.stopAll()
-        let brownID = await runtime.spawnBrown()
+        let brownID = await runtime.spawnBrown(for: AgentTask(title: "t", description: "d"))
         #expect(brownID == nil)
     }
 
@@ -515,7 +515,7 @@ struct RuntimeLifecycleSerializationTests {
         await runtime.start()
         let sessionID = await runtime.currentSessionID
         #expect(sessionID == nil, "failed start must end its generation")
-        let brownID = await runtime.spawnBrown()
+        let brownID = await runtime.spawnBrown(for: AgentTask(title: "t", description: "d"))
         #expect(brownID == nil, "no generation → no worker registration")
     }
 
