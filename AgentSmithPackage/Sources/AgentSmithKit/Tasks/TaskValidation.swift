@@ -561,6 +561,53 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
         verdictRecords.last { $0.criterionID == criterionID }
     }
 
+    /// How many consecutive rounds, ending with its latest verdict, rejected `criterionID` for the
+    /// same reason — 0 when its latest verdict is not a rejection. Reasons compare after case,
+    /// surrounding and repeated whitespace are normalized away; digits are kept (a changed line
+    /// number is real change). A round gap — a round the criterion wasn't judged in, or the reset
+    /// that restarts rounds at 1 — ends the run.
+    ///
+    /// This compares the validator's words to its own earlier words, never to any fixed phrase, and
+    /// feeds only an advisory (`ChannelMessageKind.validationDeadlock`): a paraphrased repeat is
+    /// simply missed, and the no-new-approvals budget still ends a task that doesn't converge.
+    public func identicalRejectionStreak(for criterionID: UUID) -> Int {
+        func normalized(_ text: String) -> String {
+            text.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+        var streak = 0
+        var reason: String?
+        var previousRound: Int?
+        for record in verdictRecords.reversed() where record.criterionID == criterionID {
+            guard case .rejected(let text) = record.verdict else { break }
+            let thisReason = normalized(text)
+            if let reason, thisReason != reason { break }
+            if let previousRound, record.round != previousRound - 1 { break }
+            reason = thisReason
+            previousRound = record.round
+            streak += 1
+        }
+        return streak
+    }
+
+    /// Where each of `criteria` stands. A criterion is counted by its latest verdict; while a round is
+    /// `inFlight`, a criterion not yet settled is being judged again, so it counts as `judging`
+    /// rather than as the rejection or error it carried into the round.
+    public func tally(in criteria: [AcceptanceCriterion], inFlight: Bool) -> CriterionTally {
+        var tally = CriterionTally(total: criteria.count)
+        for criterion in criteria {
+            guard let latest = latestVerdict(for: criterion.id) else {
+                if inFlight { tally.judging += 1 } else { tally.unjudged += 1 }
+                continue
+            }
+            switch latest.verdict {
+            case .accepted, .waived: tally.settled += 1
+            case .rejected: if inFlight { tally.judging += 1 } else { tally.rejected += 1 }
+            case .error: if inFlight { tally.judging += 1 } else { tally.errored += 1 }
+            }
+        }
+        return tally
+    }
+
     /// Criteria in `criteria` whose latest verdict is sticky-final (accepted/waived).
     ///
     /// It takes the contract it is counting against ON PURPOSE. The old no-argument version returned
@@ -578,5 +625,42 @@ public struct TaskValidationState: Codable, Sendable, Equatable {
             if record.verdict.isFinal && live.contains(record.criterionID) { settled.insert(record.criterionID) }
         }
         return settled
+    }
+}
+
+/// Where a task's acceptance criteria stand, by kind — so "0 of 7 settled" never reads as "all seven
+/// failed" when most were never judged (#17). Built by `TaskValidationState.tally(in:inFlight:)`.
+public struct CriterionTally: Sendable, Equatable {
+    public var settled = 0
+    public var rejected = 0
+    public var errored = 0
+    /// Being judged by the round in flight.
+    public var judging = 0
+    /// Never judged.
+    public var unjudged = 0
+    public var total: Int
+
+    public init(total: Int) {
+        self.total = total
+    }
+
+    /// "2 of 7 settled · 3 rejected · 1 error · 1 not judged" — zero counts left out; "7 not yet
+    /// judged" when nothing has been.
+    public var summaryText: String {
+        if unjudged == total, total > 0 { return "\(total) not yet judged" }
+        var parts = ["\(settled) of \(total) settled"]
+        if rejected > 0 { parts.append("\(rejected) rejected") }
+        if errored > 0 { parts.append(errored == 1 ? "1 error" : "\(errored) errors") }
+        if judging > 0 { parts.append("\(judging) being judged") }
+        if unjudged > 0 { parts.append("\(unjudged) not judged") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+extension AgentTask {
+    /// Where this task's acceptance criteria stand (`CriterionTally`); a task never validated counts
+    /// every criterion as not yet judged.
+    public var acceptanceTally: CriterionTally {
+        (validation ?? TaskValidationState()).tally(in: acceptanceCriteria, inFlight: status == .validating)
     }
 }

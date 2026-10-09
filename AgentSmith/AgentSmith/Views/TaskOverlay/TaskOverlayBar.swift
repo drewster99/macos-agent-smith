@@ -341,10 +341,10 @@ struct TaskOverlayColumn: View {
     @ViewBuilder
     private func footer() -> some View {
         if entry.showsCriteria && !task.acceptanceCriteria.isEmpty {
-            let settled = (task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []).count
-            Text("acceptance · \(settled) of \(task.acceptanceCriteria.count) settled")
+            let tally = task.acceptanceTally
+            Text("acceptance · \(tally.summaryText)")
                 .font(.caption2)
-                .foregroundStyle(task.status == .failed ? AppColors.verdictRejected : Color.secondary.opacity(0.6))
+                .foregroundStyle(task.status == .failed || tally.rejected > 0 ? AppColors.verdictRejected : Color.secondary.opacity(0.6))
         }
     }
 

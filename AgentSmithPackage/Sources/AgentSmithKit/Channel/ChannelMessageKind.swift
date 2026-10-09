@@ -100,6 +100,10 @@ public enum ChannelMessageKind: String, Codable, Sendable, Hashable, CaseIterabl
     case validationReport = "validation_report"
     case validationFailed = "validation_failed"
     case validationEscalation = "validation_escalation"
+    /// A criterion was rejected for the same reason several rounds running: worker and validator
+    /// are not converging. Advisory only — it ends nothing (the no-new-approvals budget does); it
+    /// tells the user and Smith that the criterion may need rewriting (#17).
+    case validationDeadlock = "validation_deadlock"
     /// A `requiresUserAcceptance` park: every criterion already settled (ACCEPT/WAIVE) — this is
     /// the happy path, not a problem — but the task waits in `.awaitingReview` for the user's
     /// explicit sign-off before it completes. Distinct from `validationEscalation`, which means the

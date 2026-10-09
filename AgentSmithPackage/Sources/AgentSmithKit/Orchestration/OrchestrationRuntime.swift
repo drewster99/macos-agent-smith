@@ -3272,7 +3272,7 @@ public actor OrchestrationRuntime {
         // `.taskQueuedAtCapacity` describes a task with no worker yet, so it is never any worker's.
         let workerIrrelevantKinds: Set<ChannelMessageKind> = [
             .toolRequest, .toolOutput, .contextManagement, .validationReport, .validationEscalation,
-            .toolScopeReview, .taskQueuedAtCapacity
+            .validationDeadlock, .toolScopeReview, .taskQueuedAtCapacity
         ]
         guard let kind = message.kind else { return true }
         if workerIrrelevantKinds.contains(kind) { return false }
@@ -6032,7 +6032,7 @@ public actor OrchestrationRuntime {
         // task titled "Agent cleanup" reached Smith through its completion banner).
         if case .system = message.sender {
             let smithRelevantSystemKinds: Set<ChannelMessageKind> = [
-                .taskUpdateGuidance, .agentLifecycle, .rateLimit, .userTaskAction
+                .taskUpdateGuidance, .agentLifecycle, .rateLimit, .userTaskAction, .validationDeadlock
             ]
             guard let kind = message.kind, smithRelevantSystemKinds.contains(kind) else {
                 return false

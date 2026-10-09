@@ -869,12 +869,11 @@ private struct TaskDetailAcceptanceSection: View {
         isEditing = true
     }
 
-    /// The intersection against the CURRENT criteria lives inside the ledger, so no caller can
-    /// forget it and resurrect "4 of 3 settled".
+    /// Settled, rejected and never-judged counted apart (`CriterionTally`), against the CURRENT
+    /// criteria, so "0 of 7 settled" never reads as "all seven failed" when most were never judged.
     private var settledSubtitle: String? {
         guard !task.acceptanceCriteria.isEmpty else { return nil }
-        let settled = task.validation?.settledCriterionIDs(in: task.acceptanceCriteria) ?? []
-        return "\(settled.count) of \(task.acceptanceCriteria.count) settled"
+        return task.acceptanceTally.summaryText
     }
 
     private func save(_ criteria: [AcceptanceCriterion]) {

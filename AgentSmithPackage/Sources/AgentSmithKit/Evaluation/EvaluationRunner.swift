@@ -40,6 +40,14 @@ public enum EvaluationRunner {
     /// attempt so the coordinator retries with a fresh validator conversation.
     static let maxVerdictParseRetries = 1
     static let maxJSONParseRetries = 8
+    /// Turns allowed after the forced final turn to repair it — a tool call it was not offered, or
+    /// text that doesn't parse. One: a judge that won't commit when asked twice won't commit.
+    static let maxForcedVerdictRepairs = 1
+
+    /// How close to the timeout a turn is forced, so the last verdict has time to be written.
+    static func finalTurnReserve(forTimeout timeout: TimeInterval) -> TimeInterval {
+        min(60, timeout * 0.2)
+    }
 
     private static let logger = Logger(subsystem: "com.agentsmith", category: "EvaluationRunner")
 
@@ -105,8 +113,31 @@ public enum EvaluationRunner {
         var parseRetries = 0
         var turns = 0
         var toolObservations: [ToolObservation] = []
+        // The last allowed turn — or one near the timeout — is FORCED: it may call no tools and
+        // must commit to a verdict, so a run out of turns ends in a paid-for judgment rather than an
+        // error that discards the whole conversation (#17; the Security Agent does the same after
+        // its tool rounds). A forced turn that still doesn't produce one gets
+        // `maxForcedVerdictRepairs` more; the hard bound is `maxTurns + maxForcedVerdictRepairs` calls.
+        var turnLimit = definition.maxTurns
+        var forcedRepairsUsed = 0
+        // Whether the conversation ends in tool results with nothing after them, so a forced turn
+        // the previous round didn't foresee (the deadline came closer in between) can still be
+        // given its instruction without putting two user turns in a row.
+        var endsInBareToolResults = false
+        var verdictInstructionGiven = false
+        let finalTurnReserve = Self.finalTurnReserve(forTimeout: definition.timeoutSeconds)
+        func isForced(turnNumber: Int) -> Bool {
+            turnNumber >= turnLimit || deadline.timeIntervalSinceNow < finalTurnReserve
+        }
+        /// Spends the forced turn's repair, or says it can't: true when one more turn is allowed.
+        func allowForcedRepair() -> Bool {
+            guard forcedRepairsUsed < Self.maxForcedVerdictRepairs else { return false }
+            forcedRepairsUsed += 1
+            turnLimit = turns + 1
+            return true
+        }
 
-        while turns < definition.maxTurns {
+        while turns < turnLimit {
             if Date() > deadline {
                 return (.error("timed out after \(Int(definition.timeoutSeconds))s"), transcript, nil)
             }
@@ -114,6 +145,12 @@ public enum EvaluationRunner {
                 return (.error("cancelled"), transcript, nil)
             }
             turns += 1
+            let forced = isForced(turnNumber: turns)
+            if forced && endsInBareToolResults && !verdictInstructionGiven {
+                messages.append(.user(Self.forcedVerdictInstruction(for: definition.outputGrammar)))
+                verdictInstructionGiven = true
+            }
+            endsInBareToolResults = false
 
             // Transport retry, per `LLMRetryPolicy` like every other LLM caller. A validator
             // that gives up here doesn't just lose a turn — the criterion errors, and the task
@@ -134,10 +171,17 @@ public enum EvaluationRunner {
                     // proactively by SwiftLLMKit's `mustNeverSendTemperatureParam` metadata — the
                     // provider omits temperature for those, so a 0 here reaches every other model
                     // and never 400s a flagged one.
+                    // The tools stay DEFINED on a forced turn — a request whose history holds tool calls
+                    // must still define tools for some providers (Anthropic) — but the turn may not call
+                    // one. A model that calls one anyway gets it refused below, never run.
                     response = try await provider.send(
                         messages: messages,
                         tools: toolDefinitions,
-                        overrides: LLMCallOverrides(maxOutputTokens: definition.maxOutputTokens, temperature: temperature)
+                        overrides: LLMCallOverrides(
+                            toolChoice: forced && !toolDefinitions.isEmpty ? .textOnly : nil,
+                            maxOutputTokens: definition.maxOutputTokens,
+                            temperature: temperature
+                        )
                     )
                     break
                 } catch {
@@ -172,6 +216,32 @@ public enum EvaluationRunner {
                 }
             }
             await onResponse?(response, Int(Date().timeIntervalSince(callStart) * 1000))
+
+            // A forced turn may call no tools, so its calls are never run. Text beside them that
+            // parses is the verdict; otherwise each call is answered — keeping every tool call paired
+            // with a result, which providers require — with the demand for a verdict, and the turn
+            // gets its repair.
+            if forced && !response.toolCalls.isEmpty {
+                let text = response.text ?? ""
+                if !text.isEmpty, case .success(let outcome) = parse(text, grammar: definition.outputGrammar) {
+                    transcript.turnLog.append("[forced final turn] " + text)
+                    if let contradiction = contradictedToolClaim(in: outcome, observations: toolObservations) {
+                        transcript.turnLog.append("[validator runtime guard] \(contradiction)")
+                        return (.error(contradiction), transcript, nil)
+                    }
+                    return (outcome, transcript, nil)
+                }
+                transcript.turnLog.append("[forced final turn: tool calls not run] \(response.toolCalls.map(\.name).joined(separator: ", "))")
+                guard allowForcedRepair() else {
+                    return (.error("no conforming verdict after forced final turn (\(turns) turns)"), transcript, nil)
+                }
+                messages.append(.assistant(from: response))
+                let demand = "Not executed: no more evidence calls are available. " + Self.forcedVerdictInstruction(for: definition.outputGrammar)
+                for call in response.toolCalls {
+                    messages.append(.toolResult(demand, callID: call.id))
+                }
+                continue
+            }
 
             // Tool round: execute allowlisted calls and loop for the next turn.
             if !response.toolCalls.isEmpty {
@@ -223,6 +293,12 @@ public enum EvaluationRunner {
                     messages.append(.toolResult(Self.capToolResult(result), callID: call.id))
                 }
                 transcript.turnLog.append(toolLines.joined(separator: "\n"))
+                // The next turn is forced: it is told to give its verdict, in the same user turn as
+                // any attachments drained below (two user turns in a row would be malformed).
+                let verdictInstruction = isForced(turnNumber: turns + 1)
+                    ? Self.forcedVerdictInstruction(for: definition.outputGrammar)
+                    : nil
+                var instructionDelivered = false
                 // Drain anything `attach_file` staged this round into a user turn so the model
                 // actually perceives it next iteration — images as content blocks (vision-gated),
                 // every attachment as a reference line. Mirrors AgentActor's stage→drain.
@@ -236,9 +312,13 @@ public enum EvaluationRunner {
                             urlProvider: toolContext.attachmentURLProvider
                         )
                         let header = "[Attached for review via attach_file]"
-                        let body = assembled.referenceLines.isEmpty
+                        var body = assembled.referenceLines.isEmpty
                             ? header
                             : ([header] + assembled.referenceLines).joined(separator: "\n")
+                        if let verdictInstruction {
+                            body += "\n\n" + verdictInstruction
+                            instructionDelivered = true
+                        }
                         if assembled.images.isEmpty && assembled.documents.isEmpty {
                             messages.append(.user(body))
                         } else {
@@ -246,12 +326,20 @@ public enum EvaluationRunner {
                         }
                     }
                 }
+                if let verdictInstruction, !instructionDelivered {
+                    messages.append(.user(verdictInstruction))
+                    instructionDelivered = true
+                }
+                if instructionDelivered { verdictInstructionGiven = true }
+                // Tool results with no user turn after them: a forced turn not foreseen here may
+                // still append its instruction.
+                endsInBareToolResults = !instructionDelivered && messages.last.map(Self.isToolResult) == true
                 continue
             }
 
             // Text turn: parse against the grammar.
             let text = response.text ?? ""
-            transcript.turnLog.append(text)
+            transcript.turnLog.append(forced ? "[forced final turn] " + text : text)
             switch parse(text, grammar: definition.outputGrammar) {
             case .success(let outcome):
                 if let contradiction = contradictedToolClaim(in: outcome, observations: toolObservations) {
@@ -263,15 +351,21 @@ public enum EvaluationRunner {
                 if isEmptyParseFailure(why) && isVerdictGrammar(definition.outputGrammar) {
                     return (.error("empty response from validator; retrying requires a fresh validator conversation"), transcript, nil)
                 }
-                parseRetries += 1
-                guard parseRetries <= maxParseRetries(for: definition.outputGrammar) else {
-                    return (.error("unparseable after \(parseRetries) attempts: \(why)"), transcript, nil)
+                if forced {
+                    guard allowForcedRepair() else {
+                        return (.error("no conforming verdict after forced final turn (\(turns) turns): \(why)"), transcript, nil)
+                    }
+                } else {
+                    parseRetries += 1
+                    guard parseRetries <= maxParseRetries(for: definition.outputGrammar) else {
+                        return (.error("unparseable after \(parseRetries) attempts: \(why)"), transcript, nil)
+                    }
                 }
                 messages.append(.assistant(from: response))
                 messages.append(.user(formatRetryNudge(for: definition.outputGrammar, problem: why)))
             }
         }
-        return (.error("exhausted \(definition.maxTurns) turns without a conforming result"), transcript, nil)
+        return (.error("no conforming verdict after forced final turn (\(turns) turns)"), transcript, nil)
     }
 
     private struct ToolObservation {
@@ -417,6 +511,31 @@ public enum EvaluationRunner {
             return """
                 Your response did not match the required format (\(problem)). Respond again with a \
                 single JSON array containing only strings (no prose outside it).
+                """
+        }
+    }
+
+    private static func isToolResult(_ message: LLMMessage) -> Bool {
+        if case .toolResult = message.content { return true }
+        return false
+    }
+
+    /// What a forced final turn is told: no more evidence, give the result now, in the grammar's form.
+    static func forcedVerdictInstruction(for grammar: EvaluatorDefinition.OutputGrammar) -> String {
+        switch grammar {
+        case .verdictLine(let allowed):
+            let menu = allowed
+                .map { "\($0.token)\($0.requiresReason ? ": <reason — required>" : "")" }
+                .joined(separator: "\n")
+            return """
+                This is your final turn: no more tool calls are available. Decide from the evidence you \
+                already have. Your FIRST line must begin with exactly one of:
+                \(menu)
+                """
+        case .jsonArray:
+            return """
+                This is your final turn: no more tool calls are available. Respond now with a single JSON \
+                array containing only strings (no prose outside it), from what you already know.
                 """
         }
     }

@@ -208,6 +208,9 @@ public enum ValidationErrorKind {
         // Inner-cause checks come FIRST: a dynamic criterion wraps causes as
         // "item 3 (…): timed out after 600s" and "prepare '…' failed: <cause>", and the
         // cause is the truer kind than the wrapper.
+        if lowered.contains("forced final turn") { return "forced_verdict_failed" }
+        // No longer written (a run out of turns now ends in a forced verdict turn, #17); kept so the
+        // kind of a message from before that change is still named.
         if lowered.contains("exhausted"), lowered.contains("turns") { return "turn_exhaustion" }
         if lowered.contains("timed out after") { return "timeout" }
         if lowered.contains("cancelled") { return "cancelled" }

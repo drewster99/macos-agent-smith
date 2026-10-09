@@ -24,8 +24,9 @@ contributor.
 
 ### P1 — high-value work
 
-6. **Validation economics:** forced final verdict, rejection-history seeding, convergence signal,
-   unjudged vs rejected. — [#17](https://github.com/drewster99/macos-agent-smith/issues/17) — S–M
+6. ✅ **Validation economics:** forced final verdict, rejection-history seeding, convergence signal,
+   unjudged vs rejected. *(2026-10-09, #17 — the convergence signal is ADVISORY (`.validationDeadlock`),
+   not a failure: terminating on prose equality would break CLAUDE.md's no-free-text-control-flow rule.)* — [#17](https://github.com/drewster99/macos-agent-smith/issues/17) — S–M
 7. **Task preconditions / fail-fast `.blocked` outcome.** —
    [#18](https://github.com/drewster99/macos-agent-smith/issues/18) — M
 
@@ -1271,6 +1272,18 @@ What shipped: `ModelProfile.trailingSystemTurn` (optional, so existing records d
 **This is the first probed finding that must drive runtime request shaping, and that collides with a deferred decision.** Every existing finding is informational or feeds config: vision, PDF, max-output and effort get surfaced, recorded, or used to validate a configuration. This one has to select a code path *inside the provider at send time* — trailing system turn vs. `<system-reminder>` fallback. But the standing direction (see the entry above) is that `ModelProfile` is a standalone artifact and **probe results are deliberately NOT merged back into `ModelInfo` / `BehaviorFlags`; `profiles.json` is the output**. Under that posture a probed answer has no path to `BehaviorFlags.supportsMidConversationSystem`, so the flag would stay hand-set and the probe would be documentation rather than plumbing. So the "how/when do profiles feed the existing structures" question — explicitly deferred until now — becomes a hard prerequisite for *this* dimension specifically, and is the first case that forces it. Worth deciding deliberately rather than letting this feature quietly answer it: a narrow one-field bridge is defensible as a stopgap, but it is exactly the kind of side channel the project rules warn against, so the general merge-back design is the better resolution if we're ready for it.
 
 ### Validation economics — lessons and planned fixes from the $30.53 SwiftUI-audit run (2026-07-28)
+
+✅ **Built 2026-10-09 (#17).** (1) Forced final verdict: `EvaluationRunner` forces the last allowed
+turn, or one near the timeout — tools stay defined, `toolChoice: .textOnly`, one repair, error kind
+`forced_verdict_failed`. (2) Rejection-history seeding: `previousRejectionSeed` puts the latest
+same-contract rejection (capped 4,000 chars) in a `previousRejection` payload field, with an
+anti-anchoring prompt bullet; the "worker delta since that round" part is NOT built. (3)
+Convergence signal: `TaskValidationState.identicalRejectionStreak` (normalized reason equality over
+consecutive rounds) posts ONE `.validationDeadlock` warning to the user and Smith at 3 rounds —
+advisory only, because both reviewers judged ending a task on validator prose equality a breach of
+the no-free-text-control-flow rule; `maxConsecutiveValidationsWithoutNewApprovals` still ends it.
+(4) `CriterionTally` / `AgentTask.acceptanceTally` show settled · rejected · errors · being judged ·
+not judged apart in Task Detail and the overlay bar.
 
 **The incident.** Instance `8D878B1D` of the "SwiftUI Rendering Performance Audit & Improve" template (2026-07-26 23:22 → 2026-07-27 05:07) spent **$30.53 of its $31.08 total on validation** — 20 rounds, 69 criterion judgments, 372 validator LLM calls (gpt-5.5), 853 evidence tool calls, ~5.4 calls per judgment. Reconstructed from `usage_records.json` + the channel log; the dollar figure reproduces the cost dashboard exactly.
 

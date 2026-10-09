@@ -436,9 +436,39 @@ extension OrchestrationRuntime {
                 )
             } else {
                 mirrorRoundOutcome(.rejectionsReturned, noProgressRounds: withoutNewApprovals)
-                await returnRejectionsToWorker(taskID: taskID, rejected: rejected, judgedInRound: token)
+                // Only for a round that took effect: one superseded meanwhile warned of nothing real.
+                if await returnRejectionsToWorker(taskID: taskID, rejected: rejected, judgedInRound: token) {
+                    await adviseOfDeadlockedCriteria(task: judged, ledger: ledger, rejected: rejected)
+                }
             }
         }
+    }
+
+    /// Rounds of identical rejection after which a criterion is reported as deadlocked.
+    static let identicalRejectionAdvisoryRounds = 3
+
+    /// Tells the user and Smith, once per run, about each rejected criterion that has just been
+    /// rejected for the same reason `identicalRejectionAdvisoryRounds` rounds running
+    /// (`TaskValidationState.identicalRejectionStreak`). Advisory: the round carries on, and the
+    /// no-new-approvals budget is still what ends a task that doesn't converge.
+    private func adviseOfDeadlockedCriteria(task: AgentTask, ledger: TaskValidationState, rejected: [CriterionVerdictRecord]) async {
+        let deadlocked = rejected.compactMap { record -> AcceptanceCriterion? in
+            guard ledger.identicalRejectionStreak(for: record.criterionID) == Self.identicalRejectionAdvisoryRounds else { return nil }
+            return task.acceptanceCriteria.first { $0.id == record.criterionID }
+        }
+        guard !deadlocked.isEmpty else { return }
+        let names = deadlocked.map { "\"\($0.name)\"" }.joined(separator: ", ")
+        await channel.post(ChannelMessage(
+            sender: .system,
+            recipient: .user,
+            content: "Validation of \"\(task.title)\" is going in circles: \(names) \(deadlocked.count == 1 ? "was" : "were") rejected for the same reason \(Self.identicalRejectionAdvisoryRounds) rounds in a row. The worker may be unable to satisfy \(deadlocked.count == 1 ? "it" : "them") as written — consider stopping the task and rewriting \(deadlocked.count == 1 ? "that criterion" : "those criteria").",
+            metadata: [
+                "messageKind": .kind(.validationDeadlock),
+                "severity": .severity(.warning),
+                "taskID": .string(task.id.uuidString)
+            ],
+            taskID: task.id
+        ))
     }
 
     /// Non-convergence outcome: the task FAILS — the result is not delivered, the
@@ -784,6 +814,23 @@ extension OrchestrationRuntime {
     public static let maxPersistedInputChars = 20_000
     public static let maxPersistedLogChars = 12_000
 
+    /// The most a previous-rejection seed carries; a long punch list is cut, not dropped.
+    static let maxPreviousRejectionSeedChars = 4_000
+
+    /// The `previousRejection` payload for a re-judgment of `criterion`: its most recent rejection,
+    /// and how many came before it — counting only rejections of the SAME question
+    /// (`statesSameContract`), since a rejection under different instructions is not about this
+    /// one. Nil when this question was never rejected.
+    static func previousRejectionSeed(history: [CriterionRejection], criterion: AcceptanceCriterion) -> String? {
+        let sameQuestion = history.filter { $0.criterionID == criterion.id && $0.statesSameContract(as: criterion) }
+        guard let latest = sameQuestion.max(by: { $0.recordedAt < $1.recordedAt }) else { return nil }
+        let earlier = sameQuestion.count - 1
+        let lead = earlier == 0
+            ? "Rejected once before, on \(latest.recordedAt.formatted(.iso8601)). The reason given:"
+            : "Rejected \(sameQuestion.count) times before. The most recent, on \(latest.recordedAt.formatted(.iso8601)), gave this reason:"
+        return capDebugText(lead + "\n" + latest.rejectionText, limit: maxPreviousRejectionSeedChars)
+    }
+
     static func capDebugText(_ text: String, limit: Int) -> String {
         text.count <= limit ? text : text.prefix(limit) + "\n…[truncated \(text.count - limit) chars]"
     }
@@ -825,8 +872,15 @@ extension OrchestrationRuntime {
         // markdown blob, weak judge models confused the worker's result with the rubric — a
         // task whose result format was itself verdict-like got rejected for "not beginning with
         // ACCEPT/REJECT/WAIVE" (the validator's OWN output rule bleeding onto the worker).
-        // No prior verdict is included on purpose: showing the validator its last answer
-        // anchors it to that answer instead of re-judging the (changed) evidence fresh.
+        // A re-judgment of a criterion is seeded with the last rejection of that same question
+        // (`previousRejectionSeed`): it tells the judge what was wrong last time, so it checks those
+        // things first instead of re-deriving the whole punch list — fewer tool rounds, less drift
+        // between rounds (#17). Until 2026-10 no prior verdict was shown at all, deliberately, for
+        // fear of anchoring the judge to its last answer; the ROADMAP's "Validation economics"
+        // reversed that for rejections only, and the anchoring risk is why the system prompt tells
+        // the judge to decide on the CURRENT evidence and to ACCEPT once the issues are resolved.
+        // An acceptance is never shown, and the seed is payload text, never a verdict record, so it
+        // cannot count toward what is settled.
         // The worker's SCOPED set (task.approvedTools) is the durable single source of truth for
         // what it could actually call. Never substitute the static declared roster: a validator
         // told the worker had `bash`/`run_applescript` when it didn't rejects feasible work and
@@ -873,11 +927,20 @@ extension OrchestrationRuntime {
         if let item = extraSlots["item"] {
             fields["itemToEvaluate"] = item
         }
+        // Ordinary judgments only: a prepare run enumerates, and one item of a dynamic criterion is
+        // not what the criterion-level rejection was about.
+        let previousRejection = definition.kind == .validator && extraSlots["item"] == nil
+            ? Self.previousRejectionSeed(history: task.validation?.rejectionHistory(for: criterion.id) ?? [], criterion: criterion)
+            : nil
+        if let previousRejection {
+            fields["previousRejection"] = previousRejection
+        }
         let userMessage = Self.validatorPayloadJSON(fields)
         let systemPrompt = Self.composeValidatorSystemPrompt(
             definition: definition,
             criterion: criterion,
-            hasItem: extraSlots["item"] != nil
+            hasItem: extraSlots["item"] != nil,
+            hasPreviousRejection: previousRejection != nil
         )
         let tools = Self.evidenceTools(named: definition.toolNames)
         // Own the attach_file staging buffer so the validator can pull an evidence image into its
@@ -1065,7 +1128,8 @@ extension OrchestrationRuntime {
     static func composeValidatorSystemPrompt(
         definition: EvaluatorDefinition,
         criterion: AcceptanceCriterion,
-        hasItem: Bool
+        hasItem: Bool,
+        hasPreviousRejection: Bool = false
     ) -> String {
         var prompt: String
         if definition.kind == .prepare, let inputEnumeratorPrompt = criterion.effectiveInputEnumeratorPrompt {
@@ -1099,6 +1163,9 @@ extension OrchestrationRuntime {
             """
         if hasItem {
             prompt += "\n- `itemToEvaluate` — the specific item to judge for this criterion; when present, judge IT, using the other fields as context."
+        }
+        if hasPreviousRejection {
+            prompt += "\n- `previousRejection` — why this same criterion was rejected last time (context only). Check those issues first, but decide on the CURRENT evidence: if they are resolved and the criterion is met, ACCEPT. Do not add requirements beyond the criterion, and do not reject merely because the earlier reason once applied."
         }
         // Identical parallel-call contract to Brown's — added 2026-07-28 after measuring that
         // validators, never told to batch, averaged ~2 evidence calls per turn and burned turn
@@ -1426,8 +1493,11 @@ extension OrchestrationRuntime {
     /// Rejections with rounds remaining: the punch list goes DIRECTLY to the worker —
     /// Smith is not a relay. Mirrors review_work's reject path (status, clearResult,
     /// respawn fallback, private unparking message).
-    private func returnRejectionsToWorker(taskID: UUID, rejected: [CriterionVerdictRecord], judgedInRound token: ValidationRoundToken) async {
-        guard let task = await taskStore.task(id: taskID) else { return }
+    /// Returns whether the rejections went back — to a live worker, or re-queued for a free slot —
+    /// rather than being dropped because this round was superseded.
+    @discardableResult
+    private func returnRejectionsToWorker(taskID: UUID, rejected: [CriterionVerdictRecord], judgedInRound token: ValidationRoundToken) async -> Bool {
+        guard let task = await taskStore.task(id: taskID) else { return false }
         // Criterion NUMBER is its 1-based position in the acceptance list — the same number
         // the briefing and get_task_details use, so "Criterion 5" means the same thing everywhere.
         let numberByID = Dictionary(uniqueKeysWithValues: task.acceptanceCriteria.enumerated().map { ($0.element.id, $0.offset + 1) })
@@ -1456,7 +1526,7 @@ extension OrchestrationRuntime {
             // Status first, then clear: a `.pending` task with a stale result is
             // consistent; a `.validating` task with no result is the invariant-violating
             // shape observers must never see (agy review finding).
-            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .rejectionsReturned) else { return }
+            guard await taskStore.updateStatus(id: taskID, to: .pending, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .rejectionsReturned) else { return false }
             await taskStore.clearResult(id: taskID)
             await taskStore.addUpdate(id: taskID, message: "Validation rejected \(rejected.count) criterion(s); no worker slot was free for the rework, so the task is re-queued:\n\(punchList)")
             await channel.post(ChannelMessage(
@@ -1468,14 +1538,14 @@ extension OrchestrationRuntime {
                 ],
                 taskID: taskID
             ))
-            return
+            return true
         }
 
         // CAS: if a pause/stop or a criteria edit landed after our snapshot, don't flip to .running —
         // and if we just spawned a worker for the rework, tear it back down so it doesn't orphan.
         guard await taskStore.updateStatus(id: taskID, to: .running, ifCurrentlyIn: [.validating], ifValidationRoundIs: token, cause: .rejectionsReturned) else {
             if brownWasSpawned { _ = await terminateAgent(id: brownID) }
-            return
+            return false
         }
         await taskStore.clearResult(id: taskID)
 
@@ -1512,6 +1582,7 @@ extension OrchestrationRuntime {
                 "taskID": .string(taskID.uuidString)
             ]
         ))
+        return true
     }
 
     // MARK: - User resolution of a review park (replaces Smith's retired review_work)

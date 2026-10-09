@@ -337,6 +337,81 @@ struct EvaluationRunnerLoopTests {
         #expect(why.contains("contradicted successful file_read"))
     }
 
+    @Test("The final allowed turn withholds tools and asks for the verdict")
+    func finalTurnWithholdsTools() async throws {
+        let tempDir = TempDir()
+        defer { tempDir.cleanup() }
+        let evidencePath = try tempDir.write("evidence", to: "evidence.txt")
+        let readCall = LLMToolCall(id: "call-1", name: "file_read", arguments: "{\"path\": \"\(evidencePath)\"}")
+        let provider = MockLLMProvider(responses: [
+            LLMResponse(toolCalls: [readCall]),
+            LLMResponse(text: "ACCEPT")
+        ])
+        let outcome = await runOutcome(makeDefinition(tools: ["file_read"], maxTurns: 2), provider: provider, tools: [FileReadTool()])
+        #expect(outcome == .verdict(token: "ACCEPT", reason: nil))
+        #expect(provider.receivedToolChoices.first == .some(nil), "earlier turns may gather evidence")
+        #expect(provider.receivedToolChoices.last == .some(.textOnly), "the final turn may call no tools")
+        #expect(provider.receivedToolNames.last == ["file_read"], "the tools stay defined: a history with tool calls must still define tools")
+        let finalTurnAsk = provider.receivedMessages.last?.last?.content.textValue ?? ""
+        #expect(finalTurnAsk.contains("ACCEPT"), "the final turn is told which verdicts it may give")
+    }
+
+    @Test("maxTurns 1: the only turn may call no tools")
+    func singleTurnOffersNoTools() async {
+        let provider = MockLLMProvider(responses: [LLMResponse(text: "REJECT: missing tests")])
+        let outcome = await runOutcome(makeDefinition(tools: ["file_read"], maxTurns: 1), provider: provider, tools: [FileReadTool()])
+        #expect(outcome == .verdict(token: "REJECT", reason: "missing tests"))
+        #expect(provider.receivedToolChoices == [.textOnly])
+    }
+
+    @Test("A tool call on the final turn is never executed; one repair turn, then the verdict lands")
+    func finalTurnToolCallGetsOneRepair() async throws {
+        let tempDir = TempDir()
+        defer { tempDir.cleanup() }
+        let evidencePath = try tempDir.write("evidence", to: "evidence.txt")
+        let readCall = LLMToolCall(id: "call-1", name: "file_read", arguments: "{\"path\": \"\(evidencePath)\"}")
+        let provider = MockLLMProvider(responses: [
+            LLMResponse(toolCalls: [readCall]),
+            LLMResponse(text: "REJECT: still missing tests")
+        ])
+        let recorder = ToolResultRecorder()
+        let outcome = await EvaluationRunner.runMessages(
+            definition: makeDefinition(tools: ["file_read"], maxTurns: 1),
+            systemPrompt: "You judge things.",
+            userMessage: "Task: t\nCriterion: c",
+            provider: provider,
+            tools: [FileReadTool()],
+            toolContext: TestToolContext.make(),
+            onToolResult: { call, result, succeeded in await recorder.record(callID: call.id, result: result, succeeded: succeeded) }
+        ).outcome
+        #expect(outcome == .verdict(token: "REJECT", reason: "still missing tests"))
+        #expect(await recorder.records.isEmpty, "a tool call on the final turn must not run")
+        #expect(provider.callCount == 2, "exactly one repair turn")
+        #expect(provider.receivedToolChoices.allSatisfy { $0 == .textOnly })
+    }
+
+    @Test("A final-turn tool call that carries a verdict in its text is accepted as that verdict")
+    func finalTurnVerdictBesideToolCall() async {
+        let stray = LLMToolCall(id: "c", name: "file_read", arguments: "{}")
+        let provider = MockLLMProvider(responses: [LLMResponse(text: "ACCEPT: all good", toolCalls: [stray])])
+        let outcome = await runOutcome(makeDefinition(tools: ["file_read"], maxTurns: 1), provider: provider, tools: [FileReadTool()])
+        #expect(outcome == .verdict(token: "ACCEPT", reason: "all good"))
+        #expect(provider.callCount == 1)
+    }
+
+    @Test("Nonconforming text on the final turn gets one repair; a second failure is an ERROR naming the forced turn")
+    func finalTurnRepairThenError() async {
+        let provider = MockLLMProvider(responses: [LLMResponse(text: "I think it's probably fine"), LLMResponse(text: "Still thinking")])
+        let outcome = await runOutcome(makeDefinition(maxTurns: 1), provider: provider)
+        guard case .error(let why) = outcome else {
+            Issue.record("expected error, got \(outcome)")
+            return
+        }
+        #expect(why.contains("forced final turn"))
+        #expect(ValidationErrorKind.classify(why) == "forced_verdict_failed")
+        #expect(provider.callCount == 2)
+    }
+
     @Test("Turn exhaustion ends in ERROR")
     func turnExhaustionErrors() async {
         let loopingCall = LLMToolCall(id: "c", name: "nope", arguments: "{}")
