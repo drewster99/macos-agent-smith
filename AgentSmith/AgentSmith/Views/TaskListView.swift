@@ -1082,19 +1082,31 @@ private struct TaskRowMetadataLine: View {
 
             Spacer(minLength: 0)
 
-            switch style {
-            case .active:
-                if task.status != .running {
-                    ScheduledRunsIndicator(task: task, density: density, viewModel: viewModel)
-                }
-            case .archived:
-                Text(taskTimestamp(task.startedAt ?? task.createdAt))
-                    .font(.caption2)
-                    .foregroundStyle(.quaternary)
-                    .fixedSize()
-            case .recentlyDeleted:
-                EmptyView()
+            TaskRowMetadataTrailing(task: task, style: style, density: density, viewModel: viewModel)
+        }
+    }
+}
+
+/// The metadata line's trailing slot: an active row's scheduled runs, an archived row's start time.
+private struct TaskRowMetadataTrailing: View {
+    let task: AgentTask
+    let style: TaskRowStyle
+    let density: TaskRowDensity
+    let viewModel: AppViewModel
+
+    var body: some View {
+        switch style {
+        case .active:
+            if task.status != .running {
+                ScheduledRunsIndicator(task: task, density: density, viewModel: viewModel)
             }
+        case .archived:
+            Text(taskTimestamp(task.startedAt ?? task.createdAt))
+                .font(.caption2)
+                .foregroundStyle(.quaternary)
+                .fixedSize()
+        case .recentlyDeleted:
+            EmptyView()
         }
     }
 }
