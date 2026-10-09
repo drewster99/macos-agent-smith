@@ -89,6 +89,7 @@ struct MetadataCoverageView: View {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .frame(width: 12)
                 })
+                .accessibilityLabel(isExpanded ? "Collapse \(provider.name)" : "Expand \(provider.name)")
                 .buttonStyle(.plain)
                 .disabled(total == 0)
 

@@ -87,6 +87,7 @@ struct MCPServerEditorSheet: View {
                 Button(action: { argRows.append(ArgRow(value: "", isSecret: false)) }, label: {
                     Image(systemName: "plus")
                 })
+                .accessibilityLabel("Add argument")
                 .buttonStyle(.borderless)
             }
             Text("Passed to the command in order. Flag any argument that holds a secret (API key, token) — its value moves to the Keychain on Save.")
@@ -103,6 +104,7 @@ struct MCPServerEditorSheet: View {
                     Button(action: { argRows.removeAll { $0.id == row.id } }, label: {
                         Image(systemName: "minus.circle")
                     })
+                    .accessibilityLabel("Remove argument")
                     .buttonStyle(.borderless)
                 }
             }
@@ -118,6 +120,7 @@ struct MCPServerEditorSheet: View {
                 Button(action: { envRows.append(EnvRow(name: "", value: "")) }, label: {
                     Image(systemName: "plus")
                 })
+                .accessibilityLabel("Add environment variable")
                 .buttonStyle(.borderless)
             }
             Text("Values are stored in the Keychain and injected into the server process at launch.")
@@ -132,6 +135,7 @@ struct MCPServerEditorSheet: View {
                     Button(action: { envRows.removeAll { $0.id == row.id } }, label: {
                         Image(systemName: "minus.circle")
                     })
+                    .accessibilityLabel("Remove environment variable")
                     .buttonStyle(.borderless)
                 }
             }

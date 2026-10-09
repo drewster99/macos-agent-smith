@@ -877,6 +877,7 @@ struct SpendingDashboardView: View {
                         .frame(width: 180)
                     if !ledgerSearch.isEmpty {
                         Button(action: { ledgerSearch = "" }, label: { Image(systemName: "xmark.circle.fill") })
+                            .accessibilityLabel("Clear search")
                             .buttonStyle(.plain).font(.caption).foregroundStyle(.tertiary)
                     }
                 }

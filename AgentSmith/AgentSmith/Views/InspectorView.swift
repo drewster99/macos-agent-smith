@@ -426,6 +426,8 @@ private struct AgentCardMuteButton: View {
                 .font(.caption)
                 .foregroundStyle(isSpeechEnabled ? .green : AppColors.inactiveDot)
         })
+        .accessibilityLabel(isSpeechEnabled ? "Mute \(role.displayName)" : "Unmute \(role.displayName)")
+        .accessibilityIdentifier("inspector.speechToggle.\(role.rawValue)")
         .buttonStyle(.plain)
         .help(isSpeechEnabled ? "Mute \(role.displayName)" : "Unmute \(role.displayName)")
     }
@@ -888,6 +890,7 @@ struct SoundPickerRow: View {
                 Button(action: { onPreview(soundName) }) {
                     Image(systemName: "play.circle")
                 }
+                .accessibilityLabel("Preview sound")
                 .disabled(soundName.isEmpty)
                 .buttonStyle(.borderless)
             }
@@ -925,6 +928,7 @@ struct VoicePickerRow: View {
                 Button(action: onTest) {
                     Image(systemName: "play.circle")
                 }
+                .accessibilityLabel("Test voice")
                 .buttonStyle(.borderless)
                 .help("Test voice")
             }

@@ -121,6 +121,7 @@ struct TaskOverlayBar: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         })
+        .accessibilityLabel(collapsed ? "Expand task overlay" : "Collapse to strip")
         .buttonStyle(.plain)
         .help(collapsed ? "Expand task overlay" : "Collapse to strip")
     }
@@ -304,6 +305,7 @@ struct TaskOverlayColumn: View {
                     Image(systemName: "rectangle.on.rectangle")
                         .font(AppFonts.taskOverlayIcon)
                 }
+                .accessibilityLabel("Open in its own window")
                 .buttonStyle(.plain)
                 .foregroundStyle(.tertiary)
                 .help("Open in its own window")
@@ -313,6 +315,7 @@ struct TaskOverlayColumn: View {
                     Image(systemName: "xmark")
                         .font(AppFonts.taskOverlayDismiss)
                 }
+                .accessibilityLabel("Remove from the bar")
                 .buttonStyle(.plain)
                 .foregroundStyle(.tertiary)
                 .help("Remove from the bar (task is unaffected)")

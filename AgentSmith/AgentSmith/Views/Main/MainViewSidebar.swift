@@ -22,6 +22,7 @@ struct MainViewSidebar: View {
                 }, label: {
                     Image(systemName: "gearshape")
                 })
+                .accessibilityLabel("Orchestration settings")
                 .buttonStyle(.plain)
                 .onModifierKeysChanged(mask: .command) { _, newKeys in
                     orchestrationGearCommandHeld = newKeys.contains(.command)

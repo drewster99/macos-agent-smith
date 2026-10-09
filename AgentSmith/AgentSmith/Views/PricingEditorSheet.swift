@@ -461,6 +461,7 @@ private struct ThresholdTierRow: View {
                 Text("tokens").font(.subheadline).foregroundStyle(.secondary)
                 Spacer()
                 Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }
+                    .accessibilityLabel("Delete threshold tier")
                     .buttonStyle(.borderless)
             }
             RateFieldsGroup(rates: $tier.rates)
@@ -481,6 +482,7 @@ private struct ServiceTierRow: View {
                     .frame(width: 200)
                 Spacer()
                 Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }
+                    .accessibilityLabel("Delete service tier")
                     .buttonStyle(.borderless)
             }
             RateFieldsGroup(rates: $tier.rates)
@@ -505,6 +507,7 @@ private struct ExtendedThresholdRow: View {
                 .frame(width: 120)
             Spacer()
             Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }
+                .accessibilityLabel("Delete threshold")
                 .buttonStyle(.borderless)
         }
     }

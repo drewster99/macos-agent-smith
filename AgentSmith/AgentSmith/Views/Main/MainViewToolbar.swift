@@ -31,6 +31,7 @@ struct MainViewToolbar: ToolbarContent {
                     }
                 }
                 .foregroundStyle(.red)
+                .accessibilityIdentifier("toolbar.stopAll")
             } else if viewModel.isAborted {
                 Button("Reset & Restart", systemImage: "arrow.clockwise.circle.fill",
                        action: onResetAndRestart)
@@ -38,17 +39,20 @@ struct MainViewToolbar: ToolbarContent {
             } else {
                 Button("Start", systemImage: "play.circle.fill", action: onStart)
                     .foregroundStyle(.green)
+                    .accessibilityIdentifier("toolbar.start")
             }
 
             if shared.speechController.isGloballyEnabled {
                 Button("Mute All", systemImage: "speaker.wave.2.fill") {
                     shared.speechController.setGloballyEnabled(false)
                 }
+                .accessibilityIdentifier("toolbar.muteAll")
             } else {
                 Button("Unmute All", systemImage: "speaker.slash.fill") {
                     shared.speechController.setGloballyEnabled(true)
                 }
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("toolbar.unmuteAll")
             }
 
             Button(

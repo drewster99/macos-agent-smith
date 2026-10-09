@@ -150,6 +150,7 @@ private struct MCPServerRow: View {
                     Button(role: .destructive, action: onDelete, label: {
                         Image(systemName: "trash")
                     })
+                    .accessibilityLabel("Delete server")
                     .buttonStyle(.borderless)
                 }
 

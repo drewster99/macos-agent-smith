@@ -1296,6 +1296,7 @@ private struct TaskRunInlineControl: View {
                 .imageScale(.small)
                 .foregroundStyle(.secondary)
         })
+        .accessibilityLabel(help)
         .buttonStyle(.plain)
         .help(help)
     }
@@ -1311,12 +1312,40 @@ private struct TaskRunningInlineControls: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            TaskRunControlButton(taskID: taskID, action: "Pause", symbol: "pause.fill") {
+            TaskRunControlButton(taskID: taskID, control: .pause) {
                 await viewModel.pauseTask(id: taskID)
             }
-            TaskRunControlButton(taskID: taskID, action: "Stop", symbol: "stop.fill") {
+            TaskRunControlButton(taskID: taskID, control: .stop) {
                 await viewModel.stopTask(id: taskID)
             }
+        }
+    }
+}
+
+/// Which inline run control a `TaskRunControlButton` is.
+private enum TaskRunControl {
+    case pause, stop
+
+    /// Names the control in the tooltip, the accessibility label and the log line.
+    var title: String {
+        switch self {
+        case .pause: return "Pause"
+        case .stop: return "Stop"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .pause: return "pause.fill"
+        case .stop: return "stop.fill"
+        }
+    }
+
+    /// Stable for UI tests: independent of the wording of `title`.
+    var identifierSuffix: String {
+        switch self {
+        case .pause: return "pause"
+        case .stop: return "stop"
         }
     }
 }
@@ -1328,14 +1357,13 @@ private struct TaskRunningInlineControls: View {
 /// they stay, stated once.
 private struct TaskRunControlButton: View {
     let taskID: UUID
-    /// Names this control in the log line and the tooltip.
-    let action: String
-    let symbol: String
+    let control: TaskRunControl
     let perform: () async -> Void
 
     var body: some View {
         Button(action: {
             let slug = taskID.uuidString.prefix(8)
+            let action = control.title
             stopLogger.notice("UI.taskCard inline \(action, privacy: .public) clicked task=\(slug, privacy: .public)")
             Task {
                 stopLogger.notice("UI.taskCard inline \(action, privacy: .public) Task body running task=\(slug, privacy: .public)")
@@ -1343,12 +1371,14 @@ private struct TaskRunControlButton: View {
                 stopLogger.notice("UI.taskCard inline \(action, privacy: .public) Task body returned task=\(slug, privacy: .public)")
             }
         }, label: {
-            Image(systemName: symbol)
+            Image(systemName: control.symbol)
                 .imageScale(.small)
                 .foregroundStyle(.secondary)
         })
+        .accessibilityLabel(control.title)
+        .accessibilityIdentifier("taskRow.\(taskID.uuidString).\(control.identifierSuffix)")
         .buttonStyle(.plain)
-        .help(action)
+        .help(control.title)
     }
 }
 
@@ -1934,6 +1964,7 @@ private struct LibrarySectionHeader: View {
             Button(action: onNewGroup) {
                 Image(systemName: "folder.badge.plus")
             }
+            .accessibilityLabel("New group")
             .buttonStyle(.borderless)
             .help("New group")
         }

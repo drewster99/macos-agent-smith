@@ -82,6 +82,7 @@ struct AttachmentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .contentShape(Rectangle())
                     })
+                    .accessibilityLabel("Open \(attachment.filename)")
                     .buttonStyle(.plain)
                     .onHover { hovering in
                         if hovering { NSCursor.pointingHand.set() }
@@ -185,6 +186,7 @@ struct ImageLightbox: View {
                             .symbolRenderingMode(.hierarchical)
                             .foregroundStyle(.white)
                     }
+                    .accessibilityLabel("Close")
                     .buttonStyle(.plain)
                     .padding(16)
                 }

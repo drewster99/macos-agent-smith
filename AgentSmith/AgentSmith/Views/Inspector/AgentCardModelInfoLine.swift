@@ -56,6 +56,7 @@ struct AgentCardModelInfoLine: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.yellow)
                 })
+                .accessibilityLabel("Missing LiteLLM metadata")
                 .buttonStyle(.plain)
                 .help("Missing LiteLLM metadata")
                 .popover(isPresented: $showingMetadataWarning, arrowEdge: .bottom) {

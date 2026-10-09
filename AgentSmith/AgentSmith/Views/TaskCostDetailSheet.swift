@@ -372,6 +372,7 @@ struct HeaderSection: View {
                             Button(action: { showingVsAvgInfo = true }, label: {
                                 Image(systemName: "info.circle").font(.caption2).foregroundStyle(.tertiary)
                             })
+                            .accessibilityLabel("About vs Average")
                             .buttonStyle(.plain)
                             .popover(isPresented: $showingVsAvgInfo, arrowEdge: .bottom) {
                                 VStack(alignment: .leading, spacing: 6) {

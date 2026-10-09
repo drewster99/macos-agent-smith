@@ -50,6 +50,8 @@ struct UserInputView: View {
                     Image(systemName: "paperplane.fill")
                         .imageScale(.large)
                 })
+                .accessibilityLabel("Send")
+                .accessibilityIdentifier("input.send")
                 .buttonStyle(.borderedProminent)
                 .disabled(!hasComposedContent || !isRunning)
                 .opacity(hasComposedContent && isRunning ? 1.0 : 0.4)
@@ -134,6 +136,7 @@ private struct PendingAttachmentChip: View {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
             }
+            .accessibilityLabel("Remove \(attachment.filename)")
             .buttonStyle(.borderless)
         }
         .padding(.horizontal, 8)

@@ -959,6 +959,7 @@ private struct TaskDetailEditPencilButton: View {
             Image(systemName: "pencil")
                 .font(.callout)
         })
+        .accessibilityLabel(help)
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .help(help)
@@ -2583,6 +2584,7 @@ private struct TaskDetailCopyButton: View {
                 .font(.callout)
                 .foregroundStyle(isCopied ? .green : .secondary)
         })
+        .accessibilityLabel("Copy to clipboard")
         .buttonStyle(.plain)
         .help("Copy to clipboard")
     }

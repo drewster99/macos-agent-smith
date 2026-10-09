@@ -52,6 +52,7 @@ struct TaskAttachmentRow: View {
                     Image(systemName: "magnifyingglass")
                         .imageScale(.small)
                 }
+                .accessibilityLabel("Reveal in Finder")
                 .buttonStyle(.plain)
                 .help("Reveal in Finder")
             } else {

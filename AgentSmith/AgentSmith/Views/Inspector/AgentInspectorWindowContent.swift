@@ -152,5 +152,6 @@ private struct InspectorSessionCostRow: View {
                 .monospacedDigit()
         }
         .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
     }
 }

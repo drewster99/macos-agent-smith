@@ -115,6 +115,7 @@ private struct LiveToolRowView: View {
         }
         .padding(.leading, 28)
         .padding(.trailing, 12)
+        .accessibilityElement(children: .combine)
     }
 }
 

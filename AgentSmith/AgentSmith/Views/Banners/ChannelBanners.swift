@@ -198,6 +198,7 @@ struct ScheduledFiresLine: View {
         }
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -435,6 +436,7 @@ struct TaskCompletedBanner: View {
                             .font(AppFonts.channelTimestamp)
                             .foregroundStyle(accentColor)
                     })
+                    .accessibilityLabel("Save this task as a PDF")
                     .buttonStyle(.plain)
                     .help("Save this task as a PDF")
                 }

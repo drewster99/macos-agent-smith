@@ -163,12 +163,14 @@ private struct CompactionDiffDetailView: View {
                     }, label: {
                         Image(systemName: "chevron.up")
                     })
+                    .accessibilityLabel("Previous change")
                     .disabled(currentChangeIndex <= 0)
                     Button(action: {
                         currentChangeIndex = min(changeRowIDs.count - 1, currentChangeIndex + 1)
                     }, label: {
                         Image(systemName: "chevron.down")
                     })
+                    .accessibilityLabel("Next change")
                     .disabled(currentChangeIndex >= changeRowIDs.count - 1)
                 }
                 .buttonStyle(.bordered)

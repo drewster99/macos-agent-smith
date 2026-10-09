@@ -20,6 +20,7 @@ struct MessageRowCopyOverlay: View {
                 .background(.ultraThinMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
         })
+        .accessibilityLabel("Copy message")
         .buttonStyle(.plain)
         .padding(4)
         .opacity(isHovering ? 1 : 0)

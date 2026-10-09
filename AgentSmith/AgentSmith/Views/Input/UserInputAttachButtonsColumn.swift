@@ -13,6 +13,7 @@ struct UserInputAttachButtonsColumn: View {
                 Image(systemName: "paperclip")
                     .imageScale(.large)
             })
+            .accessibilityLabel("Attach file")
             .buttonStyle(.borderless)
             .disabled(!isEnabled)
 
@@ -20,6 +21,7 @@ struct UserInputAttachButtonsColumn: View {
                 Image(systemName: "square.and.pencil")
                     .imageScale(.large)
             })
+            .accessibilityLabel("Open expanded editor")
             .buttonStyle(.borderless)
             .disabled(!isEnabled)
             .help("Open expanded editor")

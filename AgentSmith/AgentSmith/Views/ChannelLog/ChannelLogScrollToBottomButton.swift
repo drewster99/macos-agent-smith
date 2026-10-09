@@ -13,6 +13,7 @@ struct ChannelLogScrollToBottomButton: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.secondary)
         })
+        .accessibilityLabel("Scroll to latest message")
         .buttonStyle(.plain)
         .padding(8)
         .background(.ultraThinMaterial)

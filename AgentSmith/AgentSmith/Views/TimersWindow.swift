@@ -101,6 +101,7 @@ private struct ActiveTimerRow: View {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
                 })
+                .accessibilityLabel("Cancel this timer")
                 .buttonStyle(.plain)
                 .help("Cancel this timer")
             }

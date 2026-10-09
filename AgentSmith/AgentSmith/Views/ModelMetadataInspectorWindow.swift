@@ -546,18 +546,28 @@ private struct EvidenceInfoButton: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         })
+        .accessibilityLabel("Show evidence")
         .buttonStyle(.plain)
         .help(evidence)
         .popover(isPresented: $isShowing, arrowEdge: .bottom) {
-            ScrollView {
-                Text(evidence)
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-            }
-            .frame(width: 420)
-            .frame(maxHeight: 300)
+            EvidencePopoverContent(evidence: evidence)
         }
+    }
+}
+
+/// The full evidence text, scrollable and selectable.
+private struct EvidencePopoverContent: View {
+    let evidence: String
+
+    var body: some View {
+        ScrollView {
+            Text(evidence)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+        }
+        .frame(width: 420)
+        .frame(maxHeight: 300)
     }
 }
