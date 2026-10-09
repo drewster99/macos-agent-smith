@@ -972,10 +972,13 @@ final class AppViewModel {
         )
         // Push the current attachment-size caps from SharedAppState into the runtime so
         // the registry's per-file cap and the per-message aggregate cap match the user's
-        // configured limits. Caps apply at session start; Settings UI can prompt Restart
-        // if a cap is changed mid-session.
+        // configured limits — at start here, and on every later Settings change (the observer
+        // below, plus one more push once this runtime is the session's).
         await newRuntime.setMaxAttachmentBytesPerFile(shared.maxAttachmentBytesPerFile)
         await newRuntime.setMaxAttachmentBytesPerMessage(shared.maxAttachmentBytesPerMessage)
+        shared.registerAttachmentCapsObserver(session.id) { [weak self] in
+            self?.pushAttachmentCapsToRuntime()
+        }
         // Tool-security configuration (Settings). Applied to each Brown at spawn; changes take
         // effect on the next session start (consistent with the other start-time settings).
         await newRuntime.setToolSecurity(
@@ -1052,6 +1055,8 @@ final class AppViewModel {
         await newRuntime.setMCPHost(mcpHost)
 
         runtime = newRuntime
+        // A cap changed between the start-time push above and now found no runtime to push to.
+        pushAttachmentCapsToRuntime()
         isRunning = true
 
         // Hand the session's tasks to the runtime's store, which takes over `tasks.json`. The previous
@@ -1433,6 +1438,21 @@ final class AppViewModel {
         // After Smith starts the active-timers list may already contain restored wakes for
         // .scheduled tasks — refresh once so the View → Timers panel shows them.
         await refreshActiveTimers()
+    }
+
+    /// The latest attachment-cap push. Each push waits for the one before it, and reads the caps
+    /// when it RUNS, so a burst of changes (a slider drag) lands in order and ends on the latest values.
+    private var attachmentCapsPush: Task<Void, Never>?
+
+    /// Pushes the current attachment-size caps to this session's runtime (`registerAttachmentCapsObserver`).
+    private func pushAttachmentCapsToRuntime() {
+        let previous = attachmentCapsPush
+        attachmentCapsPush = Task { [weak self] in
+            await previous?.value
+            guard let self, let runtime = self.runtime else { return }
+            await runtime.setMaxAttachmentBytesPerFile(self.shared.maxAttachmentBytesPerFile)
+            await runtime.setMaxAttachmentBytesPerMessage(self.shared.maxAttachmentBytesPerMessage)
+        }
     }
 
     /// Re-reads the currently-active wakes from Smith. Cheap; the agent stores the list

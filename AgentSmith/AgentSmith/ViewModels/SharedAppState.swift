@@ -205,7 +205,10 @@ final class SharedAppState {
     /// photos and small PDFs, small enough that one bad file can't blow the LLM context.
     /// Persisted via UserDefaults; settable in Settings.
     var maxAttachmentBytesPerFile: Int = SharedAppState.intDefault(key: "maxAttachmentBytesPerFile", default: 25 * 1024 * 1024) {
-        didSet { UserDefaults.standard.set(maxAttachmentBytesPerFile, forKey: "maxAttachmentBytesPerFile") }
+        didSet {
+            UserDefaults.standard.set(maxAttachmentBytesPerFile, forKey: "maxAttachmentBytesPerFile")
+            notifyAttachmentCapsChanged()
+        }
     }
 
     /// Maximum aggregate bytes across all attachments on a single tool call (e.g. a
@@ -213,7 +216,10 @@ final class SharedAppState {
     /// is enforced at the tool-resolver layer so the LLM gets a clean error rather than
     /// the runtime silently truncating.
     var maxAttachmentBytesPerMessage: Int = SharedAppState.intDefault(key: "maxAttachmentBytesPerMessage", default: 50 * 1024 * 1024) {
-        didSet { UserDefaults.standard.set(maxAttachmentBytesPerMessage, forKey: "maxAttachmentBytesPerMessage") }
+        didSet {
+            UserDefaults.standard.set(maxAttachmentBytesPerMessage, forKey: "maxAttachmentBytesPerMessage")
+            notifyAttachmentCapsChanged()
+        }
     }
 
     /// True while the one-time embedding re-embed migration runs AND it's large enough to warrant a
@@ -273,8 +279,21 @@ final class SharedAppState {
         for observer in orchestrationSettingsObservers.values { observer() }
     }
 
-    /// Drops every per-session observer registered under `sessionID`, across all six observer
-    /// maps. Session deletion is the one path that discards a view model for good; without this,
+    /// Observers (one per active session) that push the attachment-size caps to their runtime when
+    /// either changes — so a Settings edit applies to running sessions at once, not after a restart.
+    private var attachmentCapsObservers: [UUID: @MainActor () -> Void] = [:]
+    func registerAttachmentCapsObserver(_ id: UUID, _ observer: @escaping @MainActor () -> Void) {
+        attachmentCapsObservers[id] = observer
+    }
+    func removeAttachmentCapsObserver(_ id: UUID) {
+        attachmentCapsObservers.removeValue(forKey: id)
+    }
+    private func notifyAttachmentCapsChanged() {
+        for observer in attachmentCapsObservers.values { observer() }
+    }
+
+    /// Drops every per-session observer registered under `sessionID`, across every observer
+    /// map. Session deletion is the one path that discards a view model for good; without this,
     /// its entries (inert `[weak self]` closures, but entries nonetheless) stayed keyed in these
     /// maps for the life of the app. Safe to call for a session that never registered.
     func removeSessionObservers(sessionID: UUID) {
@@ -284,6 +303,7 @@ final class SharedAppState {
         removeToolSecurityObserver(sessionID)
         removeModelAssignmentObserver(sessionID)
         removeOrchestrationSettingsObserver(sessionID)
+        removeAttachmentCapsObserver(sessionID)
         if scheduledWakesBySession.removeValue(forKey: sessionID) != nil {
             rebuildPendingWakeIndex()
         }

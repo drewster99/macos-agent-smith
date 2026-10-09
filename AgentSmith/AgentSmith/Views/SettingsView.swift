@@ -187,7 +187,7 @@ struct SettingsView: View {
                 helpText: "Aggregate cap for all attachments on a single message or tool call. Protects context cost from unbounded fan-out."
             )
 
-            Text("Caps apply when a session starts. Changing them mid-session takes effect after the next agent restart.")
+            Text("Changes apply immediately to every session.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
