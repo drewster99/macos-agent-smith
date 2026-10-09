@@ -581,8 +581,8 @@ private struct CrossSessionTranscriptOutcomeView: View {
 
 /// The top pane's run-history mode: a template's runs (its instances, newest first), each drilling into
 /// that run's transcript. Runs come from `childTasks` (this session's active + the global archived),
-/// so a run whose origin session is closed shows in the list; its transcript needs closed-session
-/// vending (a TODO) to render.
+/// so a run whose origin session is closed shows in the list; its transcript then comes from that
+/// session's log on disk (`CrossSessionTranscriptView`).
 private struct TemplateRunHistoryPane: View {
     let template: AgentTask
     let viewModel: AppViewModel

@@ -6578,9 +6578,9 @@ Message:
     /// with a digest about an agent that was already gone.
     private func assembleDigestIfBrownAlive(since: Date) async -> String? {
         guard agentIDForRole(.brown) != nil else { return nil }
-        // Nothing to monitor while a task sits in awaitingReview — Brown has stopped and is
-        // waiting on Smith's `review_work`, and the `task_complete` already woke Smith with the
-        // review prompt. A recurring "Brown activity" digest here is pure noise; historically it
+        // Nothing to monitor while a task sits in awaitingReview — its worker has stopped, and the
+        // park is resolved by the user (or released by configuration), never by Smith, which
+        // replaced the retired `review_work`. A recurring "Brown activity" digest here is pure noise; historically it
         // woke Smith every 10 minutes into a "No action needed" text-only loop that the circuit
         // breaker eventually terminated. When a Brown is blocked on a help request, Smith's job is to
         // answer it (provide_help), not monitor — but a user-owned validator-error park (.awaitingReview)

@@ -2496,7 +2496,7 @@ public actor TaskStore {
     }
 
     /// Replaces the task's acceptance criteria. Any criterion whose validation prompt,
-    /// input enumerator, waivable flag, or legacy validator selection CHANGED — and any
+    /// input enumerator, or waivable flag CHANGED — and any
     /// new criterion — loses its sticky verdict (its
     /// records stay in the audit ledger; only the "settled" reading resets, because the
     /// contract it was judged against no longer exists). Unchanged criteria keep their
@@ -2591,8 +2591,9 @@ public actor TaskStore {
                 criteria.remove(at: index)
             }
         }
-        // Names must stay distinct: the replace-all path matches criteria BY NAME to preserve
-        // identity, so a duplicate would silently collapse two criteria into one there.
+        // Names must stay distinct because a name is how the user and Smith tell criteria apart —
+        // in Task Detail, the PDF, and every message that names one. Identity across edits is not at
+        // stake here: the replace-all path matches criteria by id (`canReplaceAcceptanceContract`).
         guard Set(criteria.map(\.name)).count == criteria.count else {
             return .failure(.init(message: "Duplicate criterion names — each display name must be distinct."))
         }

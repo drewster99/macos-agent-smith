@@ -1491,8 +1491,8 @@ extension OrchestrationRuntime {
     }
 
     /// Rejections with rounds remaining: the punch list goes DIRECTLY to the worker —
-    /// Smith is not a relay. Mirrors review_work's reject path (status, clearResult,
-    /// respawn fallback, private unparking message).
+    /// Smith is not a relay. The same shape the retired `review_work` reject had (status,
+    /// clearResult, respawn fallback, private unparking message).
     /// Returns whether the rejections went back — to a live worker, or re-queued for a free slot —
     /// rather than being dropped because this round was superseded.
     @discardableResult
@@ -1668,7 +1668,7 @@ extension OrchestrationRuntime {
         _ = await performSendEscalatedTaskBack(taskID: taskID, feedback: feedback, by: .user)
     }
 
-    /// Mirrors the old review_work reject: secure a worker (respawning from saved context — the park
+    /// The same shape the retired `review_work` reject had: secure a worker (respawning from saved context — the park
     /// tore the old one down), then flip to running with the result cleared and the feedback
     /// delivered. Returns whether THIS call moved the task off the park.
     private func performSendEscalatedTaskBack(taskID: UUID, feedback: String, by resolver: AgentTask.EscalationResolver) async -> Bool {

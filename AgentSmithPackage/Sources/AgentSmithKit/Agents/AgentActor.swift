@@ -3079,9 +3079,11 @@ public actor AgentActor {
             return
         }
 
-        // After completing a task (task_complete) OR escalating a blocker (request_help), stop and
-        // wait for Smith — `.awaitingHandoff` means "parked, waiting on Smith" for both. Reset
-        // when Smith's private reply (review_work feedback / provide_help) reaches Brown.
+        // After submitting (task_complete), escalating a blocker (request_help) or reporting a
+        // precondition false (report_precondition_unmet), stop — `.awaitingHandoff` means "parked,
+        // waiting on someone else". A submission waits on acceptance validation, a blocker on Smith.
+        // Reset when a private message hands work back: a validator's punch list, the user's
+        // send-back, or Smith's provide_help.
         // This takes priority over the sentMessage check since both tools also post a message.
         if calledTaskComplete {
             park = .awaitingHandoff
