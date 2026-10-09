@@ -32,6 +32,15 @@ public enum SmithTaskBriefing {
                 channel). The task has been marked FAILED. Tell the user briefly what happened; saying \
                 "retry" will re-run it via `run_task`, which auto-resets failed tasks.]
                 """
+        case .preconditionUnmet:
+            let why = task.preconditionFailure?.reason ?? "a precondition didn't hold"
+            return """
+                [System: \(subject) is BLOCKED, not failed: \(why). It never got as far as a result, and \
+                no validation ran. Tell the user briefly what is missing. Do NOT re-run it unchanged — it \
+                is checked again on every start, so it would block again. Once the missing thing is in \
+                place, `run_task` retries it. If the precondition itself is wrong, correct it with \
+                `set_preconditions` first — unless the user set it, in which case ask them.]
+                """
         case .validationPassed(let validationWasRun):
             let completionNote = validationWasRun
                 ? "passed acceptance validation and is COMPLETE"

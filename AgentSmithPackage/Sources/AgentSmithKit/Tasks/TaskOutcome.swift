@@ -20,6 +20,8 @@ public enum TaskOutcome: Sendable, Equatable {
     /// Parked for the user's own sign-off (`requiresUserAcceptance`). `settled` is nil when
     /// acceptance validation was switched off and nothing was judged.
     case awaitingSignOff(settled: Int?, total: Int)
+    /// A precondition didn't hold (#18): the task never ran its course and nothing was judged.
+    case blocked(reason: String)
 }
 
 public extension TaskOutcome {
@@ -31,6 +33,7 @@ public extension TaskOutcome {
         case .incomplete: return "Incomplete"
         case .needsReview: return "Review"
         case .awaitingSignOff: return "Sign-off"
+        case .blocked: return "Blocked"
         }
     }
 
@@ -47,7 +50,7 @@ public extension TaskOutcome {
         case .awaitingSignOff(let settled?, let total) where settled < total:
             // Only when a criterion was added after the park and is still unjudged.
             return "\(settled)/\(total)"
-        case .awaitingSignOff:
+        case .awaitingSignOff, .blocked:
             return nil
         }
     }
@@ -69,6 +72,8 @@ public extension TaskOutcome {
             return "all \(total) criteria passed — awaiting your sign-off"
         case .awaitingSignOff(let settled?, let total):
             return "\(settled) of \(total) settled — awaiting your sign-off"
+        case .blocked(let reason):
+            return reason
         }
     }
 }
@@ -79,6 +84,10 @@ public extension AgentTask {
     /// (running / validating / pending / scheduled …). Callers fall back to the lifecycle
     /// status chip when this is `nil`.
     var outcome: TaskOutcome? {
+        // Blocked is its own outcome, whatever an earlier attempt's ledger says: no result was judged.
+        if status == .failed, let preconditionFailure {
+            return .blocked(reason: preconditionFailure.reason)
+        }
         // A validation-skipped sign-off park has no ledger to grade — it still has an outcome.
         if isParkedForUserAcceptance, awaitingReviewReason == .userAcceptanceRequestedValidationSkipped {
             return .awaitingSignOff(settled: nil, total: acceptanceCriteria.count)

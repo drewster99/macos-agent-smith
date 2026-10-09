@@ -140,7 +140,8 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
         .taskManagement: [
             "create_task", "run_task", "update_task", "edit_task", "amend_task", "add_required_capability",
             "get_task_details", "list_tasks", "set_template_inputs", "manage_task_disposition",
-            "manage_steps", "set_acceptance_criteria", "respond_to_user_acceptance", "task_update", "task_complete"
+            "manage_steps", "set_acceptance_criteria", "set_preconditions", "respond_to_user_acceptance", "task_update",
+            "task_complete", "report_precondition_unmet"
         ],
         .coordination: [
             "create_child_task", "wait_for_child_tasks"

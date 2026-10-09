@@ -160,6 +160,17 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// `editRequiredCapabilities`, both gated by `requiredCapabilitiesLockReason`.
     public var requiredCapabilities: [RequiredCapability]
 
+    /// What must be true for this task to be worth running (#18). The runtime checks the mechanical
+    /// ones before every worker start; the worker reports a `workerAttested` one false with
+    /// `report_precondition_unmet`. Either way an unmet one blocks the task (`preconditionFailure`).
+    /// Written only through `TaskStore` (`setPreconditions`, creation, cloning).
+    public var preconditions: [TaskPrecondition]
+    /// Set exactly while the task is `.failed` because a precondition didn't hold — BLOCKED, not a
+    /// failed attempt: no validation ran and no result was judged. Written with the status by
+    /// `TaskStore.blockOnPrecondition` and cleared by the status writer whenever the task leaves
+    /// `.failed` (a retry re-checks from scratch).
+    public var preconditionFailure: PreconditionFailureRecord?
+
     /// The most recent set of tool names the security agent approved for the worker on this
     /// task (per-task tool scoping). A **record**, not the gate — the live registry is the
     /// source of truth for enforcement. `nil` for legacy/unscoped tasks. Replaced wholesale
@@ -658,7 +669,9 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         templateInputDefinitions: [TemplateInputDefinition] = [],
         templateInstanceTitleTemplate: String? = nil,
         templateInputValues: [String: String] = [:],
-        requiredCapabilities: [RequiredCapability] = []
+        requiredCapabilities: [RequiredCapability] = [],
+        preconditions: [TaskPrecondition] = [],
+        preconditionFailure: PreconditionFailureRecord? = nil
     ) {
         self.id = id
         self.title = title
@@ -702,6 +715,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         self.templateInstanceTitleTemplate = templateInstanceTitleTemplate
         self.templateInputValues = templateInputValues
         self.requiredCapabilities = requiredCapabilities
+        self.preconditions = preconditions
+        self.preconditionFailure = preconditionFailure
     }
 
     // MARK: - Codable (backward-compatible with persisted data lacking `disposition`)
@@ -710,7 +725,7 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
     /// that every stored property has a case: a defaulted property with no case is silently never
     /// persisted, and a round-trip test stays green because it decodes back to the same default.
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, coordinatorTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, requiredCapabilities, childTasksCreated, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
+        case id, title, description, status, disposition, assigneeIDs, result, commentary, createdAt, updatedAt, startedAt, completedAt, updates, acknowledgmentCount, lastBrownContext, summary, relevantMemories, relevantPriorTasks, scheduledRunAt, lastEditedAt, descriptionAttachments, resultAttachments, resultItems, approvedTools, userToolOverrides, helpRequest, validationBlockedReason, requiresUserAcceptance, awaitingReviewReason, awaitingReviewParkedAt, acceptanceCriteria, steps, validation, isTemplate, parentTaskID, coordinatorTaskID, sessionID, templateInputDefinitions, templateInstanceTitleTemplate, templateInputValues, requiredCapabilities, preconditions, preconditionFailure, childTasksCreated, pendingWorkerMessages, statusRevision, pendingEffects, watches, startHolds
     }
 
     public init(from decoder: Decoder) throws {
@@ -762,6 +777,8 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         templateInstanceTitleTemplate = try c.decodeIfPresent(String.self, forKey: .templateInstanceTitleTemplate)
         templateInputValues = try c.decodeIfPresent([String: String].self, forKey: .templateInputValues) ?? [:]
         requiredCapabilities = try c.decodeIfPresent([RequiredCapability].self, forKey: .requiredCapabilities) ?? []
+        preconditions = try c.decodeIfPresent([TaskPrecondition].self, forKey: .preconditions) ?? []
+        preconditionFailure = try c.decodeIfPresent(PreconditionFailureRecord.self, forKey: .preconditionFailure)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -838,6 +855,10 @@ public struct AgentTask: Identifiable, Codable, Sendable, Equatable {
         if !templateInputValues.isEmpty {
             try c.encode(templateInputValues, forKey: .templateInputValues)
         }
+        if !preconditions.isEmpty {
+            try c.encode(preconditions, forKey: .preconditions)
+        }
+        try c.encodeIfPresent(preconditionFailure, forKey: .preconditionFailure)
         if !requiredCapabilities.isEmpty {
             try c.encode(requiredCapabilities, forKey: .requiredCapabilities)
         }

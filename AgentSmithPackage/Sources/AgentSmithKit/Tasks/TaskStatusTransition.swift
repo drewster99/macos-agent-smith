@@ -44,6 +44,10 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     /// As `spawnFailed`, while the runtime itself was starting: the NEW Smith's initial instruction
     /// reports it, so the Smith briefing stays silent.
     case spawnFailedAtRuntimeStart
+    /// A precondition didn't hold (#18): the task is BLOCKED — `.failed` with its
+    /// `preconditionFailure` set in the same write — found by the runtime's check before a worker
+    /// started, or reported by the worker. Never a validation outcome: nothing was judged.
+    case preconditionUnmet(PreconditionFailureRecord.CheckedBy)
     /// The worker is live and assigned. A "started" fact for watches.
     case workerStarted
     /// As `workerStarted`, while the runtime itself was starting (a run_task restart with no live
@@ -145,6 +149,14 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
             return from == .starting && (to == .pending || to == .interrupted)
         case .spawnFailed, .spawnFailedAtRuntimeStart:
             return [.starting, .pending, .paused, .interrupted, .running].contains(from) && to == .failed
+        case .preconditionUnmet(.startCheck):
+            // Every state a worker is spawned from: a start, a resume, a respawn for help, the respawn
+            // that takes a validator's rejections back, and a user's send-back from review.
+            return [.starting, .pending, .paused, .interrupted, .running, .awaitingHelp, .validating, .awaitingReview].contains(from)
+                && to == .failed
+        case .preconditionUnmet(.worker):
+            // Only a working worker reports, never mid-validation: a submitted result is judged.
+            return from == .running && to == .failed
         case .workerStarted, .workerStartedAtRuntimeStart:
             return [.starting, .pending, .paused, .interrupted].contains(from) && to == .running
         case .submittedForValidation:
@@ -225,7 +237,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
             return .review(validationWasRun ? .userAcceptanceRequested : .userAcceptanceRequestedValidationSkipped)
         case .validationBlocked:
             return .validationBlocked
-        case .startClaimed, .startAbandoned, .spawnFailed, .spawnFailedAtRuntimeStart, .workerStarted,
+        case .startClaimed, .startAbandoned, .spawnFailed, .spawnFailedAtRuntimeStart, .preconditionUnmet, .workerStarted,
              .workerStartedAtRuntimeStart, .submittedForValidation, .validationPassed,
              .validationFailedNoProgress, .validationReleased, .rejectionsReturned, .helpRequested,
              .helpProvided, .userPaused, .userStopped, .userAccepted, .userAcceptanceGranted, .userFailed,
@@ -243,7 +255,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
         switch self {
         case .userAccepted, .userAcceptanceGranted:
             return true
-        case .startClaimed, .startAbandoned, .spawnFailed, .spawnFailedAtRuntimeStart, .workerStarted,
+        case .startClaimed, .startAbandoned, .spawnFailed, .spawnFailedAtRuntimeStart, .preconditionUnmet, .workerStarted,
              .workerStartedAtRuntimeStart, .submittedForValidation, .validationPassed,
              .validationFailedNoProgress, .validationEscalated, .userAcceptanceRequested, .validationBlocked,
              .validationReleased, .rejectionsReturned, .helpRequested, .helpProvided, .userPaused,

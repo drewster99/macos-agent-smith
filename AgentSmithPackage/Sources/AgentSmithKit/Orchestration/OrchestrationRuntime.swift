@@ -2570,6 +2570,17 @@ public actor OrchestrationRuntime {
         if task.acknowledgmentCount > 0 {
             parts.append("You are RESUMING this task — a prior attempt was interrupted or sent back for revision. Continue from where you left off using the context below; do not restart from scratch.")
         }
+        if let preconditions = task.renderedPreconditions() {
+            parts.append("""
+                ## Preconditions
+                What must be true for this task to be worth doing. The ones "checked before every start" \
+                held when you started. Verify the ones you check FIRST, before any other work: if one is \
+                false, call `report_precondition_unmet` with its id and your evidence — the task is then \
+                blocked and you stop. Never report one that holds, and never use it for any other blocker \
+                (that is `request_help`).
+                \(preconditions)
+                """)
+        }
         if let capabilities = task.renderedRequiredCapabilities() {
             parts.append("""
                 ## Required capabilities
@@ -4313,6 +4324,9 @@ public actor OrchestrationRuntime {
                     // alone and stop building this generation — the queued stopAll owns
                     // the teardown of whatever exists.
                     guard !aborted, !stopRequested else { return }
+                    // A block (#18) already told Smith through its durable briefing, which the new Smith
+                    // drains; it is not a spawn failure, so nothing more is said or written here.
+                    if await taskStore.task(id: resumingTaskID)?.preconditionFailure == nil {
                     // A failed spawn must not leave the task looking like ordinary pending
                     // work the user is waiting on — that's what let a stranded reminder be
                     // mistaken for "the task the user means" after the 2026-07-08 outage.
@@ -4327,6 +4341,7 @@ public actor OrchestrationRuntime {
                         IMPORTANT: this failure applies ONLY to that one task. If the user sends a NEW message, handle it normally — \
                         create a task for genuine new work, or simply reply if they're chatting. Do NOT attach a new request to the failed task.
                         """)
+                    }
                 }
 
                 if let userMsg = lastUserMessage, !userMsg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -4394,7 +4409,12 @@ public actor OrchestrationRuntime {
                 // A held task waits for its watch (or the user's Play), not for launch.
                 var remaining = interruptedTasks.filter(\.startHolds.isEmpty).sorted { $0.createdAt < $1.createdAt }
                 while supervisor.handles(role: .brown).count < maxConcurrentWorkers, let task = remaining.first {
-                    guard let brownID = await performSpawnBrown(for: task) else { break }
+                    guard let brownID = await performSpawnBrown(for: task) else {
+                        // A blocked task (#18) used no slot: the next one may still start.
+                        guard await taskStore.task(id: task.id)?.preconditionFailure != nil else { break }
+                        remaining.removeFirst()
+                        continue
+                    }
                     remaining.removeFirst()
                     await taskStore.updateStatus(id: task.id, status: .running, cause: .workerStartedAtRuntimeStart)
                     await taskStore.assignAgent(taskID: task.id, agentID: brownID)
@@ -5244,6 +5264,85 @@ public actor OrchestrationRuntime {
         liveActivityTracker.setBrownWorkers(source: ObjectIdentifier(self), to: supervisor.handles(role: .brown).count)
     }
 
+    /// What the precondition check sees in this runtime: the file system, the worker's login shell,
+    /// and the worker model's capabilities exactly as attachments are gated on them — including how a
+    /// missing entry reads (vision supported, documents not) — and a worker role with no model reads
+    /// as unmet.
+    private func preconditionEnvironment() -> PreconditionEnvironment {
+        let hasWorkerModel = llmConfigs[.brown] != nil
+        let vision = supportsVisionByRole[.brown]
+        let documents = supportsDocumentsByRole[.brown]
+        return .live(workerModelSupports: { capability in
+            guard hasWorkerModel else { return nil }
+            switch capability {
+            case .vision: return vision ?? true
+            case .pdf: return documents ?? false
+            }
+        })
+    }
+
+    /// Blocks `task` on an unmet precondition (#18): the `.failed` status and its record in one write,
+    /// an update saying why, and a warning row for the user — then Smith's briefing is released. A task
+    /// that moved on meanwhile (paused, already running elsewhere) is left alone. Returns whether it
+    /// blocked.
+    @discardableResult
+    func blockTask(_ task: AgentTask, on failure: PreconditionFailureRecord) async -> Bool {
+        let allowed: Set<AgentTask.Status> = failure.checkedBy == .worker
+            ? [.running]
+            : [.starting, .pending, .paused, .interrupted, .running, .awaitingHelp, .validating, .awaitingReview]
+        guard let effects = await taskStore.blockOnPrecondition(id: task.id, failure: failure, ifCurrentlyIn: allowed) else { return false }
+        await taskStore.addUpdate(id: task.id, message: "BLOCKED: \(failure.reason). No validation ran.")
+        // Addressed to the user only: Smith has its briefing, and no worker should be woken by it.
+        await channel.post(ChannelMessage(
+            sender: .system,
+            recipientID: Self.userID,
+            recipient: .user,
+            content: "Task \"\(task.title)\" is blocked — \(failure.reason). It did no work and nothing was judged; it can be retried once that's fixed.",
+            metadata: [
+                "messageKind": .kind(.taskBlocked),
+                "severity": .severity(.warning),
+                "taskID": .string(task.id.uuidString)
+            ],
+            taskID: task.id
+        ))
+        await taskStore.releaseEffects(effects)
+        return true
+    }
+
+    /// A worker's `report_precondition_unmet` (#18). Accepted only for a precondition its task
+    /// DECLARED — a worker can't invent a gate to escape hard work; an undeclared blocker goes through
+    /// `request_help` — and only while the task is running. A precondition the runtime can check
+    /// itself is checked: if it actually holds, the report is refused (the worker is wrong, or looked
+    /// in the wrong place). Accepted, the task is blocked and the worker is ended once its turn is over.
+    func handlePreconditionReport(from agentID: UUID, preconditionID: UUID, evidence: String) async -> PreconditionReportOutcome {
+        guard let task = await taskStore.taskForAgent(agentID: agentID) else {
+            return .refused("No active task is assigned to you.")
+        }
+        guard task.status == .running else {
+            return .refused("Task '\(task.title)' is \(task.status.displayName); a precondition can be reported only while you are working on it.")
+        }
+        guard let precondition = task.preconditions.first(where: { $0.id == preconditionID }) else {
+            let declared = task.preconditions.map { "\($0.id.uuidString): \($0.kind.summary)" }.joined(separator: "; ")
+            return .refused(declared.isEmpty
+                ? "This task declares no preconditions. If something outside your control is blocking you, use request_help."
+                : "That is not one of this task's preconditions (\(declared)). For any other blocker, use request_help.")
+        }
+        if precondition.kind.isCheckedAtStart,
+           await PreconditionEvaluator.unmetDetail(precondition.kind, in: preconditionEnvironment()) == nil {
+            return .refused("The runtime checked it and it holds: \(precondition.kind.summary). Keep working; if something else is blocking you, use request_help.")
+        }
+        let failure = PreconditionFailureRecord(precondition: precondition, detail: evidence, checkedBy: .worker)
+        guard await blockTask(task, on: failure) else {
+            return .refused("Task '\(task.title)' could not be blocked in its current state.")
+        }
+        // Not awaited: this runs inside the worker's own tool call, and ending it waits for its run
+        // loop to unwind — which it does as soon as this call returns (the tool parks it).
+        lifecycleQueue.schedule { [weak self] in
+            _ = await self?.performTerminateAgent(id: agentID)
+        }
+        return .blocked(reason: failure.reason)
+    }
+
     /// Spawns a Brown+Security Agent pair for `task`, cycling that task's existing worker first. A
     /// worker always belongs to a task: its tool set is scoped to that task, and a task-less spawn
     /// would hand it Brown's FULL tool set (#14).
@@ -5275,6 +5374,14 @@ public actor OrchestrationRuntime {
         }
         for worker in sameTaskWorkers {
             _ = await performTerminateAgent(id: worker.id)
+        }
+        // Every worker start passes the task's preconditions first (#18): read fresh, since the
+        // caller's snapshot may predate an edit. An unmet one blocks the task and starts nothing.
+        let current = await taskStore.task(id: task.id) ?? task
+        if let failure = await PreconditionEvaluator.firstUnmet(current.preconditions, in: preconditionEnvironment()) {
+            guard !aborted, !stopRequested else { return nil }
+            await blockTask(current, on: failure)
+            return nil
         }
         guard admitsWorker(for: task) else {
             stopLogger.notice("spawnBrown refused — worker capacity \(self.maxConcurrentWorkers, privacy: .public) reached")
@@ -6113,6 +6220,10 @@ public actor OrchestrationRuntime {
             },
             beginTaskValidation: { [weak self] taskID in
                 await self?.startTaskValidation(taskID: taskID)
+            },
+            reportPreconditionUnmet: { [weak self] preconditionID, evidence in
+                guard let self else { return .refused("The runtime is gone.") }
+                return await self.handlePreconditionReport(from: agentID, preconditionID: preconditionID, evidence: evidence)
             },
             composeTaskBriefing: { [weak self] taskID in
                 guard let self, let task = await self.taskStore.task(id: taskID) else { return nil }

@@ -12,6 +12,7 @@ enum SmithBehavior {
             EditTaskTool(),
             SetTemplateInputsTool(),
             SetAcceptanceCriteriaTool(),
+            SetPreconditionsTool(),
             RespondToUserAcceptanceTool(),
             ManageStepsTool(),
             RunTaskTool(),

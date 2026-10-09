@@ -52,6 +52,17 @@ extension AgentTask {
         return requiredCapabilities.map { "- \($0.renderedLine)" }.joined(separator: "\n")
     }
 
+    /// The preconditions as a bullet list, each with its id (what `report_precondition_unmet` and
+    /// `set_preconditions` take) and who checks it. Nil when the task has none.
+    public func renderedPreconditions() -> String? {
+        guard !preconditions.isEmpty else { return nil }
+        return preconditions.map { precondition in
+            let checker = precondition.kind.isCheckedAtStart ? "checked before every start" : "you check it"
+            let why = precondition.failureMessage.map { " — \($0)" } ?? ""
+            return "- [\(precondition.id.uuidString)] \(precondition.kind.summary) (\(checker), set by \(precondition.origin.displayName))\(why)"
+        }.joined(separator: "\n")
+    }
+
     /// The `requiredCapabilities` entry every `.taskCreated` banner carries, so the user sees what
     /// the worker was asked to be able to do where the task first appears. Empty when none.
     func taskCreatedBannerCapabilitiesMetadata() -> [String: AnyCodable] {

@@ -11,6 +11,7 @@ public enum BrownBehavior {
             ManageStepsTool(),
             TaskCompleteTool(),
             RequestHelpTool(),
+            ReportPreconditionUnmetTool(),
             ReplyToUserTool(),
             ReportInboundUserMessageTool(),
             BashTool(),

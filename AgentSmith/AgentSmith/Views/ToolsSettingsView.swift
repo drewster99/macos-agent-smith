@@ -16,7 +16,7 @@ struct ToolsSettingsView: View {
 
     /// Lifecycle tools that are always available and not user-controllable.
     private static let forcedLifecycle: Set<String> = [
-        "task_acknowledged", "task_update", "task_complete", "request_help", "reply_to_user"
+        "task_acknowledged", "task_update", "task_complete", "request_help", "report_precondition_unmet", "reply_to_user"
     ]
 
     private var builtInTools: [String] {

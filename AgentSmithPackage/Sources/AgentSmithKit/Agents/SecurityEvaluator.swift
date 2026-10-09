@@ -377,6 +377,8 @@ actor SecurityEvaluator {
                 "task_update",
                 "task_complete",
                 "request_help",
+                // Blocks only the caller's own task, on a precondition its author declared.
+                "report_precondition_unmet",
                 "reply_to_user",
                 // Only pauses the caller until its own child tasks report back; it acts on nothing.
                 // Creating a child (`create_child_task`) is NOT here: it gets a real verdict.

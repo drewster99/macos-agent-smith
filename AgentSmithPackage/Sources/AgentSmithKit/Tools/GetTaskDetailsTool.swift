@@ -139,6 +139,12 @@ struct GetTaskDetailsTool: AgentTool {
         if let capabilities = task.renderedRequiredCapabilities() {
             parts.append("Required capabilities:\n\(capabilities)")
         }
+        if let preconditions = task.renderedPreconditions() {
+            parts.append("Preconditions:\n\(preconditions)")
+        }
+        if let blocked = task.preconditionFailure {
+            parts.append("BLOCKED: \(blocked.reason)")
+        }
         if let coordinatorID = task.coordinatorTaskID {
             parts.append("coordinatorTaskID: \(coordinatorID.uuidString) (a child task; \(CoordinatorTaskBriefing.routingDescription(coordinator: coordinator)))")
         }

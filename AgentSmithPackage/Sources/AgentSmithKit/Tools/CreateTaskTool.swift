@@ -136,7 +136,7 @@ public struct CreateTaskTool: AgentTool {
 
                     If the `validation_prompt` should be run on an arbitrary number of items, use the optional `input_enumerator_prompt`. The `input_enumerator_prompt` must instruct the LLM to return a JSON array of strings; each string will be validated with the `validation_prompt` independently, and every subcheck must pass. If any fail, the given criterion is rejected.
 
-                    Write prompts so correct work passes, including edge cases and explicit alternatives. Encode user-declared MUST-FAIL gates as non-waivable criteria with no escape hatch.
+                    Write prompts so correct work passes, including edge cases and explicit alternatives. A user-declared MUST-FAIL / do-not-proceed condition is a PRECONDITION (`preconditions`), never a criterion.
                     """)
             ]
         )
@@ -196,6 +196,7 @@ public struct CreateTaskTool: AgentTool {
                 ]),
                 "acceptance_criteria": Self.acceptanceCriteriaSchema,
                 "steps": Self.stepsSchema,
+                "preconditions": PreconditionArguments.arraySchema,
                 "required_capabilities": Self.requiredCapabilitiesSchema(callerNote: "On a template, items may use {{input_name}} placeholders. If a running worker later turns out to lack something, add it with `add_required_capability` — never by editing the description."),
                 "requires_user_acceptance": .dictionary([
                     "type": .string("boolean"),
@@ -411,6 +412,20 @@ public struct CreateTaskTool: AgentTool {
         case .failure(let problem): return .failure("Task NOT created — \(problem.message)")
         }
 
+        // Set in the write that creates the task, like the gate: a new task can start at once.
+        var preconditions: [TaskPrecondition] = []
+        if let rawPreconditions = ToolArguments.optionalArray(arguments, "preconditions") {
+            switch PreconditionArguments.parse(.array(rawPreconditions), origin: .smith, existing: []) {
+            case .success(let parsed): preconditions = parsed
+            case .failure(let problem): return .failure("Task NOT created — \(problem.message)")
+            }
+            let shape = AgentTask(title: title, description: description, isTemplate: isTemplate, templateInputDefinitions: templateInputDefinitions)
+            switch TaskStore.validatedPreconditions(preconditions, for: shape) {
+            case .success(let checked): preconditions = checked
+            case .failure(let problem): return .failure("Task NOT created — \(problem.message)")
+            }
+        }
+
         // Every authored field is checked BEFORE anything is stored, so a template written with a
         // mistyped `{{placeholder}}` leaves nothing behind to clean up. The store re-checks each
         // field on its own write; this pass exists because `addTask` has no way to refuse.
@@ -435,7 +450,8 @@ public struct CreateTaskTool: AgentTool {
             isTemplate: isTemplate,
             templateInputDefinitions: templateInputDefinitions,
             requiresUserAcceptance: requiresUserAcceptance,
-            requiredCapabilities: requiredCapabilities
+            requiredCapabilities: requiredCapabilities,
+            preconditions: preconditions
         )
         let gateNote: String
         if !requiresUserAcceptance {

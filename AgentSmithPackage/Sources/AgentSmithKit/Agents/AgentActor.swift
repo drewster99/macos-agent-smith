@@ -1651,6 +1651,7 @@ public actor AgentActor {
         toolRegistry.setForcedAvailable("task_update", taskAcknowledged)
         toolRegistry.setForcedAvailable("task_complete", taskAcknowledged)
         toolRegistry.setForcedAvailable("request_help", taskAcknowledged)
+        toolRegistry.setForcedAvailable("report_precondition_unmet", taskAcknowledged)
         toolRegistry.setForcedAvailable("reply_to_user", true)
     }
 
@@ -3818,7 +3819,7 @@ public actor AgentActor {
     /// `parkingToolsAreLifecycleTools`. `wait_for_child_tasks` is here so it runs AFTER any
     /// `create_child_task` earlier in the same response, never alongside it.
     static let taskLifecycleTools: Set<String> = [
-        "task_update", "task_complete", "request_help", "reply_to_user",
+        "task_update", "task_complete", "request_help", "report_precondition_unmet", "reply_to_user",
         "message_user", "notify_brown", "wait_for_child_tasks"
     ]
 
@@ -3829,7 +3830,7 @@ public actor AgentActor {
     /// are deliberately absent: looking is orchestration, not acting on a task.
     static let smithTaskActionTools: Set<String> = [
         "provide_help", "edit_task", "set_template_inputs",
-        "set_acceptance_criteria", "manage_steps", "run_task", "update_task",
+        "set_acceptance_criteria", "set_preconditions", "manage_steps", "run_task", "update_task",
         "amend_task", "add_required_capability", "manage_task_disposition", "schedule_task_action", "watch_task"
     ]
 
@@ -3864,7 +3865,7 @@ public actor AgentActor {
     /// The lifecycle tools that hand control to ANOTHER actor, so the calling agent must stop
     /// after one succeeds. Every name here has to also be in `taskLifecycleTools`: only the
     /// lifecycle branch of the run loop knows to break out of the remaining segments.
-    static let handoffLifecycleTools: Set<String> = ["task_complete", "request_help"]
+    static let handoffLifecycleTools: Set<String> = ["task_complete", "request_help", "report_precondition_unmet"]
 
     /// Whether a successful lifecycle tool transfers control away from the current agent turn.
     static func shouldParkAfterLifecycleTool(named toolName: String, succeeded: Bool) -> Bool {

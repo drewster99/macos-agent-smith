@@ -27,7 +27,7 @@ contributor.
 6. ✅ **Validation economics:** forced final verdict, rejection-history seeding, convergence signal,
    unjudged vs rejected. *(2026-10-09, #17 — the convergence signal is ADVISORY (`.validationDeadlock`),
    not a failure: terminating on prose equality would break CLAUDE.md's no-free-text-control-flow rule.)* — [#17](https://github.com/drewster99/macos-agent-smith/issues/17) — S–M
-7. **Task preconditions / fail-fast `.blocked` outcome.** —
+7. ✅ **Task preconditions / fail-fast `.blocked` outcome.** (2026-10-09, #18 — see the section) —
    [#18](https://github.com/drewster99/macos-agent-smith/issues/18) — M
 
 ### P2 — worthwhile, not urgent
@@ -2648,7 +2648,30 @@ The `swiftlint` skill is configured for this project. Pair with the `CodeStyleGu
 ### SwiftUI review P3 — Inspector double-scroll redesign
 `InspectorView.swift:22` (outer ScrollView) wraps `:315` and `:111` of `AgentInspectorWindow`, each a `ScrollView(.vertical) { ... }.frame(maxHeight: 300/400)`. The bounded-height inner scroll is intentional but on macOS produces double-scrollbar UX where users sometimes scroll the outer when meaning the inner. Lower priority — would need a custom container that lets the inner section grow up to N pt and then fold into the outer scroll.
 
-### First-class task preconditions / hard-abort gates (design decided 2026-07-17, unimplemented)
+### First-class task preconditions / hard-abort gates (design decided 2026-07-17) ✅ built 2026-10-09 (#18)
+
+**As built.** `TaskPrecondition { id, kind, failureMessage, origin }`, kinds `workerModelSupports(vision|pdf)`,
+`fileExists(path)` (absolute or `~/`), `commandAvailable(name)` (looked up in the worker's login shell,
+name passed as `$1`), `workerAttested(statement)`, and `unknown` (a newer build's kind — fails closed).
+`PreconditionEvaluator.firstUnmet` runs inside `performSpawnBrown`, the one function every worker start
+goes through (live start, cold start, launch resume, `provide_help` respawn, validation-recovery
+respawn), so no start can skip it. BLOCKED is `status == .failed` + `AgentTask.preconditionFailure`
+(cause `.preconditionUnmet(checkedBy:)`), surfaced as `TaskOutcome.blocked`, a `task_blocked` warning
+row, and its own Smith / coordinator notes — never a validation outcome (no round, no verdict). The
+status writer refuses the cause without the record and clears the record on any exit from `.failed`, so
+a retry checks afresh. Brown's `report_precondition_unmet` takes only a DECLARED id, only while
+running; the runtime re-checks a mechanical one and refuses a report of one that holds, then ends the
+worker. Smith authors with `set_preconditions` (gated like the contract; can't change a user's
+precondition; may correct its own, including the one a task is blocked on) and `create_task`'s `preconditions`; the HARD GATES prompt rule now
+says "a precondition, not a criterion". Template runs fill in their inputs; clones copy them.
+**Deviations from the design below:** (1) BLOCKED is not a new `Status` case — an older build decodes an
+unknown status as `.interrupted` and would auto-resume (re-run) a blocked task; every terminal-failed
+behavior already fit. (2) The worker-attested kind and its tool exist — the design rejected "the judged
+party aborts itself", but the issue asked for a worker fail-fast path; it is limited to declared ids and
+re-verified where the runtime can. (3) Vision/PDF are checked against the same capability facts
+attachments use; the app's fail-open for missing metadata still applies (a second capability channel
+would be a sidecar). (4) No user editing UI yet — Task Detail lists them read-only. Known downgrade
+risk: an older build drops `preconditions` when it rewrites `tasks.json`.
 
 **Motivating failure.** A "Test App Localization" task described a hard gate — *"if the assigned model is not vision-capable, the task MUST FAIL immediately."* Smith flattened it into a soft acceptance criterion with an OR-escape; the worker documented the limitation, continued, the validator ACCEPTed, and the task read **Completed / Success**. The 2026-07-17 prompt fix (`SmithBehavior` + `create_task`/`set_acceptance_criteria` hard-gate rule) makes Smith author such a gate as a non-waivable failing criterion — which fixes the *verdict* (a correctly-authored hard criterion REJECTs → stalls → `.failed`), but **cannot fail *immediately***: today the only validation→`.failed` path is the stall rule (`maxConsecutiveValidationRoundsWithoutProgress`), so a hard criterion still burns several pointless Brown rounds first. This item is the mechanism that makes "fail immediately" literal and gives the outcome the right shape.
 

@@ -1383,7 +1383,8 @@ public actor TaskStore {
                     origin: .asWritten,
                     reason: capability.reason
                 )
-            }
+            },
+            preconditions: template.preconditions.map { $0.copied(transformingText: { substituted($0) }) }
         )
         var withWatches = instance
         // A template's watches are blueprints: each run gets its own copy, with fresh identity and
@@ -1433,7 +1434,8 @@ public actor TaskStore {
             sessionID: sessionID,
             templateInputDefinitions: source.templateInputDefinitions,
             templateInputValues: source.templateInputValues,
-            requiredCapabilities: source.requiredCapabilities
+            requiredCapabilities: source.requiredCapabilities,
+            preconditions: source.preconditions.map { $0.copied() }
         )
         tasks[clone.id] = clone
         if tasks[source.id] != nil {
@@ -1458,7 +1460,8 @@ public actor TaskStore {
         isTemplate: Bool = false,
         templateInputDefinitions: [TemplateInputDefinition] = [],
         requiresUserAcceptance: Bool = false,
-        requiredCapabilities: [RequiredCapability] = []
+        requiredCapabilities: [RequiredCapability] = [],
+        preconditions: [TaskPrecondition] = []
     ) async -> AgentTask {
         await autoArchiveStaleCompletedIfEnabled()
         let definitions = isTemplate ? templateInputDefinitions : []
@@ -1476,7 +1479,8 @@ public actor TaskStore {
             isTemplate: isTemplate,
             sessionID: sessionID,
             templateInputDefinitions: definitions,
-            requiredCapabilities: requiredCapabilities
+            requiredCapabilities: requiredCapabilities,
+            preconditions: preconditions
         )
         // A new template belongs in the GLOBAL library (when one is wired AND persistable); everything
         // else is per-session. The returned id is the same either way, so the caller's follow-up setters
@@ -1704,6 +1708,12 @@ public actor TaskStore {
             Self.statusLogger.fault("Refused .awaitingReview for task \(taskID.uuidString, privacy: .public): no stored result")
             return .refused
         }
+        // A block carries its reason: the record is written in this same write, by
+        // `blockOnPrecondition`, before the status.
+        if case .preconditionUnmet = cause, task.preconditionFailure == nil {
+            Self.statusLogger.fault("Refused precondition block for task \(taskID.uuidString, privacy: .public): no preconditionFailure record")
+            return .refused
+        }
         // An Accept records exactly the cause the park implies — sign-off granted, or an override —
         // decided from the park as it stands in THIS write, never from a caller's earlier snapshot.
         let impliedAcceptanceCause = task.acceptanceResolutionCause
@@ -1736,6 +1746,9 @@ public actor TaskStore {
         }
         task.status = newStatus
         task.updatedAt = now
+        // A block describes this `.failed`; leaving it (a retry's reset, a status Smith sets) ends it,
+        // and the next start checks every precondition afresh.
+        if from == .failed { task.preconditionFailure = nil }
         if newStatus == .awaitingReview {
             task.awaitingReviewReason = enteringReviewReason
             task.awaitingReviewParkedAt = now
@@ -2271,6 +2284,126 @@ public actor TaskStore {
             return .failure(CapabilityTextProblem("The capability text is empty once the run's input values are filled in."))
         }
         return .success(substituted)
+    }
+
+    // MARK: - Preconditions (#18)
+
+    /// Replaces a task's preconditions — the ONE writer after creation. Refused while the task can't
+    /// take a contract edit (`Status.isValidationContractEditable`: never under a running worker or
+    /// validator), for an authored kind that can't be checked (`TaskPrecondition.authoringProblem`, an
+    /// undefined template placeholder, two with one id), and when it would remove or change a
+    /// precondition the user wrote unless the user is the author. Returns the refusal, or nil on
+    /// success. Changing the one a task is blocked on is allowed — a wrong precondition is fixed this
+    /// way — and the next start checks the list afresh.
+    public func setPreconditions(id: UUID, _ newPreconditions: [TaskPrecondition], by author: TaskAuthorship) async -> String? {
+        await mutateTaskOrTemplate(id: id) { task in
+            guard task.status.isValidationContractEditable else {
+                return "Task '\(task.title)' is \(task.status.displayName); its preconditions can be changed only while it isn't running or being validated."
+            }
+            let accepted: [TaskPrecondition]
+            switch Self.validatedPreconditions(newPreconditions, for: task) {
+            case .success(let value): accepted = value
+            case .failure(let problem): return problem.message
+            }
+            guard Set(accepted.map(\.id)).count == accepted.count else {
+                return "Each precondition must appear once; two share an id."
+            }
+            let byID = Dictionary(uniqueKeysWithValues: accepted.map { ($0.id, $0) })
+            for existing in task.preconditions where existing.origin == .user && author != .user && byID[existing.id] != existing {
+                return "The precondition \"\(existing.kind.summary)\" was set by the user; only the user can change or remove it."
+            }
+            guard accepted != task.preconditions else { return nil }
+            task.preconditions = accepted
+            task.updatedAt = Date()
+            let list = accepted.isEmpty ? "none" : accepted.map(\.kind.summary).joined(separator: "; ")
+            task.updates.append(AgentTask.TaskUpdate(message: "Preconditions set by \(author.displayName): \(list)"))
+            return nil
+        }
+    }
+
+    /// An authored list, each checked as `authoredPrecondition` describes — what `setPreconditions`
+    /// stores, and what `create_task` checks before the write that creates its task.
+    static func validatedPreconditions(_ preconditions: [TaskPrecondition], for task: AgentTask) -> Result<[TaskPrecondition], PreconditionAuthoringProblem> {
+        var accepted: [TaskPrecondition] = []
+        for (index, precondition) in preconditions.enumerated() {
+            switch authoredPrecondition(precondition, position: index + 1, of: task) {
+            case .success(let value): accepted.append(value)
+            case .failure(let problem): return .failure(PreconditionAuthoringProblem(problem.message))
+            }
+        }
+        return .success(accepted)
+    }
+
+    /// One authored precondition, checked and — for a template's run — with its input values filled
+    /// in, the same rule every other authored field follows. Its id and origin are kept.
+    private static func authoredPrecondition(_ precondition: TaskPrecondition, position: Int, of task: AgentTask) -> Result<TaskPrecondition, CapabilityTextProblem> {
+        var result = precondition
+        func filled(_ text: String, field: String) -> Result<String, CapabilityTextProblem> {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if task.isTemplate {
+                if let problem = TemplateInputValidation.placeholderProblem(
+                    in: trimmed, field: "precondition \(position) \(field)",
+                    definedNames: Set(task.templateInputDefinitions.map(\.name))) {
+                    return .failure(CapabilityTextProblem(problem))
+                }
+                return .success(trimmed)
+            }
+            guard !task.templateInputValues.isEmpty else { return .success(trimmed) }
+            return .success(Self.substitutingInputValues(trimmed, of: task))
+        }
+        switch precondition.kind {
+        case .fileExists(let path):
+            switch filled(path, field: "path") {
+            case .success(let value): result.kind = .fileExists(path: value)
+            case .failure(let problem): return .failure(problem)
+            }
+        case .commandAvailable(let name):
+            switch filled(name, field: "command") {
+            case .success(let value): result.kind = .commandAvailable(name: value)
+            case .failure(let problem): return .failure(problem)
+            }
+        case .workerAttested(let statement):
+            switch filled(statement, field: "statement") {
+            case .success(let value): result.kind = .workerAttested(statement: value)
+            case .failure(let problem): return .failure(problem)
+            }
+        case .workerModelSupports, .unknown:
+            break
+        }
+        if let message = precondition.failureMessage {
+            switch filled(message, field: "failure message") {
+            case .success(let value): result.failureMessage = value.isEmpty ? nil : value
+            case .failure(let problem): return .failure(problem)
+            }
+        }
+        // A template's text may still hold placeholders, so only a runnable task's is checked as a gate.
+        if !task.isTemplate, let problem = TaskPrecondition.authoringProblem(in: result.kind) {
+            return .failure(CapabilityTextProblem("Precondition \(position): \(problem)."))
+        }
+        return .success(result)
+    }
+
+    private static func substitutingInputValues(_ text: String, of task: AgentTask) -> String {
+        TemplateStringRenderer.renderSubstitutingDefinedPlaceholders(
+            text,
+            values: task.templateInputValues,
+            definedNames: Set(task.templateInputValues.keys),
+            layout: .preserved
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Blocks the task on an unmet precondition (#18): writes `failure` and the `.failed` status
+    /// (`.preconditionUnmet`) in ONE write, if the task is still in one of `allowed`, with its effects
+    /// HELD for the caller to release once its own update and banner exist (as
+    /// `updateStatusHoldingEffects`). Nil when the task moved on, or the move isn't permitted.
+    public func blockOnPrecondition(id: UUID, failure: PreconditionFailureRecord, ifCurrentlyIn allowed: Set<AgentTask.Status>) -> TransitionEffectTicket? {
+        guard let original = tasks[id], allowed.contains(original.status) else { return nil }
+        tasks[id]?.preconditionFailure = failure
+        guard let ticket = commitStatusHoldingEffects(id: id, to: .failed, cause: .preconditionUnmet(failure.checkedBy)) else {
+            tasks[id] = original
+            return nil
+        }
+        return ticket
     }
 
     private struct CapabilityTextProblem: Error {

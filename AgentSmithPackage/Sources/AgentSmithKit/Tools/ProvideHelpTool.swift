@@ -84,6 +84,9 @@ struct ProvideHelpTool: AgentTool {
             brownWasSpawned = true
         }
 
+        if brownID == nil, let blocked = await context.taskStore.task(id: taskID)?.preconditionFailure {
+            return .failure("The task did not resume: it is BLOCKED — \(blocked.reason). The help request is moot until that's fixed; tell the user what is missing.")
+        }
         guard let brownID else {
             return .failure("Couldn't spawn a Brown to resume this task — worker slots may all be busy, or a provider is misconfigured. The task stays parked awaiting help; try again once a slot frees.")
         }

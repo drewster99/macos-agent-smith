@@ -85,6 +85,8 @@ enum AppColors {
     static let outcomeReview = Color.orange
     /// Parked for the user's own sign-off — nothing wrong, waiting on a person.
     static let outcomeAwaitingSignOff = Color.blue
+    /// A precondition didn't hold (#18): not a failed attempt — nothing ran.
+    static let outcomeBlocked = Color.orange
 
     // MARK: - Worker step statuses
 
@@ -440,6 +442,7 @@ enum TaskOutcomeBadge {
         case .incomplete: return AppColors.outcomeIncomplete
         case .needsReview: return AppColors.outcomeReview
         case .awaitingSignOff: return AppColors.outcomeAwaitingSignOff
+        case .blocked: return AppColors.outcomeBlocked
         }
     }
 
@@ -450,6 +453,7 @@ enum TaskOutcomeBadge {
         case .incomplete: return "xmark.circle.fill"
         case .needsReview: return "exclamationmark.triangle.fill"
         case .awaitingSignOff: return "hand.thumbsup.fill"
+        case .blocked: return "hand.raised.fill"
         }
     }
 }

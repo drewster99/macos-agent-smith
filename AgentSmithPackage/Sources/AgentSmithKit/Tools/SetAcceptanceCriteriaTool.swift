@@ -147,9 +147,9 @@ public struct SetAcceptanceCriteriaTool: AgentTool {
             with `validation_prompt`, and every item must pass. Set `waivable: true` only where the \
             criterion might genuinely not apply and the validator may say so. \
             HARD GATES: when the task description states a MUST-FAIL / abort precondition ("MUST FAIL", \
-            "fail immediately", "do not proceed if"), encode it as a `waivable: false` criterion that FAILS \
-            when the condition is not met — with NO OR-alternative or "document and continue" escape. \
-            Honoring a user-declared failure IS correctness; the "don't be over-strict" rule does not apply to it.
+            "fail immediately", "do not proceed if"), it is a PRECONDITION, not a criterion: set it with \
+            `set_preconditions` (or `create_task`'s `preconditions`), which blocks the task before any work \
+            instead of spending validation rounds on it. Honoring a user-declared failure IS correctness.
             """
         self.toolDescription = description
     }

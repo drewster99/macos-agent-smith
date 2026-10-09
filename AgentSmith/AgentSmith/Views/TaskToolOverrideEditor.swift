@@ -15,7 +15,7 @@ struct TaskToolOverrideEditor: View {
     @State private var expanded = false
 
     private static let forcedLifecycle: Set<String> = [
-        "task_acknowledged", "task_update", "task_complete", "request_help", "reply_to_user"
+        "task_acknowledged", "task_update", "task_complete", "request_help", "report_precondition_unmet", "reply_to_user"
     ]
 
     private enum OverrideState { case auto, on, off }

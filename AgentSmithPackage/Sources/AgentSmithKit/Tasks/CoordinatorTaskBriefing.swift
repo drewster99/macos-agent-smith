@@ -32,6 +32,12 @@ public enum CoordinatorTaskBriefing {
                 [System: \(subject) COMPLETED.\(resultSection(task)) \
                 Use `get_task_details` with its ID for its full result and deliverables. \(tail)]
                 """
+        case .failed where task.preconditionFailure != nil:
+            return """
+                [System: \(subject) is BLOCKED: \(task.preconditionFailure?.reason ?? ""). It did no work. \
+                Decide whether your own task can still succeed: fix what is missing and run it again, \
+                do the work another way, or report the blocker with `request_help`. \(tail)]
+                """
         case .failed:
             return """
                 [System: \(subject) FAILED.\(resultSection(task)) \
@@ -77,7 +83,7 @@ public enum CoordinatorTaskBriefing {
             return nil
         // Never moves a task to paused or interrupted.
         case .scheduledAction(.run), .scheduledAction(.summarize), .startClaimed, .startAbandoned,
-             .spawnFailed, .spawnFailedAtRuntimeStart, .workerStarted, .workerStartedAtRuntimeStart,
+             .spawnFailed, .spawnFailedAtRuntimeStart, .preconditionUnmet, .workerStarted, .workerStartedAtRuntimeStart,
              .submittedForValidation, .validationPassed, .validationFailedNoProgress,
              .validationEscalated, .userAcceptanceRequested, .signOffContractChanged,
              .validationBlocked, .validationReleased, .rejectionsReturned, .helpRequested,
@@ -93,7 +99,7 @@ public enum CoordinatorTaskBriefing {
     /// with Smith, because they wait on the user and Smith is the one who talks to the user.
     public static func replacesSmithBriefing(_ cause: TaskTransitionCause) -> Bool {
         switch cause {
-        case .workerStarted, .spawnFailed, .validationPassed, .validationFailedNoProgress:
+        case .workerStarted, .spawnFailed, .preconditionUnmet, .validationPassed, .validationFailedNoProgress:
             return true
         default:
             // Fails toward Smith: a cause added later keeps its Smith note until someone decides

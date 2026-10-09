@@ -2152,9 +2152,30 @@ private struct TaskDetailIdentityRows: View {
             }
         }
         TaskDetailMetadataRow(label: "Template") { TaskDetailTemplateLine(task: task) }
+        TaskDetailPreconditionRows(preconditions: task.preconditions)
         if let parentTaskID = task.parentTaskID {
             TaskDetailMetadataRow(label: "Parent") {
                 TaskDetailCopyablePath(text: parentTaskID.uuidString, compact: true)
+            }
+        }
+    }
+}
+
+/// What must be true for the task to run (#18), one line each. A block names its precondition in the
+/// Result row above.
+private struct TaskDetailPreconditionRows: View {
+    let preconditions: [TaskPrecondition]
+
+    var body: some View {
+        if !preconditions.isEmpty {
+            TaskDetailMetadataRow(label: "Preconditions", alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(preconditions, id: \.id) { precondition in
+                        Text(precondition.kind.summary)
+                            .textSelection(.enabled)
+                            .help(precondition.kind.isCheckedAtStart ? "Checked before every start" : "Checked by the worker")
+                    }
+                }
             }
         }
     }

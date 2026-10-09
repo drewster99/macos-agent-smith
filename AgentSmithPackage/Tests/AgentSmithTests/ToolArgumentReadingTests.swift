@@ -325,7 +325,9 @@ struct ToolArgumentReadingGuardTests {
     /// Raised from 64 to 66 for `respond_to_user_acceptance`'s required `task_id` and `decision`.
     /// Raised from 66 to 69 for `add_required_capability`'s required `task_id`, `capability` and
     /// `reason`, and to 71 for `create_child_task`'s required `title` and `description`.
-    private static let handUnwrapBudget = 71
+    /// Raised from 71 to 74 for `report_precondition_unmet`'s required `precondition_id` and
+    /// `evidence`, and `set_preconditions`'s required `task_id` (#18).
+    private static let handUnwrapBudget = 74
 
     /// Every `if case .string/.array(let x) = arguments["k"]` still in the tool sources.
     private static func handUnwrapSites(requiringPrefix prefix: String? = nil) throws -> [String] {

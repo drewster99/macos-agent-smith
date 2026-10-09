@@ -311,6 +311,10 @@ public struct ToolContext: Sendable {
     /// Hands a just-submitted task to the acceptance-validation system. Called by
     /// `task_complete` after setting the result and the `.validating` status.
     public let beginTaskValidation: @Sendable (UUID) async -> Void
+    /// The calling worker reports one of its task's declared preconditions false
+    /// (`report_precondition_unmet`, #18): the runtime checks the report, blocks the task, and ends
+    /// the worker. The answer says what happened.
+    public let reportPreconditionUnmet: @Sendable (_ preconditionID: UUID, _ evidence: String) async -> PreconditionReportOutcome
     /// Recomposes the worker briefing for a task — byte-for-byte the same text a freshly
     /// spawned worker is seeded with (acceptance criteria, step plan, working directories,
     /// prior progress, last working state). Returns nil when the task is unknown.
@@ -496,6 +500,9 @@ public struct ToolContext: Sendable {
         workerIDForTask: @escaping @Sendable (UUID) async -> UUID? = { _ in nil },
         onSelfTerminate: @escaping @Sendable () async -> Void = {},
         beginTaskValidation: @escaping @Sendable (UUID) async -> Void = { _ in },
+        reportPreconditionUnmet: @escaping @Sendable (UUID, String) async -> PreconditionReportOutcome = { _, _ in
+            .refused("Precondition reports aren't available in this context.")
+        },
         // Unlike the trackers below, an unwired composer does NOT `assertionFailure`: nil is a
         // meaningful answer here, and `rebuildContextFromTask` already reports it as a channel
         // error and falls back to pruning the agent's own history. Aborting the process would
@@ -572,6 +579,7 @@ public struct ToolContext: Sendable {
         self.workerIDForTask = workerIDForTask
         self.onSelfTerminate = onSelfTerminate
         self.beginTaskValidation = beginTaskValidation
+        self.reportPreconditionUnmet = reportPreconditionUnmet
         self.composeTaskBriefing = composeTaskBriefing
         self.workerCapacity = workerCapacity
         self.isAgentCurrent = isAgentCurrent
