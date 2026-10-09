@@ -772,8 +772,12 @@ public actor TaskStore {
     /// A clone (#15) has no coordinator of its own; it answers as the task it was cloned from.
     public func intentProvenance(of task: AgentTask) async -> TaskIntentProvenance {
         guard var next = task.coordinatorTaskID else {
-            guard let sourceID = task.clonedFromTaskID, sourceID != task.id,
-                  let source = await taskAnyDisposition(id: sourceID) else { return .requester }
+            guard let sourceID = task.clonedFromWorkerAuthoredTaskID else { return .requester }
+            // Fail closed: the link exists only for worker-written sources, so a source that is gone
+            // (deleted, or moved out of reach) still means worker-written, origin unknown.
+            guard sourceID != task.id, let source = await taskAnyDisposition(id: sourceID) else {
+                return .workerAuthored(originatingTask: nil)
+            }
             return await intentProvenance(of: source)
         }
         var visited: Set<UUID> = [task.id]
@@ -1436,7 +1440,7 @@ public actor TaskStore {
             },
             isTemplate: false,
             parentTaskID: source.parentTaskID,
-            clonedFromTaskID: source.id,
+            clonedFromWorkerAuthoredTaskID: (source.coordinatorTaskID != nil || source.clonedFromWorkerAuthoredTaskID != nil) ? source.id : nil,
             sessionID: sessionID,
             templateInputDefinitions: source.templateInputDefinitions,
             templateInputValues: source.templateInputValues,
@@ -2402,8 +2406,14 @@ public actor TaskStore {
     /// (`.preconditionUnmet`) in ONE write, if the task is still in one of `allowed`, with its effects
     /// HELD for the caller to release once its own update and banner exist (as
     /// `updateStatusHoldingEffects`). Nil when the task moved on, or the move isn't permitted.
-    public func blockOnPrecondition(id: UUID, failure: PreconditionFailureRecord, ifCurrentlyIn allowed: Set<AgentTask.Status>) -> TransitionEffectTicket? {
+    /// `ifStatusRevision` makes a check that ran while the task could move (a start-time lookup takes
+    /// seconds) apply only if nothing changed its status meanwhile — a pause during the lookup wins.
+    /// A precondition that is no longer declared (edited away meanwhile) blocks nothing.
+    public func blockOnPrecondition(id: UUID, failure: PreconditionFailureRecord, ifCurrentlyIn allowed: Set<AgentTask.Status>,
+                                    ifStatusRevision expectedRevision: Int? = nil) -> TransitionEffectTicket? {
         guard let original = tasks[id], allowed.contains(original.status) else { return nil }
+        if let expectedRevision, original.statusRevision != expectedRevision { return nil }
+        guard original.preconditions.contains(where: { $0.id == failure.preconditionID }) else { return nil }
         tasks[id]?.preconditionFailure = failure
         guard let ticket = commitStatusHoldingEffects(id: id, to: .failed, cause: .preconditionUnmet(failure.checkedBy)) else {
             tasks[id] = original

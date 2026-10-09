@@ -5288,9 +5288,9 @@ public actor OrchestrationRuntime {
     }
 
     /// What the precondition check sees in this runtime: the file system, the worker's login shell,
-    /// and the worker model's capabilities exactly as attachments are gated on them — including how a
-    /// missing entry reads (vision supported, documents not) — and a worker role with no model reads
-    /// as unmet.
+    /// and the worker model's capabilities. A capability the catalog doesn't state is UNKNOWN and reads
+    /// as unmet (fail closed, as the plan requires) — unlike attachment gating, which assumes vision —
+    /// and so does a worker role with no model.
     private func preconditionEnvironment() -> PreconditionEnvironment {
         let hasWorkerModel = llmConfigs[.brown] != nil
         let vision = supportsVisionByRole[.brown]
@@ -5298,8 +5298,8 @@ public actor OrchestrationRuntime {
         return .live(workerModelSupports: { capability in
             guard hasWorkerModel else { return nil }
             switch capability {
-            case .vision: return vision ?? true
-            case .pdf: return documents ?? false
+            case .vision: return vision
+            case .pdf: return documents
             }
         })
     }
@@ -5309,11 +5309,12 @@ public actor OrchestrationRuntime {
     /// that moved on meanwhile (paused, already running elsewhere) is left alone. Returns whether it
     /// blocked.
     @discardableResult
-    func blockTask(_ task: AgentTask, on failure: PreconditionFailureRecord) async -> Bool {
+    func blockTask(_ task: AgentTask, on failure: PreconditionFailureRecord, ifStatusRevision expectedRevision: Int? = nil) async -> Bool {
         let allowed: Set<AgentTask.Status> = failure.checkedBy == .worker
             ? [.running]
             : [.starting, .pending, .paused, .interrupted, .running, .awaitingHelp, .validating, .awaitingReview]
-        guard let effects = await taskStore.blockOnPrecondition(id: task.id, failure: failure, ifCurrentlyIn: allowed) else { return false }
+        guard let effects = await taskStore.blockOnPrecondition(id: task.id, failure: failure, ifCurrentlyIn: allowed,
+                                                                ifStatusRevision: expectedRevision) else { return false }
         await taskStore.addUpdate(id: task.id, message: "BLOCKED: \(failure.reason). No validation ran.")
         // Addressed to the user only: Smith has its briefing, and no worker should be woken by it.
         await channel.post(ChannelMessage(
@@ -5419,7 +5420,8 @@ public actor OrchestrationRuntime {
         let current = await taskStore.task(id: task.id) ?? task
         if let failure = await PreconditionEvaluator.firstUnmet(current.preconditions, in: preconditionEnvironment()) {
             guard !aborted, !stopRequested else { return nil }
-            await blockTask(current, on: failure)
+            // Only if the task hasn't moved during the (possibly slow) check: a pause wins.
+            await blockTask(current, on: failure, ifStatusRevision: current.statusRevision)
             return nil
         }
         guard admitsWorker(for: task) else {

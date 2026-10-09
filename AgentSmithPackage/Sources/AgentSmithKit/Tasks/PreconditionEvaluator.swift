@@ -82,7 +82,7 @@ public enum PreconditionEvaluator {
             switch environment.workerModelSupports(capability) {
             case true?: return nil
             case false?: return "the worker's model can't read \(capability.displayName)"
-            case nil: return "no model is assigned to the worker role"
+            case nil: return "it isn't known whether the worker's model can read \(capability.displayName) — no model is assigned to the worker role, or its capabilities aren't in the model catalog"
             }
         case .fileExists(let path):
             return environment.pathExists(path) ? nil : "nothing exists at \(path)"

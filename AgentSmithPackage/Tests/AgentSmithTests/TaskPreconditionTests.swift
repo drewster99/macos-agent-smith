@@ -197,6 +197,40 @@ struct TaskPreconditionTests {
         await runtime.stopAll()
     }
 
+    @Test("Vision support the catalog doesn't state is unknown, and blocks: the gate fails closed")
+    func unknownVisionBlocks() async throws {
+        let (runtime, store) = try await startedRuntime()
+        let task = await store.addTask(title: "Read the screenshots", description: "d",
+                                       preconditions: [TaskPrecondition(kind: .workerModelSupports(.vision), origin: .smith)])
+        await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let blocked = try #require(await store.task(id: task.id))
+        #expect(blocked.status == .failed && blocked.preconditionFailure != nil)
+        #expect(await runtime.liveWorkerID(taskID: task.id) == nil)
+        await runtime.stopAll()
+    }
+
+    @Test("A start-time block applies only if nothing moved the task during the check, and only for a still-declared precondition")
+    func blockIsRevisionAndDeclarationGuarded() async throws {
+        let store = TaskStore()
+        let gate = TaskPrecondition(kind: .fileExists(path: "/nope"), origin: .smith)
+        let task = await store.addTask(title: "t", description: "d", preconditions: [gate])
+        let failure = PreconditionFailureRecord(precondition: gate, detail: "missing", checkedBy: .startCheck)
+        let snapshot = try #require(await store.task(id: task.id))
+
+        // Paused during the check: the revision moved, so the late failure is dropped.
+        #expect(await store.driveStatus(id: task.id, to: .paused))
+        #expect(await store.blockOnPrecondition(id: task.id, failure: failure, ifCurrentlyIn: [.pending, .paused],
+                                                ifStatusRevision: snapshot.statusRevision) == nil)
+        #expect(await store.task(id: task.id)?.status == .paused)
+
+        // The precondition was edited away meanwhile: nothing to block on.
+        let other = TaskPrecondition(kind: .fileExists(path: "/elsewhere"), origin: .smith)
+        let fresh = await store.addTask(title: "u", description: "d", preconditions: [other])
+        #expect(await store.blockOnPrecondition(id: fresh.id, failure: failure, ifCurrentlyIn: [.pending]) == nil)
+        #expect(await store.task(id: fresh.id)?.status == .pending)
+    }
+
     @Test("A met precondition lets the task start")
     func startGatePasses() async throws {
         let (runtime, store) = try await startedRuntime()

@@ -322,12 +322,18 @@ struct ForeignSessionTaskTests {
 
         let clone = await store.cloneForRunInThisSession(source: foreignChild)
         #expect(clone.coordinatorTaskID == nil, "the clone reports to no coordinator")
-        #expect(clone.clonedFromTaskID == foreignChild.id)
+        #expect(clone.clonedFromWorkerAuthoredTaskID == foreignChild.id)
         let expected = TaskIntentProvenance.workerAuthored(originatingTask: .init(id: root.id, title: "Root", description: "The user's request."))
         #expect(await store.intentProvenance(of: clone) == expected)
 
         let userTask = AgentTask(title: "User's", description: "d", sessionID: UUID())
         await store.restore([userTask])
-        #expect(await store.intentProvenance(of: store.cloneForRunInThisSession(source: userTask)) == .requester)
+        let userClone = await store.cloneForRunInThisSession(source: userTask)
+        #expect(userClone.clonedFromWorkerAuthoredTaskID == nil, "a clone of the user's own task carries no worker link")
+        #expect(await store.intentProvenance(of: userClone) == .requester)
+
+        // The source gone (deleted, or out of reach): still worker-written, never the user's.
+        let orphan = AgentTask(title: "Orphan", description: "d", clonedFromWorkerAuthoredTaskID: UUID(), sessionID: home)
+        #expect(await store.intentProvenance(of: orphan) == .workerAuthored(originatingTask: nil))
     }
 }
