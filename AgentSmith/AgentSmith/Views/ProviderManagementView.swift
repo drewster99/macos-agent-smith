@@ -15,35 +15,10 @@ struct ProviderManagementView: View {
     @State private var deleteError: String?
     @State private var showAllBuiltIns = false
 
-    /// Built-in presets shown by default: those flagged `popular`, any whose API key has already
-    /// been entered, and any that are CONFIGURED without a key. Sorted alphabetically.
-    ///
-    /// The last clause exists for the ChatGPT-subscription provider, which has no API key by
-    /// design: judged on `hasAPIKey` alone it would be permanently invisible — hidden before
-    /// sign-in because it isn't "popular", and still hidden after, because signing in writes
-    /// nothing to the Keychain.
-    private var defaultVisibleBuiltIns: [BuiltInProviderPreset] {
-        let popular = Set(BuiltInProviders.popular.map(\.id))
-        let visible = BuiltInProviders.all.filter { preset in
-            popular.contains(preset.id) || hasAPIKey(preset.id) || isKeylessProvider(preset)
-        }
-        return visible.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-    }
-
-    /// Every built-in preset, sorted alphabetically. Used when "Show all" is on.
-    private var allBuiltInsAlphabetical: [BuiltInProviderPreset] {
-        BuiltInProviders.all.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-    }
-
-    /// Providers that aren't in `BuiltInProviders.allIDs` — i.e. user-added.
-    private var customProviders: [ModelProvider] {
-        llmKit.providers.filter { !BuiltInProviders.isBuiltIn(id: $0.id) }
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            builtInSection()
-            customSection()
+            BuiltInProvidersSection(llmKit: llmKit, showAll: $showAllBuiltIns)
+            CustomProvidersSection(llmKit: llmKit, editingProvider: $editingProvider, deleteError: $deleteError)
         }
         .sheet(item: $editingProvider) { state in
             ProviderEditorSheet(
@@ -61,110 +36,130 @@ struct ProviderManagementView: View {
             Text(deleteError ?? "")
         })
     }
+}
 
-    // MARK: - Built-in section
+// MARK: - Built-in section
 
-    private func builtInSection() -> some View {
-        let visible = showAllBuiltIns ? allBuiltInsAlphabetical : defaultVisibleBuiltIns
-        let hiddenCount = BuiltInProviders.all.count - visible.count
-        let hiddenNote = "\(hiddenCount) more built-in "
-            + (hiddenCount == 1 ? "provider is" : "providers are")
-            + " hidden. Turn on \u{201C}Show all\u{201D} to pick from every provider."
+/// The built-in providers: the popular ones, any with a key or other configuration, or — with
+/// "Show all" — every preset, alphabetically.
+private struct BuiltInProvidersSection: View {
+    @Bindable var llmKit: LLMKitManager
+    @Binding var showAll: Bool
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Providers")
-                    .font(AppFonts.sectionHeader)
-                Spacer()
-                Toggle(isOn: $showAllBuiltIns) {
-                    Text("Show all (\(BuiltInProviders.all.count))")
-                }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            }
+    @State private var keyPresence = BuiltInKeyPresence()
 
-            if hiddenCount > 0 {
-                Text(hiddenNote)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
+    var body: some View {
+        let visible = visiblePresets
+        VStack(alignment: .leading, spacing: 8) {
+            BuiltInProvidersHeader(showAll: $showAll, hiddenCount: BuiltInProviders.all.count - visible.count)
             ForEach(visible, id: \.id) { preset in
                 BuiltInProviderRow(llmKit: llmKit, preset: preset)
             }
         }
     }
 
-    // MARK: - Custom section
+    /// Shown by default: those flagged `popular`, any whose API key has been entered, and any
+    /// CONFIGURED without a key. The last clause exists for the ChatGPT-subscription provider, which
+    /// has no API key by design: judged on a key alone it would be permanently invisible — hidden
+    /// before sign-in because it isn't "popular", and still hidden after, because signing in writes
+    /// nothing to the Keychain. Sorted alphabetically either way.
+    private var visiblePresets: [BuiltInProviderPreset] {
+        let popular = Set(BuiltInProviders.popular.map(\.id))
+        let providerIDsWithKeys = keyPresence.providerIDsWithKeys(in: llmKit)
+        let presets = showAll ? BuiltInProviders.all : BuiltInProviders.all.filter { preset in
+            popular.contains(preset.id) || providerIDsWithKeys.contains(preset.id) || preset.apiType == .codexChatGPT
+        }
+        return presets.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+}
 
-    @ViewBuilder
+/// Which built-in providers have a non-empty Keychain entry — read once, then again only when a
+/// key is written (`apiKeyChangeCounter`), never on every render: each read is a Keychain lookup,
+/// and a body is evaluated many times per display pass. A plain reference, so the memo is answered
+/// synchronously on the FIRST render (no list that grows a moment later) without being view state.
+@MainActor
+private final class BuiltInKeyPresence {
+    private var counter: Int?
+    private var ids: Set<String> = []
 
-    private func customSection() -> some View {
+    func providerIDsWithKeys(in llmKit: LLMKitManager) -> Set<String> {
+        let current = llmKit.apiKeyChangeCounter   // read through the manager: a write re-renders
+        if counter != current {
+            counter = current
+            ids = Set(BuiltInProviders.all.compactMap { preset in
+                (llmKit.apiKey(for: preset.id)?.isEmpty == false) ? preset.id : nil
+            })
+        }
+        return ids
+    }
+}
+
+private struct BuiltInProvidersHeader: View {
+    @Binding var showAll: Bool
+    let hiddenCount: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Providers")
+                    .font(AppFonts.sectionHeader)
+                Spacer()
+                Toggle(isOn: $showAll) {
+                    Text("Show all (\(BuiltInProviders.all.count))")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+            BuiltInProvidersHiddenNote(hiddenCount: hiddenCount)
+        }
+    }
+}
+
+private struct BuiltInProvidersHiddenNote: View {
+    let hiddenCount: Int
+
+    var body: some View {
+        if hiddenCount > 0 {
+            Text("\(hiddenCount) more built-in \(hiddenCount == 1 ? "provider is" : "providers are") hidden. Turn on \u{201C}Show all\u{201D} to pick from every provider.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+// MARK: - Custom section
+
+private struct CustomProvidersSection: View {
+    @Bindable var llmKit: LLMKitManager
+    @Binding var editingProvider: ProviderEditorState?
+    @Binding var deleteError: String?
+
+    /// Providers that aren't in `BuiltInProviders.allIDs` — i.e. user-added.
+    private var customProviders: [ModelProvider] {
+        llmKit.providers.filter { !BuiltInProviders.isBuiltIn(id: $0.id) }
+    }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Custom Providers")
                     .font(AppFonts.sectionHeader)
                 Spacer()
-                Button(action: { addCustomProvider() }, label: {
+                Button(action: addCustomProvider, label: {
                     Label("Add Provider", systemImage: "plus")
                 })
             }
-
             if customProviders.isEmpty {
                 Text("No custom providers. Add one for self-hosted endpoints or providers not in the built-in list.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 6)
-            } else {
-                ForEach(customProviders) { provider in
-                    customProviderRow(provider)
-                }
             }
-        }
-    }
-
-    private func customProviderRow(_ provider: ModelProvider) -> some View {
-        GroupBox {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(provider.name)
-                        .font(.headline)
-                    HStack(spacing: 8) {
-                        Text(provider.apiType.displayName)
-                            .font(.caption)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.quaternary)
-                            .clipShape(RoundedRectangle(cornerRadius: 3))
-                        Text(provider.endpoint.absoluteString)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-                Spacer()
-                Button("Edit") {
-                    let apiKey = llmKit.apiKey(for: provider.id) ?? ""
-                    editingProvider = ProviderEditorState(
-                        mode: .edit,
-                        id: provider.id,
-                        name: provider.name,
-                        apiType: provider.apiType,
-                        endpointString: provider.endpoint.absoluteString,
-                        apiKey: apiKey
-                    )
-                }
-                .buttonStyle(.borderless)
-                Button(role: .destructive, action: {
-                    deleteProvider(id: provider.id)
-                }, label: {
-                    Image(systemName: "trash")
-                })
-                .buttonStyle(.borderless)
+            ForEach(customProviders) { provider in
+                CustomProviderRow(llmKit: llmKit, provider: provider, editingProvider: $editingProvider, deleteError: $deleteError)
             }
-            .padding(4)
         }
     }
 
@@ -179,24 +174,73 @@ struct ProviderManagementView: View {
             apiKey: ""
         )
     }
+}
 
-    private func deleteProvider(id: String) {
+private struct CustomProviderRow: View {
+    let llmKit: LLMKitManager
+    let provider: ModelProvider
+    @Binding var editingProvider: ProviderEditorState?
+    @Binding var deleteError: String?
+
+    var body: some View {
+        GroupBox {
+            HStack {
+                CustomProviderSummary(provider: provider)
+                Spacer()
+                Button("Edit", action: edit)
+                    .buttonStyle(.borderless)
+                Button(role: .destructive, action: delete, label: {
+                    Image(systemName: "trash")
+                })
+                .buttonStyle(.borderless)
+                .help("Delete this provider")
+                .accessibilityLabel("Delete \(provider.name)")
+            }
+            .padding(4)
+        }
+    }
+
+    private func edit() {
+        // Read here, on demand: the key is needed only to seed the editor.
+        editingProvider = ProviderEditorState(
+            mode: .edit,
+            id: provider.id,
+            name: provider.name,
+            apiType: provider.apiType,
+            endpointString: provider.endpoint.absoluteString,
+            apiKey: llmKit.apiKey(for: provider.id) ?? ""
+        )
+    }
+
+    private func delete() {
         do {
-            try llmKit.deleteProvider(id: id)
+            try llmKit.deleteProvider(id: provider.id)
         } catch {
             deleteError = error.localizedDescription
         }
     }
+}
 
-    private func hasAPIKey(_ providerID: String) -> Bool {
-        if let key = llmKit.apiKey(for: providerID), !key.isEmpty { return true }
-        return false
-    }
+private struct CustomProviderSummary: View {
+    let provider: ModelProvider
 
-    /// Whether this provider authenticates by something other than an API key, and so must be
-    /// offered even though the Keychain holds nothing for it.
-    private func isKeylessProvider(_ preset: BuiltInProviderPreset) -> Bool {
-        preset.apiType == .codexChatGPT
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(provider.name)
+                .font(.headline)
+            HStack(spacing: 8) {
+                Text(provider.apiType.displayName)
+                    .font(.caption)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(.quaternary)
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                Text(provider.endpoint.absoluteString)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
     }
 }
 
@@ -448,7 +492,7 @@ private struct ProviderEditorSheet: View {
                 HStack(spacing: 4) {
                     TextField("https://...", text: $state.endpointString)
                         .textFieldStyle(.roundedBorder)
-                    endpointPresetMenu()
+                    EndpointPresetMenu(state: $state)
                 }
             }
 
@@ -480,44 +524,6 @@ private struct ProviderEditorSheet: View {
         }, message: {
             Text(saveError ?? "")
         })
-    }
-
-    private func endpointPresetMenu() -> some View {
-        let allPresets = ProviderAPIType.allEndpointPresets
-        let cloudPresets = allPresets.filter { $0.preset.url.scheme == "https" }
-        let localPresets = allPresets.filter { $0.preset.url.scheme != "https" }
-
-        return Menu(
-            content: {
-                if !cloudPresets.isEmpty {
-                    Section("Cloud APIs") {
-                        ForEach(cloudPresets, id: \.preset.label) { entry in
-                            Button(entry.preset.label) {
-                                state.endpointString = entry.preset.url.absoluteString
-                                state.apiType = entry.apiType
-                            }
-                        }
-                    }
-                }
-                if !localPresets.isEmpty {
-                    Section("Local") {
-                        ForEach(localPresets, id: \.preset.label) { entry in
-                            Button(entry.preset.label) {
-                                state.endpointString = entry.preset.url.absoluteString
-                                state.apiType = entry.apiType
-                            }
-                        }
-                    }
-                }
-            },
-            label: {
-                Image(systemName: "chevron.down.circle")
-                    .foregroundStyle(.secondary)
-            }
-        )
-        .menuStyle(.borderlessButton)
-        .frame(width: 24)
-        .help("Choose a common endpoint")
     }
 
     private func applyDefaultEndpoint(for type: ProviderAPIType) {
@@ -687,6 +693,46 @@ private struct CodexSignInButtons: View {
             Button("Refresh Models", action: onRefreshModels)
                 .disabled(!status.isSignedIn || isRefreshing)
             if isRefreshing { ProgressView().controlSize(.small) }
+        }
+    }
+}
+
+/// The endpoint field's menu of common endpoints, cloud and local; choosing one sets both the
+/// endpoint and its API type. The sections are written inline: a `Section` inside a custom view in
+/// a `Menu` is not reliably rendered as a menu section.
+private struct EndpointPresetMenu: View {
+    @Binding var state: ProviderEditorState
+
+    var body: some View {
+        let presets = ProviderAPIType.allEndpointPresets
+        let cloud = presets.filter { $0.preset.url.scheme == "https" }
+        let local = presets.filter { $0.preset.url.scheme != "https" }
+        Menu(content: {
+            if !cloud.isEmpty {
+                Section("Cloud APIs") { ForEach(cloud, id: \.preset.label) { EndpointPresetButton(entry: $0, state: $state) } }
+            }
+            if !local.isEmpty {
+                Section("Local") { ForEach(local, id: \.preset.label) { EndpointPresetButton(entry: $0, state: $state) } }
+            }
+        }, label: {
+            Image(systemName: "chevron.down.circle")
+                .foregroundStyle(.secondary)
+        })
+        .menuStyle(.borderlessButton)
+        .frame(width: 24)
+        .help("Choose a common endpoint")
+        .accessibilityLabel("Choose a common endpoint")
+    }
+}
+
+private struct EndpointPresetButton: View {
+    let entry: (apiType: ProviderAPIType, preset: EndpointPreset)
+    @Binding var state: ProviderEditorState
+
+    var body: some View {
+        Button(entry.preset.label) {
+            state.endpointString = entry.preset.url.absoluteString
+            state.apiType = entry.apiType
         }
     }
 }
