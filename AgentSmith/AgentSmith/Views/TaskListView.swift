@@ -885,6 +885,7 @@ private struct TaskRowRunningLayout: View {
             }
             HStack(spacing: 6) {
                 TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
+                TaskAcceptanceProgressChip(task: task, density: density)
                 TaskRowRunningLayoutScheduledRuns(task: task, viewModel: viewModel)
                 Spacer(minLength: 4)
                 TaskStepGlyphStrip(steps: task.steps)
@@ -1072,6 +1073,7 @@ private struct TaskRowMetadataLine: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             TaskCostChip(taskID: task.id, density: density, viewModel: viewModel)
+            TaskAcceptanceProgressChip(task: task, density: density)
             // Applied here rather than inside the chip: the HStack has to see the negative
             // priority to know this is what gives way first.
             TaskElapsedText(completedAt: task.completedAt, elapsedDisplay: task.elapsedDisplayString)
@@ -1406,6 +1408,34 @@ private struct TaskCostChip: View {
             })
             .buttonStyle(.plain)
             .help("Show cost breakdown")
+        }
+    }
+}
+
+/// "3/5": how many of the task's acceptance criteria are settled (accepted or waived), so a row
+/// says how close the task is without opening it. Counted by `CriterionTally` against the CURRENT
+/// criteria — the same answer Task Detail and the top bar give — so it can't read "4/3". Absent for
+/// a task with no criteria and for a template (it is never judged). Not on compact rows: their
+/// columns are sized to fit the sidebar exactly.
+private struct TaskAcceptanceProgressChip: View {
+    let task: AgentTask
+    let density: TaskRowDensity
+
+    var body: some View {
+        if !task.acceptanceCriteria.isEmpty, !task.isTemplate {
+            let tally = task.acceptanceTally
+            HStack(spacing: 2) {
+                Image(systemName: "checklist")
+                    .imageScale(.small)
+                Text("\(tally.settled)/\(tally.total)")
+                    .monospacedDigit()
+            }
+            .font(density == .compact ? .caption2 : .caption)
+            .foregroundStyle(.secondary)
+            .fixedSize()
+            .help("Acceptance: \(tally.summaryText)")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Acceptance: \(tally.summaryText)")
         }
     }
 }
