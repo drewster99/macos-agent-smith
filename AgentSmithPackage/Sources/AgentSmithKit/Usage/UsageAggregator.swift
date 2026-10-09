@@ -57,8 +57,7 @@ public struct UsageAggregator: Sendable {
             // from an aggregate `Σinput − Σcache` clamp. On heterogeneous/older records the
             // aggregate could clamp to 0 while per-record cost was nonzero, so the token count
             // and the input cost disagreed. Clamped ≥ 0 per record keeps them consistent.
-            let uncachedInput = max(0, record.inputTokens - record.cacheReadTokens - record.cacheWriteTokens)
-            totalUncachedInputTokens += uncachedInput
+            totalUncachedInputTokens += record.uncachedInputTokens
             totalLatencyMs += record.latencyMs
             totalToolCalls += record.toolCallCount ?? 0
             totalToolExecutionMs += record.totalToolExecutionMs ?? 0
@@ -70,21 +69,14 @@ public struct UsageAggregator: Sendable {
             maxOutputTokens = max(maxOutputTokens, record.outputTokens)
             maxLatencyMs = max(maxLatencyMs, record.latencyMs)
 
-            // Cost — computed per-category so the summary carries a breakdown,
-            // not just a total. Same math as ModelPricing.estimatedCost(for:) but
-            // split into four accumulators.
+            // Cost per category, so the summary carries a breakdown and not just a total.
             if let pricing = pricingLookup(record.providerID, record.modelID) {
-                let rates = pricing.effectiveRates(totalInputTokens: record.inputTokens)
-                let iCost = Double(uncachedInput) * (rates.input ?? 0)
-                let oCost = Double(record.outputTokens) * (rates.output ?? 0)
-                let crCost = Double(record.cacheReadTokens) * (rates.cacheRead ?? 0)
-                let cwCost = Double(record.cacheWriteTokens) * (rates.cacheWrite ?? 0)
-                inputCostUSD += iCost
-                outputCostUSD += oCost
-                cacheReadCostUSD += crCost
-                cacheWriteCostUSD += cwCost
-                let callCost = iCost + oCost + crCost + cwCost
-                maxCostUSD = max(maxCostUSD, callCost)
+                let cost = record.costBreakdown(pricing: pricing)
+                inputCostUSD += cost.input
+                outputCostUSD += cost.output
+                cacheReadCostUSD += cost.cacheRead
+                cacheWriteCostUSD += cost.cacheWrite
+                maxCostUSD = max(maxCostUSD, cost.total)
             } else {
                 unpricedCallCount += 1
             }

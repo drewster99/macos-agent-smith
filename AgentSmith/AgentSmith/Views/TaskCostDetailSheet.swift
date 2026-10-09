@@ -257,14 +257,7 @@ struct TaskCostDetailSheet: View {
     }
 
     private func computeTurnCost(_ record: UsageRecord) -> Double {
-        guard let providerID = record.providerID else { return 0 }
-        guard let pricing = aggregator.pricingLookup(providerID, record.modelID) else { return 0 }
-        let rates = pricing.effectiveRates(totalInputTokens: record.inputTokens)
-        let uncached = max(0, record.inputTokens - record.cacheReadTokens - record.cacheWriteTokens)
-        return Double(uncached) * (rates.input ?? 0)
-             + Double(record.outputTokens) * (rates.output ?? 0)
-             + Double(record.cacheReadTokens) * (rates.cacheRead ?? 0)
-             + Double(record.cacheWriteTokens) * (rates.cacheWrite ?? 0)
+        UsageRecord.cost(of: record, pricingLookup: aggregator.pricingLookup) ?? 0
     }
 
     private func computeTurnRows(_ turns: [UsageRecord]) -> [TurnRow] {

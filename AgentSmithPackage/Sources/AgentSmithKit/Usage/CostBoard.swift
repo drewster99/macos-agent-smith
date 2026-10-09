@@ -436,22 +436,14 @@ public actor CostBoard {
         Self.cost(of: record, pricingLookup: pricingLookup)
     }
 
-    /// Same per-record cost formula `UsageAggregator.summarize` uses, distilled
-    /// to a single Double. Cache-aware: cached input is subtracted from the
-    /// billable input bucket before applying the uncached rate. Static so a fold running on
-    /// `UsageStore`'s executor can apply it without reaching back into this actor.
+    /// The shared per-record formula (`UsageRecord.cost(of:pricingLookup:)`), with an unpriced
+    /// record contributing nothing to a total. Static so a fold running on `UsageStore`'s executor
+    /// can apply it without reaching back into this actor.
     private static func cost(
         of record: UsageRecord,
         pricingLookup: @Sendable (String?, String) -> ModelPricing?
     ) -> Double {
-        guard let pricing = pricingLookup(record.providerID, record.modelID) else { return 0 }
-        let rates = pricing.effectiveRates(totalInputTokens: record.inputTokens)
-        let uncachedInput = max(0, record.inputTokens - record.cacheReadTokens - record.cacheWriteTokens)
-        let i = Double(uncachedInput) * (rates.input ?? 0)
-        let o = Double(record.outputTokens) * (rates.output ?? 0)
-        let cr = Double(record.cacheReadTokens) * (rates.cacheRead ?? 0)
-        let cw = Double(record.cacheWriteTokens) * (rates.cacheWrite ?? 0)
-        return i + o + cr + cw
+        UsageRecord.cost(of: record, pricingLookup: pricingLookup) ?? 0
     }
 
     /// Aggregates cost across all records inside `interval` (inclusive at both ends, like

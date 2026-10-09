@@ -3051,22 +3051,14 @@ final class AppViewModel {
     }
 
     /// Estimates the total cost of a set of usage records using current pricing.
-    /// Used by the PDF exporter, which computes from its own fresh fetch. Applies the
-    /// same formula as `CostBoard.costOf` — the two must not diverge, or an exported
-    /// document and the on-screen chip would disagree about the same task.
+    /// Used by the PDF exporter, which computes from its own fresh fetch, through the same
+    /// per-record formula as the cost board — else an exported document and the on-screen chip
+    /// would disagree about the same task. Unpriced records contribute nothing.
     func estimatedCost(from records: [UsageRecord]) -> Double {
         let lookup = shared.pricingLookup
-        var total: Double = 0
-        for r in records {
-            guard let pricing = lookup(r.providerID, r.modelID) else { continue }
-            let rates = pricing.effectiveRates(totalInputTokens: r.inputTokens)
-            let uncachedInput = max(0, r.inputTokens - r.cacheReadTokens - r.cacheWriteTokens)
-            total += Double(uncachedInput) * (rates.input ?? 0)
-            total += Double(r.outputTokens) * (rates.output ?? 0)
-            total += Double(r.cacheReadTokens) * (rates.cacheRead ?? 0)
-            total += Double(r.cacheWriteTokens) * (rates.cacheWrite ?? 0)
+        return records.reduce(0) { total, record in
+            total + (UsageRecord.cost(of: record, pricingLookup: lookup) ?? 0)
         }
-        return total
     }
 
     /// Total token counts (input / output / cacheRead / cacheWrite) for a task — used by
