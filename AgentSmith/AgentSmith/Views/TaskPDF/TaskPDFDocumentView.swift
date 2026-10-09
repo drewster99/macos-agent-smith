@@ -46,6 +46,14 @@ struct TaskPDFDocumentView: View {
         if options.description, let capabilities = task.renderedRequiredCapabilitiesForPeople() {
             blocks.append(contentsOf: sectionBlocks(title: "Required Capabilities", body: capabilities))
         }
+        // One paragraph per item, so a long list breaks between items, never through one.
+        if options.acceptanceCriteria, !task.acceptanceCriteria.isEmpty {
+            blocks.append(contentsOf: sectionBlocks(title: "Acceptance Criteria", body: task.acceptanceParagraphsForPeople().joined(separator: "\n\n")))
+        }
+        let stepParagraphs = task.activeStepParagraphsForPeople()
+        if options.steps, !stepParagraphs.isEmpty {
+            blocks.append(contentsOf: sectionBlocks(title: "Steps", body: stepParagraphs.joined(separator: "\n\n")))
+        }
         if options.summary, let summary = task.summary, !summary.isEmpty {
             blocks.append(contentsOf: sectionBlocks(title: "Summary", body: summary))
         }

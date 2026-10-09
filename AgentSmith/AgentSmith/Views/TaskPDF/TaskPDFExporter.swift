@@ -14,6 +14,10 @@ struct TaskPDFFieldOptions: Equatable {
     var description: Bool
     var summary: Bool
     var result: Bool
+    /// Each acceptance criterion and its latest verdict.
+    var acceptanceCriteria: Bool
+    /// The step plan (removed steps left out) and each step's status.
+    var steps: Bool
 
     /// Everything on — used by the task-list "PDF" context-menu action, which is not
     /// configurable and shows start/finish, request, result, tokens, cost, and summary.
@@ -24,7 +28,9 @@ struct TaskPDFFieldOptions: Equatable {
         cost: true,
         description: true,
         summary: true,
-        result: true
+        result: true,
+        acceptanceCriteria: true,
+        steps: true
     )
 
     /// Minimal preset used by the in-transcript "Task Completed" banner: task title,
@@ -36,7 +42,9 @@ struct TaskPDFFieldOptions: Equatable {
         cost: false,
         description: true,
         summary: false,
-        result: true
+        result: true,
+        acceptanceCriteria: false,
+        steps: false
     )
 }
 

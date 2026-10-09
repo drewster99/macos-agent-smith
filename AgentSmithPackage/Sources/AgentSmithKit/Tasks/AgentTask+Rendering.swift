@@ -52,6 +52,35 @@ extension AgentTask {
         return requiredCapabilities.map { "- \($0.renderedLine)" }.joined(separator: "\n")
     }
 
+    /// One paragraph per acceptance criterion, for people (the PDF export): its name and its latest
+    /// verdict — accepted, waived, rejected or an error, with its reason — or "not yet judged".
+    public func acceptanceParagraphsForPeople() -> [String] {
+        acceptanceCriteria.map { criterion in
+            guard let latest = validation?.latestVerdict(for: criterion.id) else {
+                return "**\(criterion.name)** — not yet judged"
+            }
+            let detail = latest.verdict.detailText.map { ": \($0)" } ?? ""
+            return "**\(criterion.name)** — \(latest.verdict.displayLabel)\(detail)"
+        }
+    }
+
+    /// One paragraph per step still in the plan, in order, with its status — for people (the PDF
+    /// export). Removed steps are left out: they were never part of the work.
+    public func activeStepParagraphsForPeople() -> [String] {
+        steps.filter(\.isActive).enumerated().map { index, step in
+            let status: String
+            switch step.status {
+            case .pending: status = "Pending"
+            case .inProgress: status = "In progress"
+            case .completed: status = "Done"
+            case .skipped: status = "Skipped"
+            case .removed: status = "Removed"
+            }
+            let note = step.note.flatMap { $0.isEmpty ? nil : " — \($0)" } ?? ""
+            return "\(index + 1). \(step.text) *(\(status))*\(note)"
+        }
+    }
+
     /// The preconditions as a bullet list, each with its id (what `report_precondition_unmet` and
     /// `set_preconditions` take) and who checks it. Nil when the task has none.
     public func renderedPreconditions() -> String? {
