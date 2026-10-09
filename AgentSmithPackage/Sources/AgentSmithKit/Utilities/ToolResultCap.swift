@@ -21,12 +21,13 @@ enum ToolResultCap {
     ///
     /// Note the reader must page it: a `file_read` result runs back through THIS same cap, so a
     /// whole-file read would re-truncate; small `maxLines` ranges (or grep) stay under the limit.
-    static func cap(_ result: String) -> String {
+    /// `directory` is where overflow files go — `overflowDirectory` everywhere but tests.
+    static func cap(_ result: String, overflowingInto directory: URL = overflowDirectory) -> String {
         guard result.count > maxCharacters else { return result }
         let preview = String(result.prefix(previewCharacters))
         do {
-            try FileManager.default.createDirectory(at: overflowDirectory, withIntermediateDirectories: true)
-            let fileURL = overflowDirectory.appendingPathComponent("tool-output-\(UUID().uuidString).txt")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fileURL = directory.appendingPathComponent("tool-output-\(UUID().uuidString).txt")
             try result.write(to: fileURL, atomically: true, encoding: .utf8)
             return """
                 [HEAD PREVIEW — first \(previewCharacters) of \(result.count) characters. This is NOT the full output.]
