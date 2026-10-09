@@ -8,15 +8,6 @@ import SemanticSearch
 @Suite("Worker spawn scoping")
 struct WorkerSpawnScopingTests {
 
-    private func waitUntil(timeout: Duration = .seconds(15), _ predicate: @Sendable () async -> Bool) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while ContinuousClock.now < deadline {
-            if await predicate() { return true }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
-        return await predicate()
-    }
-
     /// A runtime whose Security Agent approves only `file_read` when asked to scope a worker.
     private func makeRuntime() -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
