@@ -2277,7 +2277,7 @@ private struct TaskDetailLinkedTaskButton: View {
 
 /// When the task happened, and when it is due to happen again.
 ///
-/// Owns the `scheduledWakes` read: it republishes whenever any wake in the session is scheduled
+/// Owns the `scheduledWakes` read: it republishes whenever any wake in any open session is scheduled
 /// or fires, and keeping it here means that invalidates two rows rather than the whole grid.
 private struct TaskDetailTimingRows: View {
     let task: AgentTask
@@ -2309,7 +2309,7 @@ private struct TaskDetailTimingRows: View {
 
 /// When the task is due to run next.
 ///
-/// Separate because `scheduledWakes` republishes whenever ANY wake in the session is scheduled or
+/// Separate because `scheduledWakes` republishes whenever ANY wake in any open session is scheduled or
 /// fires, and the rows above it are immutable history that should not redraw for that.
 private struct TaskDetailNextRunRows: View {
     let task: AgentTask

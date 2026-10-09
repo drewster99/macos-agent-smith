@@ -56,7 +56,8 @@ struct TaskCostDetailSheet: View {
         let maxTokens: String
         let contextSize: String
         let calls: Int
-        let cost: Double
+        /// Nil when none of the group's turns could be priced — shown as unpriced, never as $0.
+        let cost: Double?
     }
 
     struct TurnRow: Equatable {
@@ -209,18 +210,21 @@ struct TaskCostDetailSheet: View {
 
     private func computeConfigRows(_ records: [UsageRecord]) -> [ConfigRow] {
         var order: [String] = []
-        var byKey: [String: (model: String, roles: Set<AgentRole>, calls: Int, cost: Double, temperature: String, maxTokens: Int, contextSize: Int)] = [:]
+        var byKey: [String: (model: String, roles: Set<AgentRole>, calls: Int, cost: Double?, temperature: String, maxTokens: Int, contextSize: Int)] = [:]
         
         for record in records {
             guard let c = record.configuration else { continue }
             let key = configContentKey(c)
             if byKey[key] == nil {
-                byKey[key] = (c.model, [], 0, 0, c.temperature.map { String(format: "%.1f", $0) } ?? "—", c.maxTokens, c.contextWindowSize)
+                byKey[key] = (c.model, [], 0, nil, c.temperature.map { String(format: "%.1f", $0) } ?? "—", c.maxTokens, c.contextWindowSize)
                 order.append(key)
             }
             byKey[key]?.roles.insert(record.agentRole)
             byKey[key]?.calls += 1
-            byKey[key]?.cost += computeTurnCost(record) ?? 0
+            if let turnCost = computeTurnCost(record) {
+                let priced = byKey[key]?.cost ?? 0
+                byKey[key]?.cost = priced + turnCost
+            }
         }
         
         return order.compactMap { key in
@@ -564,7 +568,7 @@ struct ConfigurationSection: View {
                                 .monospacedDigit().frame(width: 70, alignment: .trailing)
                             Text("\(row.calls)")
                                 .monospacedDigit().frame(width: 54, alignment: .trailing)
-                            Text(formatCostAligned(row.cost))
+                            Text(row.cost.map(formatCostAligned) ?? "—")
                                 .font(.system(.caption, design: .monospaced)).frame(width: 72, alignment: .trailing)
                         }
                         .font(.caption)

@@ -448,9 +448,11 @@ final class SharedAppState {
     /// Records `sessionID`'s current wakes and rebuilds the cross-session index.
     /// Every task row in every window reads `pendingWakesByTaskID`, so it is only reassigned when it
     /// actually changes — a re-read of an unchanged wake list must not redraw them all.
+    /// Rebuilds even when `wakes` is unchanged: the rebuild is also what drops wakes that have come
+    /// due, and an unchanged list would otherwise leave a "Next: <past time>" chip standing. The
+    /// rebuilt index is compared before it is assigned, so views don't churn.
     func publishScheduledWakes(_ wakes: [ScheduledWake], forSession sessionID: UUID) {
-        guard scheduledWakesBySession[sessionID] != wakes else { return }
-        scheduledWakesBySession[sessionID] = wakes
+        if scheduledWakesBySession[sessionID] != wakes { scheduledWakesBySession[sessionID] = wakes }
         rebuildPendingWakeIndex()
     }
 

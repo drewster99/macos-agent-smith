@@ -3,7 +3,7 @@ import AppKit
 import AgentSmithKit
 
 /// Which task elements a generated PDF should include. The four metadata flags and the
-/// three body flags map 1:1 to the toggles offered in the task-detail "Save as PDF" sheet.
+/// five body flags map 1:1 to the toggles offered in the task-detail "Save as PDF" sheet.
 /// `title` and the completion date/time are always rendered (they identify the document),
 /// so they are not represented here.
 struct TaskPDFFieldOptions: Equatable {
@@ -20,7 +20,8 @@ struct TaskPDFFieldOptions: Equatable {
     var steps: Bool
 
     /// Everything on — used by the task-list "PDF" context-menu action, which is not
-    /// configurable and shows start/finish, request, result, tokens, cost, and summary.
+    /// configurable and shows start/finish, request, result, acceptance criteria, steps, tokens,
+    /// cost, and summary.
     static let full = TaskPDFFieldOptions(
         startTime: true,
         elapsedTime: true,

@@ -58,11 +58,10 @@ private struct BuiltInProvidersSection: View {
         }
     }
 
-    /// Shown by default: those flagged `popular`, any whose API key has been entered, and any
-    /// CONFIGURED without a key. The last clause exists for the ChatGPT-subscription provider, which
-    /// has no API key by design: judged on a key alone it would be permanently invisible — hidden
-    /// before sign-in because it isn't "popular", and still hidden after, because signing in writes
-    /// nothing to the Keychain. Sorted alphabetically either way.
+    /// Shown by default: those flagged `popular`, any whose API key has been entered, and the
+    /// ChatGPT-subscription provider always. That one has no API key by design: judged on a key alone
+    /// it would be permanently invisible — hidden before sign-in because it isn't "popular", and
+    /// still hidden after, because signing in writes nothing to the Keychain. Sorted alphabetically.
     private var visiblePresets: [BuiltInProviderPreset] {
         let popular = Set(BuiltInProviders.popular.map(\.id))
         let providerIDsWithKeys = keyPresence.providerIDsWithKeys(in: llmKit)

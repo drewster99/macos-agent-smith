@@ -445,10 +445,13 @@ struct ChannelLogView: View, Equatable {
     /// Grows the visible window, pinned so the rows the user is reading do not move.
     ///
     /// Growing inserts older rows ABOVE the current top, which would otherwise shove the content
-    /// downward. Re-anchors to the previously-first RENDERED row once the new rows exist (a row folded
-    /// into its parent has no view to anchor to).
+    /// downward. Re-anchors, once the new rows exist, to the row at the top of the viewport — the one
+    /// the scroll view reports, which by construction has a view (a row folded into its parent, or
+    /// one that renders as nothing, has none to anchor to). Before the user has scrolled there is no
+    /// reported row; the first unsuppressed message stands in.
     private func loadEarlier() {
-        let anchorID = cachedVisibleMessages.first { !shouldSuppress($0, toolRequestIDs: toolRequestIDs) }?.id
+        let anchorID = scrollPosition.viewID(type: ChannelMessage.ID.self)
+            ?? cachedVisibleMessages.first { !shouldSuppress($0, toolRequestIDs: toolRequestIDs) }?.id
         maxVisibleCount = min(messages.count, maxVisibleCount + Self.windowGrowStep)
         guard let anchorID else { return }
         DispatchQueue.main.async { scrollPosition.scrollTo(id: anchorID, anchor: .top) }
@@ -498,8 +501,8 @@ struct ChannelLogView: View, Equatable {
                 // silently killing auto-scroll. last.id changes on every appended message.
                 //
                 // It watches the raw last id — the append signal, which changes even when the new
-                // message folds into an existing row — but SCROLLS to the last RENDERED id, the
-                // only one with a view to reach.
+                // message folds into an existing row — and scrolls to the bottom EDGE, since the
+                // newest message may have no view of its own to scroll to.
                 .onChange(of: messages.last?.id) {
                     guard autoScrollEnabled else { return }
                     scrollToLatest()
@@ -1943,6 +1946,9 @@ private struct ChannelLogMessageList: View {
                 }
             }
         }
+        // Makes each row a scroll target, so `ScrollPosition.viewID` reports the row actually at the
+        // top of the viewport — what "Load earlier" re-anchors to.
+        .scrollTargetLayout()
         .padding(8)
     }
 }

@@ -1464,7 +1464,11 @@ final class AppViewModel {
         }
         // Nil = no live Smith (mid-restart) — keep the last known list rather than
         // flashing the timers panel empty for the teardown window.
-        if let wakes = await runtime.currentScheduledWakes() {
+        let wakes = await runtime.currentScheduledWakes()
+        // A Stop (or restart) during that await replaced or cleared the runtime; its answer is
+        // about wakes that will never fire, and must not overwrite what the Stop set.
+        guard self.runtime === runtime else { return }
+        if let wakes {
             activeTimers = wakes
         }
     }

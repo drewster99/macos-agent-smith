@@ -231,6 +231,10 @@ struct TaskOverlayBar: View {
 /// the transcript below to it. The card's own tear-off and dismiss buttons sit inside the label and
 /// take their own clicks, as a sidebar row's nested buttons do. The torn-off window shows the plain
 /// `TaskOverlayColumn`: it has no transcript to switch.
+///
+/// To VoiceOver the card is one button named by its task, with tear-off and dismiss as named
+/// actions: controls nested in a button's label aren't reachable on their own, and the label would
+/// otherwise be read as every step and criterion run together.
 private struct SelectableTaskOverlayColumn: View {
     let task: AgentTask
     let entry: AppViewModel.TaskOverlayEntry
@@ -247,6 +251,10 @@ private struct SelectableTaskOverlayColumn: View {
         .buttonStyle(.plain)
         .background(isSelected ? AppColors.selectedTaskBackground : Color.clear)
         .help("Show this task's transcript")
+        .accessibilityLabel(task.title)
+        .accessibilityHint("Shows this task's transcript")
+        .accessibilityAction(named: "Open in its own window", onTearOff)
+        .accessibilityAction(named: "Remove from the bar", onDismiss)
     }
 }
 

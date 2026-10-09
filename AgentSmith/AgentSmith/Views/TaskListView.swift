@@ -1457,8 +1457,8 @@ private struct TaskCostChip: View {
 /// "3/5": how many of the task's acceptance criteria are settled (accepted or waived), so a row
 /// says how close the task is without opening it. Counted by `CriterionTally` against the CURRENT
 /// criteria — the same answer Task Detail and the top bar give — so it can't read "4/3". Absent for
-/// a task with no criteria and for a template (it is never judged). Not on compact rows: their
-/// columns are sized to fit the sidebar exactly.
+/// a task with no criteria and for a template (it is never judged). On compact rows too, in the
+/// smaller font, and it gives way first when the row runs out of room.
 private struct TaskAcceptanceProgressChip: View {
     let task: AgentTask
     let density: TaskRowDensity
@@ -1485,7 +1485,7 @@ private struct TaskAcceptanceProgressChip: View {
 /// The row's lifecycle glyph, or a clock when the task has wakes queued.
 ///
 /// Extracted so the read of `viewModel.pendingWakesByTaskID` — which changes whenever ANY wake in
-/// the session is scheduled or fires — invalidates an 18pt image rather than every row in the
+/// any open session is scheduled or fires — invalidates an 18pt image rather than every row in the
 /// sidebar. `status` is passed by value rather than the whole task, so the glyph is inert to title,
 /// description, step and update churn on its own task.
 ///
