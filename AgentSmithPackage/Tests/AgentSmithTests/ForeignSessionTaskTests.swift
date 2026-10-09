@@ -274,4 +274,60 @@ struct ForeignSessionTaskTests {
 
         await runtime.stopAll()
     }
+
+    @Test("Backstop: no worker is spawned for a task from another session, and the refusal is shown")
+    func spawnRefusesForeignTask() async throws {
+        let (runtime, store, _) = try await startedRuntime()
+        let foreign = AgentTask(title: "Foreign", description: "d", sessionID: UUID())
+        await store.restore([foreign])
+        #expect(await runtime.spawnBrown(for: foreign) == nil)
+        #expect(await runtime.liveWorkerID(taskID: foreign.id) == nil)
+        #expect(await runtime.channel.allMessages().contains {
+            $0.kind == .taskLifecycle && $0.severity == .error && $0.metadata?["taskID"] == .string(foreign.id.uuidString)
+        })
+        await runtime.stopAll()
+    }
+
+    @Test("Assigning a validator model releases only this session's parked tasks")
+    func validationReleaseSkipsForeignTasks() async throws {
+        let store = TaskStore()
+        let home = UUID()
+        await store.setSessionID(home)
+        func parked(_ title: String, sessionID: UUID) -> AgentTask {
+            var task = AgentTask(title: title, description: "d", status: .awaitingReview, sessionID: sessionID)
+            task.validationBlockedReason = "no validator model"
+            return task
+        }
+        let own = parked("Mine", sessionID: home)
+        let foreign = parked("Foreign", sessionID: UUID())
+        await store.restore([own, foreign])
+        #expect(await store.releaseValidationBlockedTasks() == [own.id])
+        #expect(await store.task(id: foreign.id)?.status == .awaitingReview)
+    }
+
+    @Test("A clone of a worker-written task is still reviewed as worker-written")
+    func cloneKeepsWorkerProvenance() async throws {
+        let store = TaskStore()
+        let home = UUID()
+        await store.setSessionID(home)
+        let root = await store.addTask(title: "Root", description: "The user's request.")
+        guard case .created(let child) = await store.addChildTask(
+            coordinatorTaskID: root.id, limit: 10, title: "Child", description: "worker-written",
+            descriptionAttachments: [], acceptanceCriteria: [], steps: [], requiredCapabilities: [],
+            relevantContext: .none
+        ) else { Issue.record("child not created"); return }
+        var foreignChild = child
+        foreignChild.sessionID = UUID()
+        await store.restore([foreignChild])
+
+        let clone = await store.cloneForRunInThisSession(source: foreignChild)
+        #expect(clone.coordinatorTaskID == nil, "the clone reports to no coordinator")
+        #expect(clone.clonedFromTaskID == foreignChild.id)
+        let expected = TaskIntentProvenance.workerAuthored(originatingTask: .init(id: root.id, title: "Root", description: "The user's request."))
+        #expect(await store.intentProvenance(of: clone) == expected)
+
+        let userTask = AgentTask(title: "User's", description: "d", sessionID: UUID())
+        await store.restore([userTask])
+        #expect(await store.intentProvenance(of: store.cloneForRunInThisSession(source: userTask)) == .requester)
+    }
 }

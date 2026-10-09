@@ -130,7 +130,12 @@ struct TaskPreconditionTests {
 
     @Test("The login-shell lookup finds a real command and passes the name as data, never as script")
     func loginShellLookup() async {
-        #expect(await PreconditionEnvironment.lookUpInLoginShell("ls") != .notFound)
+        // `.found`, not merely "not .notFound": a timeout or a shell failure must fail this test.
+        guard case .found(let path) = await PreconditionEnvironment.lookUpInLoginShell("ls") else {
+            Issue.record("ls was not found through the login shell")
+            return
+        }
+        #expect(path.hasSuffix("/ls"))
         #expect(await PreconditionEnvironment.lookUpInLoginShell("definitely-not-a-command-\(UUID().uuidString.prefix(8))") == .notFound)
         let marker = FileManager.default.temporaryDirectory.appendingPathComponent("precondition-injection-\(UUID().uuidString)")
         _ = await PreconditionEnvironment.lookUpInLoginShell("x; touch \(marker.path)")

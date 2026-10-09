@@ -725,6 +725,9 @@ public actor OrchestrationRuntime {
     /// not re-checked, the re-check stops. Any other failure is tried again at the next interval.
     private func recheckWorkerOutage(generation: Int, every interval: TimeInterval) async {
         var attempt = 0
+        // A probe failure that says nothing about the account is retried quietly — but said once,
+        // so a re-check that can never succeed doesn't leave the user looking at "on hold" forever.
+        var reportedProbeFailure = false
         while true {
             guard let outage = workerOutage, workerOutageGeneration == generation,
                   let reason = outage.kind.recheckWaitReason else { return }
@@ -741,8 +744,12 @@ public actor OrchestrationRuntime {
             let modelEpoch = ProviderWaitBoard.modelEpoch(on: providerWaitBoard, of: .brown)
             switch await ProviderWaitBoard.sleep(on: providerWaitBoard, for: interval, wait, modelEpochAtAttempt: modelEpoch) {
             case .elapsed: break
-            // A model change releases the outage itself (`setProviders`); a cancel is the release or Stop.
-            case .wokenForModelChange, .cancelled: return
+            // A model change normally releases the outage itself (`setProviders`), and the checks
+            // below then end this loop. If the new model's provider couldn't be built, nothing
+            // released it — so keep re-checking rather than leave the outage standing unwatched.
+            case .wokenForModelChange: continue
+            // A cancel is the release or Stop.
+            case .cancelled: return
             }
             guard !Task.isCancelled, !stopRequested, supervisor.currentGeneration != nil,
                   workerOutageGeneration == generation,
@@ -763,13 +770,29 @@ public actor OrchestrationRuntime {
                                               kind: kind, detail: detail, since: current.since)
                 workerOutage = replaced
                 await postProviderOutageAdvisory(replaced)
-                // Each held task was told how it would resume; that has changed.
+                // Each held task was told how it would resume; that has changed. Re-checked per task:
+                // a Play or release during these awaits restarts the tasks, and a stale "Still on
+                // hold" note on a running task would be wrong.
                 for held in startsHeldByWorkerOutage {
+                    guard workerOutageGeneration == generation, workerOutage?.kind == kind else { return }
                     await taskStore.addUpdate(id: held.taskID, message: "Still on hold: the worker's model '\(replaced.modelID)' now can't be used because \(kind.displayDescription). \(kind.resumeSentence)")
                 }
                 guard kind.recheckInterval != nil else { return }
             case .failed(let error):
                 stopLogger.notice("worker outage re-check failed, retrying at the next interval: \(error.localizedDescription, privacy: .public)")
+                if !reportedProbeFailure {
+                    reportedProbeFailure = true
+                    await channel.post(ChannelMessage(
+                        sender: .system,
+                        recipient: .user,
+                        content: "Re-checking whether the worker's model '\(current.modelID)' can be used again failed: \(error.localizedDescription). It will keep re-checking; tasks stay on hold until it can.",
+                        metadata: [
+                            "messageKind": .kind(.advisory),
+                            "severity": .severity(.warning),
+                            "agentRole": .string(AgentRole.brown.rawValue)
+                        ]
+                    ))
+                }
             }
         }
     }
@@ -971,7 +994,7 @@ public actor OrchestrationRuntime {
         let lead = switch reason {
         case .modelChanged: "The worker's model was changed."
         case .userRetried: "Retrying the worker's model '\(outage.modelID)' because you started a task."
-        case .recheckSucceeded: "The worker's model '\(outage.modelID)' can be used again — its hourly re-check succeeded."
+        case .recheckSucceeded: "The worker's model '\(outage.modelID)' can be used again — its periodic re-check succeeded."
         }
         await channel.post(ChannelMessage(
             sender: .system,
@@ -5336,9 +5359,13 @@ public actor OrchestrationRuntime {
             return .refused("Task '\(task.title)' could not be blocked in its current state.")
         }
         // Not awaited: this runs inside the worker's own tool call, and ending it waits for its run
-        // loop to unwind — which it does as soon as this call returns (the tool parks it).
-        lifecycleQueue.schedule { [weak self] in
-            _ = await self?.performTerminateAgent(id: agentID)
+        // loop to unwind — which it does as soon as this call returns (the tool parks it). Through
+        // `terminateAgent`, not the queue item directly: the slot frees only once the worker is
+        // gone, AFTER the terminal-status drain already ran and found none free, and
+        // `terminateAgent` is what drains the queue at that moment. Without it a task queued behind
+        // this one stayed pending.
+        Task { [weak self] in
+            _ = await self?.terminateAgent(id: agentID)
         }
         return .blocked(reason: failure.reason)
     }
@@ -5359,6 +5386,18 @@ public actor OrchestrationRuntime {
         // spawn path paid a full scoping LLM call before registration failed at the end.
         guard supervisor.currentGeneration != nil else { return nil }
         guard !aborted else { return nil }
+        // #15 backstop: every start path clones a task from another session before it gets here, so
+        // reaching this with one is a bug in a caller — refuse rather than split its transcript
+        // across two sessions' logs, and say so.
+        guard await !taskStore.originatesElsewhere(task) else {
+            stopLogger.error("spawnBrown refused — task \(task.id.uuidString, privacy: .public) belongs to another session")
+            await channel.post(ChannelMessage(
+                sender: .system,
+                content: "No worker was started for \"\(task.title)\": it belongs to another session. Run it with run_task to start a copy here.",
+                metadata: ["messageKind": .kind(.taskLifecycle), "taskID": .string(task.id.uuidString), "severity": .severity(.error)]
+            ))
+            return nil
+        }
 
         // Worker pool policy: a worker is 1:1 with its task, so a respawn for the same
         // task always cycles that task's existing worker (punch-list respawns, run_task

@@ -197,6 +197,36 @@ struct EmptySentinelArgumentTests {
         #expect(result.succeeded, "\(field) as an empty placeholder was rejected: \(result.output)" as Comment)
     }
 
+    /// `preconditions` gates whether the task runs at all, so a value in the wrong shape is refused
+    /// rather than dropped: dropping it would create the task ungated, and it could start at once.
+    @Test("create_task refuses preconditions that aren't an array, and creates nothing",
+          arguments: [
+            AnyCodable.dictionary(["kind": .string("file_exists"), "value": .string("/tmp/x")]),
+            AnyCodable.string("[{\"kind\":\"file_exists\",\"value\":\"/tmp/x\"}]"),
+            AnyCodable.bool(true)
+          ])
+    func createTaskRefusesMalformedPreconditions(value: AnyCodable) async throws {
+        let store = TaskStore()
+        let result = try await CreateTaskTool().execute(
+            arguments: ["title": .string("Gated"), "description": .string("d"), "preconditions": value],
+            context: TestToolContext.make(taskStore: store)
+        )
+        #expect(!result.succeeded, "\(value) was accepted: \(result.output)" as Comment)
+        #expect(await store.allTasks().isEmpty)
+    }
+
+    @Test("create_task reads placeholder preconditions (null, blank, []) as none",
+          arguments: [AnyCodable.null, AnyCodable.string(" "), AnyCodable.array([])])
+    func createTaskPlaceholderPreconditions(value: AnyCodable) async throws {
+        let store = TaskStore()
+        let result = try await CreateTaskTool().execute(
+            arguments: ["title": .string("Ungated"), "description": .string("d"), "preconditions": value],
+            context: TestToolContext.make(taskStore: store)
+        )
+        #expect(result.succeeded, "\(value) was refused: \(result.output)" as Comment)
+        #expect(await store.allTasks().first?.preconditions.isEmpty == true)
+    }
+
     /// A real value must still be honored — the reader must not have turned the field off.
     @Test("A real scheduled_run_at still schedules")
     func realScheduledRunAtStillWorks() async throws {

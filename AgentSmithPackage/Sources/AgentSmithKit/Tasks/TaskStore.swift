@@ -769,8 +769,13 @@ public actor TaskStore {
 
     /// Who wrote `task`'s text, for the Security Agent (`TaskIntentProvenance`). Walks the
     /// `coordinatorTaskID` chain across every disposition — a coordinator may already be archived.
+    /// A clone (#15) has no coordinator of its own; it answers as the task it was cloned from.
     public func intentProvenance(of task: AgentTask) async -> TaskIntentProvenance {
-        guard var next = task.coordinatorTaskID else { return .requester }
+        guard var next = task.coordinatorTaskID else {
+            guard let sourceID = task.clonedFromTaskID, sourceID != task.id,
+                  let source = await taskAnyDisposition(id: sourceID) else { return .requester }
+            return await intentProvenance(of: source)
+        }
         var visited: Set<UUID> = [task.id]
         while visited.insert(next).inserted {
             guard let coordinator = await taskAnyDisposition(id: next) else { break }
@@ -1431,6 +1436,7 @@ public actor TaskStore {
             },
             isTemplate: false,
             parentTaskID: source.parentTaskID,
+            clonedFromTaskID: source.id,
             sessionID: sessionID,
             templateInputDefinitions: source.templateInputDefinitions,
             templateInputValues: source.templateInputValues,
@@ -3057,7 +3063,10 @@ public actor TaskStore {
     public func releaseValidationBlockedTasks() -> [UUID] {
         var released: [UUID] = []
         var transitions: [TaskStatusTransition] = []
-        for (id, task) in tasks where task.validationBlockedReason != nil && task.status == .awaitingReview {
+        // A task from another session isn't validated here (#15): its verdicts would land in this
+        // session's transcript.
+        for (id, task) in tasks where task.validationBlockedReason != nil && task.status == .awaitingReview
+            && !task.belongsToAnotherSession(than: sessionID) {
             var updated = task
             // `changeStatus` clears the config marker on the way out of the park.
             guard case .applied(let transition) = changeStatus(of: &updated, to: .validating, cause: .validationReleased) else { continue }

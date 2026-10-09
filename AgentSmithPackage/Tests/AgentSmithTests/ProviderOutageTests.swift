@@ -578,6 +578,25 @@ struct ProviderOutageTests {
         }
     }
 
+    @Test("a re-check that fails for a non-account reason keeps re-checking, and says so once")
+    func recheckFailureToldOnce() async throws {
+        let provider = CreditsProvider()
+        try await withRuntime(brownProvider: provider, capacity: 1) { runtime, store in
+            await runtime.setWorkerOutageRecheckIntervalForTesting(0.1)
+            let task = await store.addTask(title: "Needs credits", description: "d")
+            await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
+            try await settle(runtime, stopLines: 1)
+            provider.refuse(with: LLMProviderError.httpError(statusCode: 400, body: #"{"error":"bad request"}"#))
+            let callsBefore = provider.callCount
+
+            let probedAgain = try await waitUntil { provider.callCount >= callsBefore + 3 }
+            #expect(probedAgain, "a non-account failure stopped the re-check")
+            #expect(await runtime.workerProviderOutage()?.kind == .creditsDepleted(userCanResolve: true), "the outage stands")
+            let told = await runtime.channel.allMessages().filter { $0.kind == .advisory && $0.content.contains("keep re-checking") }
+            #expect(told.count == 1, "the failure must be told exactly once, not on every re-check")
+        }
+    }
+
     /// Every call is refused with HTTP 402, as Ollama answers for a model outside the plan.
     private struct PaymentRequiredProvider: LLMProvider {
         func send(messages: [LLMMessage], tools: [LLMToolDefinition], overrides: LLMCallOverrides) async throws -> LLMResponse {

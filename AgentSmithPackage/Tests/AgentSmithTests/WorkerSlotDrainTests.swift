@@ -128,4 +128,32 @@ struct WorkerSlotDrainTests {
 
         await runtime.stopAll()
     }
+
+    @Test("A worker's precondition report frees its slot for the queued task behind it")
+    func preconditionReportAdvancesQueueAtCapacityOne() async throws {
+        let runtime = makeRuntime()
+        await configureForCompletionWithoutValidators(runtime)
+        await runtime.setWorkerCapacity(1)
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        let attested = TaskPrecondition(kind: .workerAttested(statement: "the fixture exists"), origin: .smith)
+        let taskA = await store.addTask(title: "A", description: "d", preconditions: [attested])
+        await runtime.restartForNewTask(taskID: taskA.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let workerForA = try #require(await runtime.liveWorkerID(taskID: taskA.id))
+
+        let taskB = await store.addTask(title: "B", description: "d")
+        #expect(await store.task(id: taskB.id)?.status == .pending)
+
+        let outcome = await runtime.handlePreconditionReport(from: workerForA, preconditionID: attested.id, evidence: "no fixture")
+        guard case .blocked = outcome else { Issue.record("the report must block A: \(outcome)"); return }
+
+        let advanced = await waitUntil(timeout: .seconds(15)) {
+            await store.task(id: taskB.id)?.status != .pending
+        }
+        #expect(advanced, "B stayed .pending after A's worker was ended by its precondition report")
+
+        await runtime.stopAll()
+    }
 }

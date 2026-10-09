@@ -413,8 +413,21 @@ public struct CreateTaskTool: AgentTool {
         }
 
         // Set in the write that creates the task, like the gate: a new task can start at once.
+        // A placeholder (null, blank, []) is no preconditions; anything else that isn't an array is
+        // refused, never dropped — dropping it would create the task UNGATED, and it can start at once.
         var preconditions: [TaskPrecondition] = []
-        if let rawPreconditions = ToolArguments.optionalArray(arguments, "preconditions") {
+        let rawPreconditions: [AnyCodable]?
+        switch arguments["preconditions"] {
+        case nil, .null?:
+            rawPreconditions = nil
+        case .string(let text)? where text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+            rawPreconditions = nil
+        case .array(let items)?:
+            rawPreconditions = items.isEmpty ? nil : items
+        case .some:
+            return .failure("Task NOT created — preconditions must be an array of {kind, value} objects.")
+        }
+        if let rawPreconditions {
             switch PreconditionArguments.parse(.array(rawPreconditions), origin: .smith, existing: []) {
             case .success(let parsed): preconditions = parsed
             case .failure(let problem): return .failure("Task NOT created — \(problem.message)")

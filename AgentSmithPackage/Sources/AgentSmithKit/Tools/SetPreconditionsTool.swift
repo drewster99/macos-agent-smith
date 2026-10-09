@@ -4,7 +4,8 @@ import Foundation
 /// worth running. Replace-all: pass the complete list, keeping an existing precondition by its `id`.
 ///
 /// Gated like the acceptance contract (`Status.isValidationContractEditable`), and the store refuses
-/// to change a user's precondition or the one the task is blocked on (`TaskStore.setPreconditions`).
+/// to change a precondition the user set (`TaskStore.setPreconditions`). Smith may correct one it
+/// set itself — including the one the task is blocked on, which is how a wrong one gets fixed.
 public struct SetPreconditionsTool: AgentTool {
     public let name = "set_preconditions"
     public let toolDescription = """

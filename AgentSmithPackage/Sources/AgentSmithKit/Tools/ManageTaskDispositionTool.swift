@@ -62,8 +62,10 @@ struct ManageTaskDispositionTool: AgentTool {
             if success {
                 return .success("Task '\(task.title)' archived.")
             }
-            return .failure(task.status.isInProgress
-                ? "Cannot archive task '\(task.title)' — it is currently \(task.status.rawValue), and a task in progress can't be archived."
+            // Re-read: the status may have moved during the await, and the reason must be the current one.
+            let now = await context.taskStore.taskAnyDisposition(id: taskID) ?? task
+            return .failure(now.status.isInProgress
+                ? "Cannot archive task '\(task.title)' — it is currently \(now.status.rawValue), and a task in progress can't be archived."
                 : "Task '\(task.title)' could not be archived — the change couldn't be saved.")
 
         case "delete":
@@ -71,8 +73,9 @@ struct ManageTaskDispositionTool: AgentTool {
             if success {
                 return .success("Task '\(task.title)' moved to Recently Deleted.")
             }
-            return .failure(task.status.isInProgress
-                ? "Cannot delete task '\(task.title)' — it is currently \(task.status.rawValue), and a task in progress can't be deleted."
+            let now = await context.taskStore.taskAnyDisposition(id: taskID) ?? task
+            return .failure(now.status.isInProgress
+                ? "Cannot delete task '\(task.title)' — it is currently \(now.status.rawValue), and a task in progress can't be deleted."
                 : "Task '\(task.title)' could not be moved to Recently Deleted — the change couldn't be saved.")
 
         case "unarchive":
