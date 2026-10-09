@@ -197,35 +197,68 @@ struct ChannelTimestamp: View {
     }
 }
 
-/// Discriminator for the channel log's banner family. Each raw value matches the
-/// `messageKind` string set by the runtime when posting `ChannelMessage`.
+/// Discriminator for the channel log's banner family, mapped from the message's typed
+/// `ChannelMessageKind` (`init?(_:)`) — never from its wire string, so a renamed wire string can't
+/// silently stop a banner from rendering.
 ///
 /// Replaces a 16-branch `else if case .string(let kind) = message.metadata?["messageKind"]`
-/// ladder. Adding a new banner kind now means adding a case here AND a switch arm in
-/// `bannerView(for:in:)` — both fail at compile time if forgotten, instead of silently
+/// ladder. Adding a new banner kind now means adding a case here, its arm in `init?(_:)`, AND a
+/// switch arm in `bannerView(for:in:)` — all fail at compile time if forgotten, instead of silently
 /// falling through to a generic `MessageRow`.
-private enum ChannelBannerKind: String {
+private enum ChannelBannerKind {
     /// Lifecycle chrome — gated by the user's "Show agent restart chrome" preference.
-    case restartChrome = "restart_chrome"
+    case restartChrome
     /// Timer activity — duplicate of a task's Scheduled chip when paired; otherwise rendered.
-    case timerActivity = "timer_activity"
+    case timerActivity
     /// Internal Smith guidance — not rendered.
-    case taskUpdateGuidance = "task_update_guidance"
-    case taskAcknowledged = "task_acknowledged"
-    case taskContinuing = "task_continuing"
-    case taskComplete = "task_complete"
-    case changesRequested = "changes_requested"
-    case taskActionScheduled = "task_action_scheduled"
-    case taskCreated = "task_created"
-    case taskUpdate = "task_update"
-    case taskCompleted = "task_completed"
-    case taskSummarized = "task_summarized"
-    case memorySaved = "memory_saved"
-    case memorySearched = "memory_searched"
+    case taskUpdateGuidance
+    case taskAcknowledged
+    case taskContinuing
+    case taskComplete
+    case changesRequested
+    case taskActionScheduled
+    case taskCreated
+    case taskUpdate
+    case taskCompleted
+    case taskSummarized
+    case memorySaved
+    case memorySearched
     /// An MCP server failed to load — rendered as a clickable banner that opens Settings.
-    case mcpFailed = "mcp_status"
+    case mcpFailed
     /// The user paused/stopped/deleted/retried a task — a system row with an inline control.
-    case userTaskAction = "user_task_action"
+    case userTaskAction
+
+    /// The banner a message of `kind` renders as, or nil for a plain row. Exhaustive over every
+    /// message kind on purpose: a new kind must be placed here, not defaulted.
+    init?(_ kind: ChannelMessageKind) {
+        switch kind {
+        case .restartChrome: self = .restartChrome
+        case .timerActivity: self = .timerActivity
+        case .taskUpdateGuidance: self = .taskUpdateGuidance
+        case .taskAcknowledged: self = .taskAcknowledged
+        case .taskContinuing: self = .taskContinuing
+        case .taskComplete: self = .taskComplete
+        case .changesRequested: self = .changesRequested
+        case .taskActionScheduled: self = .taskActionScheduled
+        case .taskCreated: self = .taskCreated
+        case .taskUpdate: self = .taskUpdate
+        case .taskCompleted: self = .taskCompleted
+        case .taskSummarized: self = .taskSummarized
+        case .memorySaved: self = .memorySaved
+        case .memorySearched: self = .memorySearched
+        case .mcpStatus: self = .mcpFailed
+        case .userTaskAction: self = .userTaskAction
+        case .toolRequest, .toolOutput, .securityReview, .toolScopeReview, .taskFailed, .taskQueuedAtCapacity,
+             .taskLifecycle, .scheduledRunDeferred, .scheduledRunRefused, .taskAmendment, .taskWatchFired,
+             .taskWatchRefused, .criteriaUpdated, .validationReport, .validationFailed, .validationEscalation,
+             .validationDeadlock, .taskBlocked, .userAcceptanceRequested, .submissionAutoRejected,
+             .validationBlocked, .validationBlockedWorkerNotice, .orchestratorMessage, .helpRequested,
+             .helpProvided, .inboundUserMessage, .contextManagement, .preparing, .agentLifecycle,
+             .agentRecovery, .rateLimit, .statusUpdate, .advisory, .modelSwitched, .childTaskOutcome,
+             .agentOnline, .validationWaitNotice, .validationOverride, .taskInterrupted:
+            return nil
+        }
+    }
 }
 
 /// A `.userTaskAction` notice: the ordinary message row, plus the inline control the notice's
@@ -633,9 +666,8 @@ private struct ChannelMessageBanner: View {
     @Binding var selectedImageAttachment: Attachment?
     
     var body: some View {
-        // ChannelBannerKind is a display-side enum over the same wire strings, so it maps from
-        // the kind's rawValue. It deliberately covers only the kinds that render as banners.
-        let kind = message.kind.flatMap { ChannelBannerKind(rawValue: $0.rawValue) }
+        // Mapped from the typed kind; only the kinds that render as banners have a case.
+        let kind = message.kind.flatMap(ChannelBannerKind.init)
         switch kind {
         case .taskUpdateGuidance:
             // Internal coordination messages — never rendered.
