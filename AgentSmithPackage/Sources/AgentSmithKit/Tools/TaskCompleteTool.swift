@@ -112,10 +112,18 @@ public struct TaskCompleteTool: AgentTool {
         // Ingest everything the worker placed in its evidence directory (text reports, logs,
         // screenshots it copied in) so those artifacts become clickable result attachments. This is
         // the ONE place the sweep runs — `setResult` replaces the attachment list each submission,
-        // so a resubmission re-sweeps without accumulating. Runs LAST and dedups by filename, so a
+        // so a resubmission re-sweeps without accumulating. Runs LAST and skips a file already
+        // attached (same bytes, either form of its name), so a
         // file the worker already attached — explicitly or through a deliverable, which is how
         // workers usually cite their evidence file — is not ingested a second time.
-        attachments += await Self.ingestEvidenceDirectory(context: context, existing: attachments)
+        let evidenceSweep = await Self.ingestEvidenceDirectory(context: context, existing: attachments)
+        attachments += evidenceSweep.attachments
+        let evidenceProblemNote = evidenceSweep.problems.isEmpty ? "" : """
+
+
+            Evidence not attached:
+            \(evidenceSweep.problems.map { "- \($0)" }.joined(separator: "\n"))
+            """
 
         // Store result on the task (survives restarts) and hand it to acceptance
         // validation — the evaluator system, not Smith, judges submissions now. The
@@ -131,6 +139,7 @@ public struct TaskCompleteTool: AgentTool {
         if let commentary {
             message += "\n\nCommentary:\n\(commentary)"
         }
+        message += evidenceProblemNote
         await context.post(ChannelMessage(
             sender: .agent(context.agentRole),
             content: message,
@@ -144,10 +153,10 @@ public struct TaskCompleteTool: AgentTool {
         await context.beginTaskValidation(task.id)
 
         if attachments.isEmpty {
-            return .success("Task submitted. Acceptance validation will judge it against the task's criteria; you'll receive a punch list if changes are needed. Wait.")
+            return .success("Task submitted. Acceptance validation will judge it against the task's criteria; you'll receive a punch list if changes are needed. Wait.\(evidenceProblemNote)")
         }
         let names = attachments.map { $0.filename }.joined(separator: ", ")
-        return .success("Task submitted with \(attachments.count) attachment(s) (\(names)). Acceptance validation will judge it; you'll receive a punch list if changes are needed. Wait.")
+        return .success("Task submitted with \(attachments.count) attachment(s) (\(names)). Acceptance validation will judge it; you'll receive a punch list if changes are needed. Wait.\(evidenceProblemNote)")
     }
 
     /// Parses the optional `deliverables` argument into structured `ResultItem`s. Each entry
@@ -195,59 +204,182 @@ public struct TaskCompleteTool: AgentTool {
         return items
     }
 
-    /// Ingests every regular file in the task's evidence directory as an attachment, skipping any
-    /// already in `existing` (the worker's explicit and deliverable attachments) — the same file,
-    /// judged by name and bytes — so nothing is doubled. Best-effort: a file that can't be read or
-    /// ingested is skipped. Returns the newly ingested attachments. No-op when the task has no
-    /// evidence directory.
-    static func ingestEvidenceDirectory(context: ToolContext, existing: [Attachment]) async -> [Attachment] {
-        guard let evidenceDir = context.taskEvidenceDirectory else { return [] }
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(at: evidenceDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
-            return []
+    /// What the evidence sweep did: the files it attached, and every piece of evidence it could not
+    /// attach and why. A problem is reported to the worker and the transcript, never dropped.
+    struct EvidenceSweep: Sendable, Equatable {
+        var attachments: [Attachment] = []
+        var problems: [String] = []
+    }
+
+    /// The most evidence files one submission attaches. A worker that dumped a build tree into its
+    /// evidence directory would otherwise attach thousands of files to one message.
+    static let maxEvidenceFiles = 200
+
+    /// Ingests every regular file under the task's evidence directory — subfolders included, each
+    /// named by its path relative to the directory (`screenshots/1.png`) — as an attachment, skipping
+    /// any already in `existing` (the worker's explicit and deliverable attachments): the same file,
+    /// judged by bytes and either form of its name, so nothing is doubled. Hidden files and package
+    /// contents are skipped; a symbolic link is never followed. Every file that is evidence but
+    /// could not be attached — unreadable, too large, over the file limit, a link, a failed
+    /// ingest — is reported in `problems`. No evidence directory, or one that was never created, is
+    /// an empty sweep.
+    static func ingestEvidenceDirectory(context: ToolContext, existing: [Attachment]) async -> EvidenceSweep {
+        guard let evidenceDir = context.taskEvidenceDirectory else { return EvidenceSweep() }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: evidenceDir.path, isDirectory: &isDirectory) else { return EvidenceSweep() }
+        var sweep = EvidenceSweep()
+        guard isDirectory.boolValue else {
+            sweep.problems.append("the evidence path \(evidenceDir.path) is not a directory")
+            return sweep
         }
-        var ingested: [Attachment] = []
-        for fileURL in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            let isRegular = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
-            guard isRegular else { continue }
-            let filename = fileURL.lastPathComponent
-            guard let data = try? Data(contentsOf: fileURL) else { continue }
+        // The canonical path, so it shares the enumerated paths' prefix even when the directory is
+        // reached through a symlink: the enumerator reports `/private/var/…` for a `/var/…` temp
+        // directory. Not `resolvingSymlinksInPath()`, which maps `/private/var` BACK to `/var`.
+        guard let canonicalPath = realpath(evidenceDir.path, nil) else {
+            sweep.problems.append("the evidence directory \(evidenceDir.path) could not be resolved: \(String(cString: strerror(errno)))")
+            return sweep
+        }
+        let root = URL(fileURLWithPath: String(cString: canonicalPath), isDirectory: true)
+        free(canonicalPath)
+
+        let listing = await Self.offCooperativePool { Self.listEvidenceFiles(under: root) }
+        var candidates = listing.files
+        sweep.problems += listing.problems
+
+        candidates.sort { $0.relativePath < $1.relativePath }
+        if candidates.count > maxEvidenceFiles {
+            let skipped = candidates[maxEvidenceFiles...].map(\.relativePath)
+            sweep.problems.append("\(skipped.count) file(s) over the \(maxEvidenceFiles)-file limit were not attached: \(skipped.prefix(10).joined(separator: ", "))\(skipped.count > 10 ? ", …" : "")")
+            candidates.removeLast(candidates.count - maxEvidenceFiles)
+        }
+
+        // The same per-message cap explicit attachments are held to, counted across everything this
+        // submission carries — checked against each file's size BEFORE reading it.
+        let byteCap = await context.maxAttachmentBytesPerMessage()
+        var totalBytes = existing.reduce(0) { $0 + $1.byteCount }
+        for candidate in candidates {
+            let mimeType = AttachmentRegistry.mimeType(forPathExtension: candidate.url.pathExtension)
+            // An explicit attachment of `sub/report.md` is named `report.md`; only those can be this
+            // same file (each path is visited once, so nothing this sweep attached can be).
+            let bareName = (candidate.relativePath as NSString).lastPathComponent
+            let namesakes = existing.filter { $0.filename == candidate.relativePath || $0.filename == bareName }
+            let overCap = byteCap > 0 && totalBytes + candidate.size > byteCap
+            // Over the cap, the file is read only when it may already be attached — then it needs no room.
+            if overCap && namesakes.isEmpty {
+                sweep.problems.append(Self.overCapProblem(candidate.relativePath, byteCap: byteCap))
+                continue
+            }
+            let data: Data
+            switch await Self.offCooperativePool({ Result { try Data(contentsOf: candidate.url) } }) {
+            case .success(let read):
+                data = read
+            case .failure(let error):
+                sweep.problems.append("\(candidate.relativePath): \(error.localizedDescription)")
+                continue
+            }
             // Skip only the SAME file already attached, not merely one sharing its name: a distinct
             // file that happens to share a name with another attachment is still evidence.
-            guard !(existing + ingested).contains(where: { Self.isSameFile($0, filename: filename, data: data) }) else { continue }
-            let mimeType = Self.mimeType(forExtension: fileURL.pathExtension)
-            let (attachment, _) = await context.ingestAttachmentData(data, filename, mimeType)
-            if let attachment {
-                ingested.append(attachment)
+            if Self.isAttached(data, mimeType: mimeType, amongNamesakes: namesakes) { continue }
+            if overCap {
+                sweep.problems.append(Self.overCapProblem(candidate.relativePath, byteCap: byteCap))
+                continue
+            }
+            let (attachment, error) = await context.ingestAttachmentData(data, candidate.relativePath, mimeType)
+            guard let attachment else {
+                sweep.problems.append("\(candidate.relativePath): \(error ?? "could not be attached")")
+                continue
+            }
+            sweep.attachments.append(attachment)
+            totalBytes += attachment.byteCount
+        }
+        return sweep
+    }
+
+    private static func overCapProblem(_ relativePath: String, byteCap: Int) -> String {
+        String(format: "%@: not attached — it would take this submission over the %.1f MB attachment limit", relativePath, Double(byteCap) / 1_048_576.0)
+    }
+
+    /// Runs blocking file-system work (a directory walk, a file read) on a dispatch queue rather
+    /// than the cooperative pool, which every task in the process shares and must keep moving.
+    private static func offCooperativePool<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: work())
             }
         }
-        return ingested
     }
 
-    /// Whether `attachment` is this file: same name and same bytes. An attachment resolved by id may
-    /// not have its bytes loaded; its recorded size stands in for them then.
-    private static func isSameFile(_ attachment: Attachment, filename: String, data: Data) -> Bool {
-        guard attachment.filename == filename else { return false }
-        if let attachedData = attachment.data { return attachedData == data }
-        return attachment.byteCount == data.count
+    /// One file the evidence sweep may attach.
+    private struct EvidenceFile: Sendable {
+        let relativePath: String
+        let url: URL
+        let size: Int
     }
 
-    /// Minimal extension→MIME mapping for evidence ingest. Unknown types fall back to
-    /// `application/octet-stream`; the attachment layer sniffs images/PDFs from the bytes regardless.
-    static func mimeType(forExtension ext: String) -> String {
-        switch ext.lowercased() {
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "gif": return "image/gif"
-        case "webp": return "image/webp"
-        case "heic": return "image/heic"
-        case "pdf": return "application/pdf"
-        case "md", "markdown", "txt", "log": return "text/plain"
-        case "json": return "application/json"
-        case "html", "htm": return "text/html"
-        case "csv": return "text/csv"
-        default: return "application/octet-stream"
+    /// Every regular file under `root` (resolved), each with its path relative to `root`, plus a
+    /// problem line for every entry that is evidence but can't be attached as a file. Synchronous —
+    /// `FileManager`'s directory walk cannot run in an async context — and called off the
+    /// cooperative pool (`offCooperativePool`).
+    private static func listEvidenceFiles(under root: URL) -> (files: [EvidenceFile], problems: [String]) {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .fileSizeKey]
+        let rootComponentCount = root.pathComponents.count
+        func relativePath(of url: URL) -> String {
+            url.pathComponents.dropFirst(rootComponentCount).joined(separator: "/")
         }
+        let enumerationProblems = EvidenceEnumerationProblems()
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { url, error in
+                enumerationProblems.append("\(relativePath(of: url)): \(error.localizedDescription)")
+                return true
+            }
+        ) else {
+            return ([], ["the evidence directory \(root.path) could not be read"])
+        }
+        var files: [EvidenceFile] = []
+        var problems: [String] = []
+        for case let url as URL in enumerator {
+            let relativePath = relativePath(of: url)
+            let values: URLResourceValues
+            do {
+                values = try url.resourceValues(forKeys: Set(keys))
+            } catch {
+                problems.append("\(relativePath): \(error.localizedDescription)")
+                continue
+            }
+            if values.isSymbolicLink == true {
+                problems.append("\(relativePath): a symbolic link, not followed")
+                continue
+            }
+            if values.isPackage == true {
+                problems.append("\(relativePath): a package (bundle), not attached — zip it to include it")
+                continue
+            }
+            if values.isDirectory == true { continue }
+            guard values.isRegularFile == true else {
+                problems.append("\(relativePath): not a regular file")
+                continue
+            }
+            files.append(EvidenceFile(relativePath: relativePath, url: url, size: values.fileSize ?? 0))
+        }
+        return (files, problems + enumerationProblems.all)
+    }
+
+    /// Whether a file with these bytes is already among `namesakes` — the attachments named like it.
+    /// An attachment's stored bytes went through `AttachmentSanitizer` at ingest, which re-encodes
+    /// images and rewrites PDFs, so the file matches either its raw or its sanitized bytes. An
+    /// attachment resolved by id may not have its bytes loaded; its recorded size stands in then.
+    private static func isAttached(_ data: Data, mimeType: String, amongNamesakes namesakes: [Attachment]) -> Bool {
+        guard !namesakes.isEmpty else { return false }
+        func matches(_ candidate: Data) -> Bool {
+            namesakes.contains { attachment in
+                if let attached = attachment.data { return attached == candidate }
+                return attachment.byteCount == candidate.count
+            }
+        }
+        return matches(data) || matches(AttachmentSanitizer.sanitize(data, mimeType: mimeType))
     }
 
     /// Posts a system channel message recording an auto-rejection of an empty/missing-result
@@ -263,4 +395,12 @@ public struct TaskCompleteTool: AgentTool {
             ]
         ))
     }
+}
+
+/// Collects the errors `FileManager.enumerator` reports through its handler while one evidence
+/// sweep walks the directory. The handler runs synchronously inside that walk, on the sweep's own
+/// thread, so it is never shared.
+private final class EvidenceEnumerationProblems {
+    private(set) var all: [String] = []
+    func append(_ problem: String) { all.append(problem) }
 }
