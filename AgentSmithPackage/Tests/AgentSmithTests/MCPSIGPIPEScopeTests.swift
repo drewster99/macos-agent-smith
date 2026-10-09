@@ -34,7 +34,7 @@ struct MCPSIGPIPEScopeTests {
     @Test("A write to a pipe whose reader is gone fails with EPIPE instead of raising SIGPIPE")
     func writeEndReportsEPIPE() throws {
         var fds: [Int32] = [0, 0]
-        #expect(pipe(&fds) == 0)
+        try #require(pipe(&fds) == 0, "a failed pipe() leaves fds at 0 — closing those would close stdin")
         let readFD = fds[0], writeFD = fds[1]
         defer { close(writeFD) }
         try MCPClientHost.disableSIGPIPE(onWriteFD: writeFD)
