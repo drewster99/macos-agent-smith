@@ -43,7 +43,6 @@ struct InspectorView: View {
                 }
             }
         }
-        .inspectorColumnWidth(min: 280, ideal: 320, max: 460)
         .task {
             viewModel.inspectorLive.activate()
             // Refresh boundaries on every view appear so an app that was idle past

@@ -26,3 +26,9 @@ When an agent terminates, its conversation history, LLM turn records, and Securi
 - **Don't add `.onChange` watchers (or a `@State` cache rebuilt by them) back to these views.** A new input to a card or the Live section is read inside `InspectorLiveState.computeOutputs()`; the tracking picks it up automatically.
 - The transcript is re-bucketed by role only when `AppViewModel.messagesRevision` moves (`FilteredTranscriptProvider.revision`, bumped on every `messages` write) — the one expensive step.
 - The 10 s aging rebuild stays: Live rows age out on a clock, which no observed value reports.
+
+### The inspector is an app-owned pane, never SwiftUI's `.inspector` (2026-10-10)
+
+The main window's inspector is `InspectorSidePane` — `NavigationSplitView`, a draggable divider, and `InspectorView` at 280–460 pt in an `HStack` — not the `.inspector(isPresented:)` column. On macOS 26/27 a `NavigationSplitView` with the native inspector column can enter an endless window-layout loop when the inspector opens (AppKit's split view and SwiftUI's column hosting views never agree on the column widths), hanging the app until AppKit throws "more Update Constraints in Window passes than there are views in the window". Measured 2026-10-10: it looped with no app state changing, with the toolbar removed, with explicit `navigationSplitViewColumnWidth`, and with constant minimum/ideal size answers; the app-owned pane settled in one pass. It is a known platform bug (Apple forums thread 801818). Don't reintroduce `.inspector` without re-running that test in a narrow (≈1243 pt) window with the sidebar open.
+
+Related rule: no view may size itself from a size it measured in an earlier pass (`onGeometryChange` → `@State` → `frame`). `TranscriptVerticalSplit` did, and its reported minimum height changed on every layout pass; it now resolves pane heights inside a `Layout` and reports a constant minimum.

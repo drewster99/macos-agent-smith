@@ -80,14 +80,12 @@ final class InspectorLiveState {
     func activate() {
         guard !isActive else { return }
         isActive = true
-        // Deferred, not synchronous: this fires from `InspectorView`'s `.task`, which runs in the
-        // SAME runloop turn AppKit is animating the `.inspector()` column open. A synchronous
-        // `rebuild()` here populates three role cards + the summarizer card + every live task/tool
-        // row in one shot — a large subtree landing in the ScrollView mid-animation — and macOS
-        // 26's window layout has been observed to hard-hang on that burst with "The window has been
-        // marked as needing another Update Constraints in Window pass, but it has already had more
-        // Update Constraints in Window passes than there are views in the window." `scheduleRebuild`
-        // is the same one-tick deferral every later rebuild already goes through.
+        // Deferred, not synchronous: this fires from `InspectorView`'s `.task`, in the same runloop
+        // turn the pane appears, and a synchronous `rebuild()` lands every card and live row in one
+        // burst during that layout. `scheduleRebuild` is the same one-tick deferral every later
+        // rebuild goes through. (This was added 2026-10-01 as the fix for the inspector-open hang;
+        // it wasn't — the hang was the native `.inspector` column's layout loop, see
+        // `InspectorSidePane`. The deferral is kept because it is still the cheaper order.)
         scheduleRebuild()
         // The Live rows age out on a clock, and nothing observable changes when a row simply
         // gets older, so they need a timed rebuild as well.

@@ -376,19 +376,20 @@ private struct MainViewChrome: ViewModifier {
     let onOpenOrchestrationOverrides: () -> Void
 
     func body(content: Content) -> some View {
-        content
-            .inspector(isPresented: $viewModel.showInspector) {
-                InspectorView(viewModel: viewModel)
-            }
-            .toolbar {
-                MainViewToolbar(
-                    viewModel: viewModel, shared: shared,
-                    onStart: onStart, onResetAndRestart: onResetAndRestart,
-                    onOpenMemoryBrowser: onOpenMemoryBrowser, onNewTask: onNewTask,
-                    onOpenOrchestrationOverrides: onOpenOrchestrationOverrides
-                )
-            }
-            .navigationTitle(viewModel.session.name)
+        InspectorSidePane(isPresented: viewModel.showInspector, content: {
+            content
+        }, inspector: {
+            InspectorView(viewModel: viewModel)
+        })
+        .toolbar {
+            MainViewToolbar(
+                viewModel: viewModel, shared: shared,
+                onStart: onStart, onResetAndRestart: onResetAndRestart,
+                onOpenMemoryBrowser: onOpenMemoryBrowser, onNewTask: onNewTask,
+                onOpenOrchestrationOverrides: onOpenOrchestrationOverrides
+            )
+        }
+        .navigationTitle(viewModel.session.name)
     }
 }
 

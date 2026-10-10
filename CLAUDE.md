@@ -188,7 +188,7 @@ JSON files only (no database) under `~/Library/Application Support/AgentSmith/`.
 
 ### Inspector
 
-Terminated agents are archived (`terminatedAgentArchive` / `archivedEvaluationRecords`) — keep that surface intact. Every LLM call site that records usage emits an `LLMCallEvent`. Inspector display state is derived in the model (`InspectorLiveState`); views watch nothing — don't add `.onChange` watchers back, and never write outputs inside `computeOutputs()`. The role-keyed surfaces are still current; the instance-keyed "Now" panel is planned, not built. Details: `docs/claude/inspector.md`.
+Terminated agents are archived (`terminatedAgentArchive` / `archivedEvaluationRecords`) — keep that surface intact. Every LLM call site that records usage emits an `LLMCallEvent`. Inspector display state is derived in the model (`InspectorLiveState`); views watch nothing — don't add `.onChange` watchers back, and never write outputs inside `computeOutputs()`. The role-keyed surfaces are still current; the instance-keyed "Now" panel is planned, not built. The window's inspector is the app-owned `InspectorSidePane`, never SwiftUI's `.inspector` column (a platform layout-loop bug hung the app). Details: `docs/claude/inspector.md`.
 
 ### Task state events and task watches
 
