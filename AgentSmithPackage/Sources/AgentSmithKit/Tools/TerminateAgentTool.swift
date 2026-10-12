@@ -43,7 +43,12 @@ struct TerminateAgentTool: AgentTool {
         // Resolve the worker FROM the task. Looking up `.brown` by role returns the oldest
         // live worker, which is arbitrary once several tasks are running concurrently.
         guard let workerID = await context.workerIDForTask(taskID) else {
-            return .failure("No live Brown worker is assigned to task \(taskIDString) (\"\(task.title)\"). It may have already been terminated.")
+            // A task parked on `request_help` keeps its in-progress status with no worker. Name the
+            // tool that ends it; otherwise the caller has no stop left to try.
+            let next = task.status == .awaitingHelp
+                ? " The task is still awaitingHelp with no worker to stop — to end it, call `update_task` with status: failed."
+                : " It may have already been terminated."
+            return .failure("No live Brown worker is assigned to task \(taskIDString) (\"\(task.title)\").\(next)")
         }
 
         // Defense in depth: the production resolver only returns live Brown workers, but keep

@@ -1,6 +1,8 @@
 # Smith bulk stop/delete — fix plan
 
-Status: PLANNED (2026-10-11). Nothing implemented yet.
+Status: F1, F2, F3-A, F5 ✅ implemented 2026-10-11 (tests in `SmithBulkStopTests.swift`; each failed before
+its fix). F3-B and F4 await the user's decision. F3-A also corrected Smith's prompt, which wrongly
+said only completed/failed tasks can be archived or deleted (the store refuses only in-progress ones).
 
 ## Incident
 
@@ -44,7 +46,7 @@ What happened (verified):
 
 ## Fixes
 
-### F1 — Pre-clear Smith's task-management tools (user request)
+### F1 — Pre-clear Smith's task-management tools (user request) ✅
 
 Add to `autoApprovedToolsByRole[.smith]`: `manage_task_disposition`, `set_acceptance_criteria`,
 `set_preconditions`, `manage_steps`. All are gated by the store, act only on this session's tasks, and
@@ -55,7 +57,7 @@ tools are gated by `Status.isValidationContractEditable`. `save_memory` stays re
 - Test: extend `smithWorkerStopControlsArePreCleared`-style parameterized test for the four names
   (fails before, passes after).
 
-### F2 — `setTemplate` no-op must not be refused
+### F2 — `setTemplate` no-op must not be refused ✅
 
 In `TaskStore.setTemplate`, return success with no write when `isTemplate == task.isTemplate`, BEFORE
 the `isInProgress` guard. Then `update_task(status: failed, is_template: false)` on an `awaitingHelp`
@@ -66,7 +68,7 @@ sentinel. The defect is that a no-op flip gets refused.
   `status=failed, is_template=false` → succeeds, status `.failed`. Must fail before the fix.
 - Test: `setTemplate(isTemplate: true)` on an in-progress non-template task is still refused.
 
-### F3 — Stop the auto-start refill during a bulk stop
+### F3 — Stop the auto-start refill during a bulk stop (A ✅)
 
 Root cause: Smith stops running tasks first, and each freed slot pulls in a still-pending sibling.
 Options:
@@ -102,7 +104,7 @@ needs the user's explicit consent before implementation.** Size: M.
   reserved slot is freed and the status is consistent.
 - Test: `stopAll` during scoping → no worker is minted (existing guarantee preserved).
 
-### F5 — `terminate_agent` with no live worker on a parked task
+### F5 — `terminate_agent` with no live worker on a parked task ✅
 
 When there's no live worker and the task is `awaitingHelp`, the failure text should tell Smith what to
 do next: `update_task status=failed` (no worker to stop). The text is for the model only, and no

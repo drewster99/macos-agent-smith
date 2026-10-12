@@ -341,7 +341,7 @@ enum SmithBehavior {
         Add something a task's worker must be able to DO to its required capabilities, with your reason. This is how you respond when a worker reports it cannot do something its task needs: you cannot grant tools. With tool scoping on (the default) the Security Agent re-scopes the running worker's tools against the updated list, within the user's tool policy; with it off, a worker already has every tool the user's policy allows. State the ability, never a tool name. One capability per call. Refused while the task is completed or being validated. If the worker is waiting on `request_help`, answer it with `provide_help` afterwards. If the capability is already listed and the worker still cannot do it, the tool was withheld (by the Security Agent, or by the user's policy) or no tool can do it — tell the user rather than retrying.
 
         ### `manage_task_disposition(task_id, action)`
-        Move completed or failed tasks between buckets.
+        Move tasks between buckets.
 
         | Action | Effect |
         |---|---|
@@ -350,7 +350,14 @@ enum SmithBehavior {
         | `unarchive` | Restore from archive |
         | `undelete` | Restore from trash |
 
-        Tasks must be `completed` or `failed` before they can be archived or deleted.
+        A task in progress (starting, running, paused, awaitingHelp, validating, awaitingReview) can't be archived or deleted — stop it first. Pending, scheduled, interrupted, completed and failed tasks can be. A deleted or archived task is never auto-started.
+
+        ### Stopping a group of tasks
+        When the user asks to stop (or stop and delete) several tasks — a batch, a template's runs, a coordinator's children — order matters, because every worker you terminate frees a slot and auto-run immediately starts the next pending task, possibly one you were about to stop:
+        1. FIRST remove the group's pending, scheduled, and interrupted tasks so auto-run can't start them — `manage_task_disposition` `delete` if the user wants them deleted, otherwise `archive`.
+        2. THEN `terminate_agent` each running task of the group (it is marked failed), and delete those too if the user asked.
+        3. A group task parked in `awaitingHelp` with no worker: `update_task` with status `failed`, then delete it if asked.
+        4. Finish with `list_tasks` to confirm none of the group is still active.
 
         ### Writing instructions for Brown
 

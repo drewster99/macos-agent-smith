@@ -834,6 +834,10 @@ public actor TaskStore {
             guard var task = inLibrary ? (await templateLibrary?.template(id: id)) : localTask else {
                 return "Task not found: \(id.uuidString)"
             }
+            // Restating the current flag converts nothing, so there is nothing to refuse. Without
+            // this, `update_task(status: failed, is_template: false)` on a parked task was refused by
+            // the in-progress guard below, and the status change it carried never applied.
+            guard isTemplate != task.isTemplate else { return nil }
             guard !task.status.isInProgress else {
                 return "Task '\(task.title)' cannot be converted while it is \(task.status.rawValue). Stop or finish it first."
             }

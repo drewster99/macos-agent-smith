@@ -288,8 +288,8 @@ actor SecurityEvaluator {
     /// New tools are therefore evaluated until someone deliberately adds them, which is the safe
     /// direction for the mistake to run.
     ///
-    /// - `.smith` — its orchestration surface: messaging, task lifecycle, scheduling, read-only
-    ///   inspection, and its STOP controls (`terminate_agent`, `abort`). The stop controls are
+    /// - `.smith` — its orchestration surface: messaging, task lifecycle and management (including
+    ///   contract authoring and soft dispositions), scheduling, read-only inspection, and its STOP controls (`terminate_agent`, `abort`). The stop controls are
     ///   destructive to in-flight work, but stopping is the risk-reducing direction: a reviewer that
     ///   could delay or veto a stop would sit between the orchestrator and halting a misbehaving
     ///   worker. They stay recorded and visible like every other call. Deliberately EXCLUDES the open-world tools (`web_search`, `web_fetch`,
@@ -322,6 +322,15 @@ actor SecurityEvaluator {
                 "get_task_details",
                 "list_tasks",
                 "set_template_inputs",
+                // Contract authoring, store-gated by `Status.isValidationContractEditable`: reviewing
+                // them put a verdict between Smith and the plan of a task it owns.
+                "set_acceptance_criteria",
+                "set_preconditions",
+                "manage_steps",
+                // Moves a task between active / archived / Recently Deleted — every action is
+                // reversible, and the store refuses in-progress tasks. Reviewing it denied each delete
+                // of a user-requested bulk cleanup once, then approved the identical retry.
+                "manage_task_disposition",
 
                 "schedule_task_action",
                 "schedule_reminder",
