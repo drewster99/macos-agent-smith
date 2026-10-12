@@ -64,7 +64,16 @@ final class SerialChainedTaskQueue: Sendable {
     /// operation making the call. Queue items must call internal (unqueued)
     /// implementations directly; only outermost entry points enqueue.
     public func run<T: Sendable>(_ work: @escaping @Sendable () async -> T) async -> T {
-        let task: Task<T, Never> = lock.withLock { state in
+        await enqueue(work).value
+    }
+
+    /// `run(_:)` split in two: the operation is queued BEFORE this returns, synchronously, and the
+    /// caller awaits `.value` for its result. Use it when the caller must know its item is queued
+    /// before anything else runs on its executor: `run` is a nonisolated `async` function, so an
+    /// actor calling it gives up the actor before the item is queued. Same deadlock rule as `run`
+    /// for awaiting the result from inside a queue item.
+    public func enqueue<T: Sendable>(_ work: @escaping @Sendable () async -> T) -> Task<T, Never> {
+        lock.withLock { state in
             let prior = state.inflight
             let item = Task { [self] in
                 await prior?.value
@@ -79,7 +88,6 @@ final class SerialChainedTaskQueue: Sendable {
             state.inflight = Task { _ = await item.value }
             return item
         }
-        return await task.value
     }
 
     /// Returns once every previously-scheduled operation has completed.

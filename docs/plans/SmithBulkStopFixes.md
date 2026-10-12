@@ -1,7 +1,7 @@
 # Smith bulk stop/delete — fix plan
 
 Status: F1, F2, F3-A, F5 ✅ implemented 2026-10-11 (tests in `SmithBulkStopTests.swift`; each failed before
-its fix). F3-B ✅ implemented 2026-10-11 (user approved; see below). F4 awaits the user's decision. F3-A also corrected Smith's prompt, which wrongly
+its fix). F3-B ✅ implemented 2026-10-11 (user approved; see below). F4 ✅ implemented 2026-10-11 by a different design (below). F3-A also corrected Smith's prompt, which wrongly
 said only completed/failed tasks can be archived or deleted (the store refuses only in-progress ones).
 
 ## Incident
@@ -96,7 +96,21 @@ ordinary tasks Smith created and named that way.
 
 - Test (A): system-prompt content test asserting the ordering guidance is present.
 
-### F4 — Scoping outside the lifecycle queue (ROADMAP P2 item, promoted)
+### F4 — Scoping outside the lifecycle queue (ROADMAP P2 item, promoted) — ✅ by a different design
+
+**As built (2026-10-11):** the split below was REJECTED by the user ("we can't create races"): it
+leaves a half-started task visible to every other operation. Instead a stop INTERRUPTS a start that is
+choosing its tools: its scoping call is cancelled, the task goes back to pending (interrupted when the
+start was resuming an interrupted task, same rule as a capacity refusal), and it is started again
+through `restartForNewTask`, queued behind the stop. Every operation still runs alone on the lifecycle
+queue. Only stops interrupt (`terminateAgent`, `terminateTaskAgents`, a coordinator-ended child stop);
+a stop of the starting task itself waits, as before. The stop interrupts and enqueues in ONE actor turn
+(`SerialChainedTaskQueue.enqueue`, synchronous): `run` is a nonisolated async function and gives up the
+actor before it queues, which would let the retry jump ahead of the stop. A stop that arrives before
+the scoping call begins (MCP settle) cancels it before it starts. One that arrives after it ended waits
+for the short remainder. Tests: `StopInterruptsStartTests`.
+
+Original (rejected) plan, kept for the record:
 
 Per the ROADMAP note: spawn reserves its handle and slot under the queue, runs `scopeTools` outside it,
 then re-enters the queue to commit or roll back. On commit, re-check `aborted`, `stopRequested`, that

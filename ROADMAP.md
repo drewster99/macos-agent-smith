@@ -37,7 +37,7 @@ contributor.
 - Smith parallel tool execution (N serial security round-trips per multi-call turn) — M
 - Unify the three loop breakers that reset each other — M
 - Stringly-typed tool names (safety rosters can silently lose a renamed tool) — M
-- Scoping LLM call runs inside the lifecycle queue and serializes spawns — M
+- ✅ Scoping LLM call runs inside the lifecycle queue and serializes spawns — M. **Done 2026-10-11, differently than planned:** the reserve/scope-outside/commit split was rejected (user: "we can't create races" — a half-started task would be visible to every other operation). Instead a STOP interrupts a start that is choosing its tools: the scoping call is cancelled, the task goes back to pending (or interrupted, for a resume), and the start runs again from the top behind the stop. Starts still serialize behind each other; only stops interrupt, and never the start of the task being stopped. `OrchestrationRuntime.interruptStartForStop`; tests in `StopInterruptsStartTests`; incident in `docs/plans/SmithBulkStopFixes.md`.
 - Transcript search (⌘F) — M; global search plus a prior-transcript viewer — L
 - MCP timeout per server or progress-aware (fixed 4h today) — M
 - Task-scoped working directory for relative paths — M
@@ -1743,6 +1743,8 @@ Known-accepted behaviors and smaller follow-ups (from the third review pass):
   "any task running" check (a pool never drains past the first task); and each spawn
   pays a serial scoping LLM call inside the lifecycle queue — spawn needs to reserve
   its handle under the queue but scope outside it, commit-or-roll-back.
+  ✅ (2026-10-11, by a different design: a stop interrupts the scoping start rather than
+  the start scoping outside the queue — see the P2 entry.)
 - **Per-tool failure-streak exemptions.** `bash` is exempt (its non-zero exits are the
   callee's semantics — failing tests, `grep -q` — not tool malfunction). If other
   exit-status-shaped tools are added, add them to

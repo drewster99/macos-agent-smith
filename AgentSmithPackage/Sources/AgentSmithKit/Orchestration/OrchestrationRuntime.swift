@@ -360,6 +360,64 @@ public actor OrchestrationRuntime {
     /// transition bails at its next `aborted` check rather than running to completion.
     private let lifecycleQueue = SerialChainedTaskQueue()
 
+    /// The task start running on the lifecycle queue right now, if it is one a stop may interrupt
+    /// (`performStartTaskWithLiveSmith`). Set by that start around its spawn and cleared right after;
+    /// a stop marks it (`interruptStartForStop`), and the spawn gives up at ONE place: where its
+    /// Security Agent tool-scoping call — the one long wait in a start — would begin or just ended.
+    private var interruptibleStart: InterruptibleStart?
+
+    private struct InterruptibleStart {
+        enum Phase {
+            /// Not yet choosing tools (MCP servers settling, candidate tools being gathered).
+            case beforeScoping
+            /// The tool-scoping call, cancellable.
+            case scoping(Task<ToolScopingResult, Never>)
+            /// Only quick local work is left; a stop waits for it rather than discard it.
+            case afterScoping
+        }
+        let taskID: UUID
+        let token: UUID
+        var phase = Phase.beforeScoping
+        var interruptedByStop = false
+        /// Set where the spawn gave up because of the interruption — distinguishes that from a
+        /// spawn that returned nil for its own reasons while an interruption was pending.
+        var abandonedForStop = false
+    }
+
+    /// What a stop is about to stop, so it never interrupts the start of the very task it stops.
+    private enum StopTarget {
+        /// A live worker. Never the starting task's: that task has no worker until its start ends.
+        case worker
+        case task(UUID)
+    }
+
+    /// Lets a stop run ahead of a start that is waiting on its tool-scoping call, instead of
+    /// waiting behind it (decided 2026-10-11, user). The scoping call is cancelled; the start puts
+    /// its task back where it was and starts it again from the top, after this stop
+    /// (`requeueStartInterruptedByStop`). Every operation still runs alone on the lifecycle queue —
+    /// the interrupted start simply ends early — so no new interleaving exists.
+    ///
+    /// Only stops call this; a start never interrupts another start. A stop of the task being
+    /// started does not interrupt it: it runs after the start finishes, as before.
+    ///
+    /// MUST be called synchronously right before the stop enqueues itself, with no suspension
+    /// between: the interrupted start can't resume until this actor turn ends, so the stop is
+    /// already queued ahead of the retry.
+    private func interruptStartForStop(_ target: StopTarget) {
+        guard var start = interruptibleStart, !start.interruptedByStop else { return }
+        if case .task(let stoppingTaskID) = target, stoppingTaskID == start.taskID { return }
+        switch start.phase {
+        case .afterScoping:
+            return
+        case .beforeScoping:
+            break
+        case .scoping(let call):
+            call.cancel()
+        }
+        start.interruptedByStop = true
+        interruptibleStart = start
+    }
+
     /// Circuit breaker for the pre-flight tool-scoping pass. Lives on the RUNTIME (not the
     /// per-spawn `SecurityEvaluator`) deliberately: `spawnBrown` builds a fresh evaluator
     /// every spawn, so any breaker state kept there resets to zero on each restart and can
@@ -2318,7 +2376,9 @@ public actor OrchestrationRuntime {
     /// them: either the start finished first and its worker is terminated here, or the child is
     /// already failed when the start tries to claim it.
     private func stopChildOfEndedCoordinator(childTaskID: UUID, coordinatorTitle: String) async {
-        let failed = await lifecycleQueue.run { [weak self] () -> Bool in
+        // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
+        interruptStartForStop(.task(childTaskID))
+        let failed = await lifecycleQueue.enqueue { [weak self] () -> Bool in
             guard let self else { return false }
             await self.performTerminateTaskAgents(taskID: childTaskID)
             return await self.taskStore.updateStatus(
@@ -2327,7 +2387,7 @@ public actor OrchestrationRuntime {
                 ifCurrentlyIn: Self.statusesStoppedWithEndedCoordinator,
                 cause: .coordinatorEnded
             )
-        }
+        }.value
         guard failed else { return }
         await taskStore.addUpdate(
             id: childTaskID,
@@ -3753,6 +3813,27 @@ public actor OrchestrationRuntime {
         }
     }
 
+    /// A start a stop interrupted (`interruptStartForStop`) puts its task back where it was —
+    /// pending, or interrupted when it was resuming an interrupted task (the same rule as a start
+    /// refused at capacity) — and starts it again from the top through `restartForNewTask`, so
+    /// every gate is re-checked. The retry is queued behind the stop, which enqueued itself before
+    /// this start could resume. If the task changed while its tools were being chosen (a wake
+    /// paused it, say), that change stands and nothing is retried.
+    private func requeueStartInterruptedByStop(task: AgentTask, origin: TaskStartOrigin) async {
+        let (_, revertStatus) = Self.refusedStartReturn(claimedFrom: task.status, origin: origin)
+        guard await taskStore.updateStatus(id: task.id, to: revertStatus, ifCurrentlyIn: [.starting], cause: .startAbandoned) else {
+            stopLogger.notice("interrupted start of \(task.id.uuidString, privacy: .public) not retried — the task left .starting meanwhile")
+            return
+        }
+        await channel.post(ChannelMessage(
+            sender: .system,
+            content: "Start of \"\(task.title)\" set aside so a stop could run first — starting it again.",
+            metadata: ["messageKind": .kind(.preparing), "taskID": .string(task.id.uuidString)],
+            taskID: task.id
+        ))
+        restartForNewTask(taskID: task.id, origin: origin)
+    }
+
     private func hasLiveSmith() -> Bool {
         supervisor.firstHandle(role: .smith) != nil
     }
@@ -3858,9 +3939,18 @@ public actor OrchestrationRuntime {
             return
         }
 
-        guard let brownID = await performSpawnBrown(for: task) else {
+        let startToken = UUID()
+        interruptibleStart = InterruptibleStart(taskID: taskID, token: startToken)
+        let spawnedWorkerID = await performSpawnBrown(for: task)
+        let abandonedForStop = interruptibleStart?.token == startToken && interruptibleStart?.abandonedForStop == true
+        interruptibleStart = nil
+        guard let brownID = spawnedWorkerID else {
             // An abort/stop mid-spawn is not the task's failure (same rule as performStart).
             guard !aborted, !stopRequested else { return }
+            if abandonedForStop {
+                await requeueStartInterruptedByStop(task: task, origin: origin)
+                return
+            }
             // Only fail the task if it's STILL our `.starting` claim. A wake may have paused it during
             // the spawn (same race as the `.running` finalize below); don't clobber that pause or tell
             // Smith it FAILED when it was actually paused — the paused task retries its spawn on resume.
@@ -5448,6 +5538,31 @@ public actor OrchestrationRuntime {
         }
     }
 
+    /// Runs the tool-scoping call so a stop can interrupt it, when this spawn belongs to the
+    /// interruptible start (`interruptibleStart`); otherwise just runs it. The call gets its own
+    /// task so `interruptStartForStop` can cancel exactly it, and a cancellation of the queue item
+    /// itself (`stopAll`/`abort` via `cancelCurrent`) still reaches it.
+    private func scopeToolsLettingStopsInterrupt(
+        taskID: UUID,
+        _ scope: @escaping @Sendable () async -> ToolScopingResult
+    ) async -> ToolScopingResult {
+        guard let start = interruptibleStart, start.taskID == taskID else { return await scope() }
+        // Interrupted while still getting ready: don't begin a call that would be thrown away.
+        guard !start.interruptedByStop else {
+            interruptibleStart?.phase = .afterScoping
+            return ToolScopingResult(approvedNames: [], rawResponse: ToolScopingResult.cancelledSentinel, succeeded: false)
+        }
+        let call = Task { await scope() }
+        interruptibleStart?.phase = .scoping(call)
+        let result = await withTaskCancellationHandler {
+            await call.value
+        } onCancel: {
+            call.cancel()
+        }
+        interruptibleStart?.phase = .afterScoping
+        return result
+    }
+
     /// The actual spawn implementation. Runs ONLY as a lifecycle-queue item (or from
     /// `performStart`, which already is one).
     private func performSpawnBrown(for task: AgentTask) async -> UUID? {
@@ -5638,15 +5753,26 @@ public actor OrchestrationRuntime {
             // Light the Security Agent card while it scopes — this is a real (often slow) Security Agent
             // LLM call, so it shouldn't look idle during "Preparing…". Cleared right after.
             await notifyProcessingStateChange(role: .securityAgent, isProcessing: true)
-            let scoping = await evaluator.scopeTools(
-                candidateTools: scopingCandidates,
-                taskTitle: task.title,
-                taskID: task.id.uuidString,
-                taskDescription: task.renderedDescriptionWithTemplateInputs(),
-                requiredCapabilities: task.requiredCapabilities.map(\.renderedLine),
-                intentProvenance: await taskStore.intentProvenance(of: task)
-            )
+            let intentProvenance = await taskStore.intentProvenance(of: task)
+            let scoping = await scopeToolsLettingStopsInterrupt(taskID: task.id) {
+                await evaluator.scopeTools(
+                    candidateTools: scopingCandidates,
+                    taskTitle: task.title,
+                    taskID: task.id.uuidString,
+                    taskDescription: task.renderedDescriptionWithTemplateInputs(),
+                    requiredCapabilities: task.requiredCapabilities.map(\.renderedLine),
+                    intentProvenance: intentProvenance
+                )
+            }
             await notifyProcessingStateChange(role: .securityAgent, isProcessing: false)
+            // A stop interrupted this start (`interruptStartForStop`). Decided by the start's own
+            // record, never by the scoping result: the call may have finished just before the
+            // stop landed, and that result is discarded too. Not a scoping failure — no breaker,
+            // no message here; the caller requeues the start.
+            if let start = interruptibleStart, start.taskID == task.id, start.interruptedByStop {
+                interruptibleStart?.abandonedForStop = true
+                return nil
+            }
             guard scoping.succeeded else {
                 // A user-initiated cancellation (Stop/abort during "Preparing…") also
                 // lands here with the evaluator's cancelled sentinel. That says nothing
@@ -5833,9 +5959,11 @@ public actor OrchestrationRuntime {
     /// Terminates a specific agent. If it's a Brown, also cleans up its SecurityEvaluator.
     public func terminateAgent(id: UUID, callerID: UUID? = nil) async -> Bool {
         let wasWorker = supervisor.role(of: id) == .brown
-        let removed = await lifecycleQueue.run { [weak self] in
+        // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
+        interruptStartForStop(.worker)
+        let removed = await lifecycleQueue.enqueue { [weak self] in
             await self?.performTerminateAgent(id: id, callerID: callerID) ?? false
-        }
+        }.value
         // A freed worker slot is a schedulable event, and THIS is the moment it frees.
         //
         // The terminal-status hook fires too early to see it: `TaskStore.updateStatus` calls
@@ -5936,9 +6064,11 @@ public actor OrchestrationRuntime {
     /// Terminates all agents assigned to a task. Used when the user stops or pauses a task
     /// from the UI — the task status alone doesn't stop Brown's LLM loop.
     public func terminateTaskAgents(taskID: UUID) async {
-        await lifecycleQueue.run { [weak self] in
+        // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
+        interruptStartForStop(.task(taskID))
+        await lifecycleQueue.enqueue { [weak self] in
             await self?.performTerminateTaskAgents(taskID: taskID)
-        }
+        }.value
     }
 
     private func performTerminateTaskAgents(taskID: UUID) async {
