@@ -115,6 +115,11 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
     case smithTerminatedWorker
     /// Smith set the status with `update_task`.
     case smithSetStatus
+    /// The task's coordinator stopped coordinating — completed, failed, archived or deleted — so this
+    /// unfinished child was stopped and failed with it. A child runs only in service of its
+    /// coordinator (user decision 2026-10-11). Written only by
+    /// `OrchestrationRuntime.stopChildrenOfEndedCoordinator`.
+    case coordinatorEnded
     /// The monitor found a running task with no worker on two consecutive ticks.
     case orphanRecovered
     /// `run_task` reset a failed task for a retry.
@@ -205,6 +210,8 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
             return [.running, .awaitingHelp].contains(from) && to == .failed
         case .smithSetStatus:
             return UpdateTaskStatusPolicy.permits(from: from, to: to)
+        case .coordinatorEnded:
+            return !from.isTerminal && to == .failed
         case .orphanRecovered:
             return from == .running && to == .interrupted
         case .resetForRun:
@@ -242,7 +249,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
              .validationFailedNoProgress, .validationReleased, .rejectionsReturned, .helpRequested,
              .helpProvided, .userPaused, .userStopped, .userAccepted, .userAcceptanceGranted, .userFailed,
              .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed, .providerUnavailable, .scheduledAction, .scheduledTimeReached,
-             .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus, .orphanRecovered, .resetForRun,
+             .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus, .coordinatorEnded, .orphanRecovered, .resetForRun,
              .reopenedForRun, .templateLauncherNormalized, .coldBootRecovery, .coldBootSpawnAbandoned,
              .coldBootRevalidate, .sessionShutdown, .sessionDeletion:
             return nil
@@ -260,7 +267,7 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
              .validationFailedNoProgress, .validationEscalated, .userAcceptanceRequested, .validationBlocked,
              .validationReleased, .rejectionsReturned, .helpRequested, .helpProvided, .userPaused,
              .userStopped, .userFailed, .userRevalidated, .signOffContractChanged, .userSentBack, .capacityShed, .providerUnavailable, .scheduledAction,
-             .scheduledTimeReached, .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus,
+             .scheduledTimeReached, .workerSelfTerminated, .smithTerminatedWorker, .smithSetStatus, .coordinatorEnded,
              .orphanRecovered, .resetForRun, .reopenedForRun, .templateLauncherNormalized,
              .coldBootRecovery, .coldBootSpawnAbandoned, .coldBootRevalidate, .sessionShutdown, .sessionDeletion:
             return false

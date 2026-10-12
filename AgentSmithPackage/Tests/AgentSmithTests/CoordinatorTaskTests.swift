@@ -508,6 +508,84 @@ struct CoordinatorTaskTests {
         }
     }
 
+    // MARK: - A coordinator that ends takes its unfinished children with it (user decision 2026-10-11)
+
+    @Test("a failed coordinator stops its running child and fails its queued one; a finished child is untouched")
+    func failedCoordinatorStopsItsChildren() async throws {
+        let runtime = makeRuntime(brownProvider: StillThinkingLLMProvider())
+        await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(
+            autoRunNextTask: false,
+            autoRunInterruptedTasks: false,
+            enableTaskCompletionValidators: false,
+            scopeToolSetOnTaskStart: false
+        )))
+        await runtime.setWorkerCapacity(2)
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        await runtime.restartForNewTask(taskID: coordinator.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let coordinatorWorker = try #require(await runtime.liveWorkerID(taskID: coordinator.id))
+
+        let running = try await createChild(store, coordinator: coordinator.id)
+        await runtime.drainPendingTaskQueueForTesting()
+        await runtime.waitForPendingRestarts()
+        #expect(await waitUntil { await store.task(id: running.id)?.status == .running }, "the first child never started")
+        let queued = try await createChild(store, coordinator: coordinator.id)   // capacity is full: stays pending
+        let finished = try await createChild(store, coordinator: coordinator.id)
+        #expect(await store.updateStatus(id: finished.id, status: .failed, cause: .smithSetStatus))
+
+        // Smith ends the coordinator's worker, which fails the coordinator.
+        #expect(await runtime.terminateAgent(id: coordinatorWorker))
+        #expect(await store.updateStatus(id: coordinator.id, to: .failed, ifCurrentlyIn: [.running], cause: .smithTerminatedWorker))
+
+        #expect(await waitUntil { await store.task(id: running.id)?.status == .failed }, "the running child kept running")
+        #expect(await waitUntil { await store.task(id: queued.id)?.status == .failed }, "the queued child was not stopped")
+        // The slot `terminateAgent` frees can start the queued child before the coordinator is marked
+        // failed (the drain reads the coordinator's status); the stop must still end its worker.
+        #expect(await waitUntil { await runtime.liveWorkerID(taskID: running.id) == nil }, "the running child's worker is still alive")
+        #expect(await waitUntil { await runtime.liveWorkerID(taskID: queued.id) == nil }, "the queued child's worker is still alive")
+        #expect(await store.task(id: running.id)?.updates.contains { $0.message.contains("\"Coordinator\", ended") } == true)
+        let finishedNow = try #require(await store.task(id: finished.id))
+        #expect(finishedNow.updates.contains { $0.message.contains("ended") } == false, "a finished child was touched")
+        await runtime.stopAll()
+    }
+
+    @Test("deleting a coordinator fails its queued children; an unrelated coordinator's children are untouched")
+    func deletedCoordinatorStopsItsChildren() async throws {
+        let runtime = makeRuntime(brownProvider: StillThinkingLLMProvider())
+        await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(
+            autoRunNextTask: false,
+            autoRunInterruptedTasks: false,
+            enableTaskCompletionValidators: false,
+            scopeToolSetOnTaskStart: false
+        )))
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        // Never started: pending coordinators can be deleted.
+        let deleted = await store.addTask(title: "Deleted coordinator", description: "d")
+        let kept = await store.addTask(title: "Kept coordinator", description: "d")
+        let orphan = try await createChild(store, coordinator: deleted.id)
+        let sibling = try await createChild(store, coordinator: kept.id)
+
+        #expect(await store.softDelete(id: deleted.id))
+
+        #expect(await waitUntil { await store.task(id: orphan.id)?.status == .failed }, "the deleted coordinator's child was not stopped")
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(await store.task(id: sibling.id)?.status == .pending, "another coordinator's child was stopped")
+        await runtime.stopAll()
+    }
+
+    @Test("a coordinator-ended stop is permitted from every unfinished status, and only to failed")
+    func coordinatorEndedTransitionRule() {
+        for from in AgentTask.Status.allCases {
+            #expect(TaskTransitionCause.coordinatorEnded.permits(from: from, to: .failed) == !from.isTerminal, "from \(from)")
+            #expect(TaskTransitionCause.coordinatorEnded.permits(from: from, to: .interrupted) == false)
+        }
+    }
+
     // MARK: - Helpers
 
     private func createChild(_ store: TaskStore, coordinator: UUID, limit: Int = 10) async throws -> AgentTask {

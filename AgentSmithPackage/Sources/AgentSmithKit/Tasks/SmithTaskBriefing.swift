@@ -89,6 +89,13 @@ public enum SmithTaskBriefing {
                 `run_task`, recreate, or fail it. No action is needed from you; if the user asks, point them \
                 to the notice about the worker's model.]
                 """
+        case .coordinatorEnded:
+            let coordinator = task.coordinatorTaskID.map { " (ID: \($0.uuidString))" } ?? ""
+            return """
+                [System: \(subject) was STOPPED and marked failed because the task coordinating it\(coordinator) \
+                ended — a child task runs only in service of its coordinator. Do NOT `run_task` it unless the \
+                user asks for it on its own.]
+                """
         case .startClaimed, .startAbandoned, .workerStartedAtRuntimeStart,
              .spawnFailedAtRuntimeStart, .submittedForValidation, .validationEscalated,
              .validationBlocked, .validationReleased, .rejectionsReturned, .helpRequested,

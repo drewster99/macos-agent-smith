@@ -1,7 +1,7 @@
 # Smith bulk stop/delete — fix plan
 
 Status: F1, F2, F3-A, F5 ✅ implemented 2026-10-11 (tests in `SmithBulkStopTests.swift`; each failed before
-its fix). F3-B and F4 await the user's decision. F3-A also corrected Smith's prompt, which wrongly
+its fix). F3-B ✅ implemented 2026-10-11 (user approved; see below). F4 awaits the user's decision. F3-A also corrected Smith's prompt, which wrongly
 said only completed/failed tasks can be archived or deleted (the store refuses only in-progress ones).
 
 ## Incident
@@ -86,6 +86,14 @@ Options:
 
 Plan: A now. B only if the user approves it.
 
+**B — approved and implemented (2026-10-11).** User: "Deleting or failing coordinator should also
+pause/stop/cancel its child tasks... if they're not running in service of the parent, why are they
+running at all?" Implemented for any coordinator end (completed, failed, archived, deleted): see
+`docs/claude/coordinator-tasks-and-capabilities.md`. **It would NOT have changed this incident:** none
+of the 113 batch audit tasks had `coordinatorTaskID`. They were template instances (`parentTaskID` =
+template B100BA59) that Smith started directly with `run_task`. The two "coordinator" tasks were
+ordinary tasks Smith created and named that way.
+
 - Test (A): system-prompt content test asserting the ordering guidance is present.
 
 ### F4 — Scoping outside the lifecycle queue (ROADMAP P2 item, promoted)
@@ -128,3 +136,30 @@ control flow reads it. Cost: S.
 
 1. F3-B: should deleting or failing a coordinator task pause its pending children?
 2. F4: approve moving scoping out of the lifecycle queue now (it's already on the ROADMAP as P2)?
+
+## Why "Reconcile non-MAS audit batch B32B2C4B" (`2D311F2C`) was stuck (investigated 2026-10-11)
+
+Sources: `tasks.json` updates, LLM request logs for 10-09 (the channel log has no rows from
+10-09 09:52:54 to 10-10 13:38:09; see below).
+
+1. 10-06: its worker couldn't do the job. It had no tool to list a template's instances or
+   instantiate/retry them, and asked for help twice. Smith added required capabilities, but no worker
+   tool provides those abilities.
+2. 10-09 ~10:09: Smith first tried `update_task(status: paused, is_template: false)`, which the F2
+   bug refused. It then told the worker to "remain inactive pending new lifecycle evidence".
+3. A worker can't sit idle. By the worker's own account, the run loop rejected its empty turn, so it
+   used `request_help` as a parking spot and asked Smith NOT to answer until evidence arrived. Smith
+   complied: its next turn was "(no response)". The task stayed in `awaitingHelp` from then on.
+4. 10-11: Smith created a second coordinator task (`4068A9A4`) for the same batch and never closed this one.
+5. 10-11 19:02 and 19:09 (stop request): `update_task status=failed is_template=false` was refused (F2),
+   `provide_help` couldn't spawn a worker (10/10 slots), and `terminate_agent` found no worker. No
+   working path remained. F2 and F5 close this.
+
+Underlying gap, NOT fixed: a task waiting on outside events (other tasks finishing) has no structural
+way to wait. `wait_for_child_tasks` covers only its own `coordinatorTaskID` children, and this task had
+none. Parking in `request_help` is a misuse.
+
+**Separate finding: lost transcript.** `channel_log.jsonl` has no rows from 10-09 09:52:54 until the
+next launch (10-10 13:37), yet that run kept working until at least 10:47 (LLM logs, `tasks.json`
+updates at 10:00–10:28). About 55 minutes of transcript never reached disk. No crash report exists;
+that day's default-level unified logs are gone. Not investigated further.

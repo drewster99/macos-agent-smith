@@ -1868,6 +1868,8 @@ public actor OrchestrationRuntime {
         await reconcileInFlightWatchFirings()
         // Notes queued for coordinators that finished or left the list while the app was down.
         await rerouteStrandedCoordinatorBriefings()
+        // Children left running by a coordinator that ended while the app was down.
+        await stopChildrenStrandedByEndedCoordinators()
         // Effects restored from disk (a crash before delivery) are due now.
         continuation.yield(.effectsReady)
     }
@@ -2106,6 +2108,7 @@ public actor OrchestrationRuntime {
             // Smith's compaction points: the finished task's play-by-play just became history.
             guard transition.entersTerminal else { return }
             await rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating: transition.taskID)
+            scheduleStopOfChildrenOfEndedCoordinator(transition.taskID)
             await reportHoldsStrandedByTerminal(transition)
             await scheduler.cancelWakesForTask(transition.taskID)
             // Through the coalescing driver, so a drain request arriving while this one is busy
@@ -2141,6 +2144,7 @@ public actor OrchestrationRuntime {
                 startsHeldByWorkerOutage.removeAll { $0.taskID == lifecycle.taskID }
                 providerRecoveredQueue.removeAll { $0.taskID == lifecycle.taskID }
                 await rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating: lifecycle.taskID)
+                scheduleStopOfChildrenOfEndedCoordinator(lifecycle.taskID)
                 await reportStrandedHolds(watchedTaskID: lifecycle.taskID, because: "is no longer in the active list")
             case .restoredToActive:
                 // A restored pending child of a working coordinator is committed work again.
@@ -2283,6 +2287,70 @@ public actor OrchestrationRuntime {
     private func rerouteStrandedCoordinatorBriefings() async {
         for case .taskWorker(let taskID) in await ensureNotificationBroker().recipientsWithQueuedDeliveries() {
             await rerouteCoordinatorBriefings(ofTaskNoLongerCoordinating: taskID)
+        }
+    }
+
+    /// A coordinator that stopped coordinating — completed, failed, archived or deleted — takes its
+    /// unfinished children with it: each child's worker is terminated and the child is failed
+    /// (`coordinatorEnded`). A child exists only to serve its coordinator, so once the coordinator is
+    /// gone nothing is waiting for its result (user decision 2026-10-11). Children already finished,
+    /// archived or deleted are left alone. A child that is itself a coordinator ends its own children
+    /// through the same path when its failure is reported.
+    ///
+    /// Runs detached from the caller: each stop is a lifecycle-queue step, and the task-event consumer
+    /// must not wait behind a queue item (a start can hold it for a whole scoping call), nor enqueue
+    /// from inside one.
+    private func scheduleStopOfChildrenOfEndedCoordinator(_ coordinatorTaskID: UUID) {
+        Task { [weak self] in await self?.stopChildrenOfEndedCoordinator(coordinatorTaskID) }
+    }
+
+    func stopChildrenOfEndedCoordinator(_ coordinatorTaskID: UUID) async {
+        guard await taskStore.task(id: coordinatorTaskID)?.isCoordinatingChildren != true else { return }
+        let coordinatorTitle = await taskStore.taskAnyDisposition(id: coordinatorTaskID)?.title ?? coordinatorTaskID.uuidString
+        let unfinished = await taskStore.childTasks(ofCoordinator: coordinatorTaskID)
+            .filter { $0.disposition == .active && !$0.status.isTerminal }
+        for child in unfinished {
+            await stopChildOfEndedCoordinator(childTaskID: child.id, coordinatorTitle: coordinatorTitle)
+        }
+    }
+
+    /// Terminate-then-fail as ONE lifecycle step, so a start of the same child can't land between
+    /// them: either the start finished first and its worker is terminated here, or the child is
+    /// already failed when the start tries to claim it.
+    private func stopChildOfEndedCoordinator(childTaskID: UUID, coordinatorTitle: String) async {
+        let failed = await lifecycleQueue.run { [weak self] () -> Bool in
+            guard let self else { return false }
+            await self.performTerminateTaskAgents(taskID: childTaskID)
+            return await self.taskStore.updateStatus(
+                id: childTaskID,
+                to: .failed,
+                ifCurrentlyIn: Self.statusesStoppedWithEndedCoordinator,
+                cause: .coordinatorEnded
+            )
+        }
+        guard failed else { return }
+        await taskStore.addUpdate(
+            id: childTaskID,
+            message: "Stopped: the task coordinating it, \"\(coordinatorTitle)\", ended."
+        )
+    }
+
+    /// Every status a child can be stopped from: all the non-terminal ones.
+    private static let statusesStoppedWithEndedCoordinator: Set<AgentTask.Status> =
+        Set(AgentTask.Status.allCases.filter { !$0.isTerminal })
+
+    /// Cold boot: a coordinator that ended while the stop of its children was still pending (a crash
+    /// between the two) leaves children that would otherwise run for nobody.
+    private func stopChildrenStrandedByEndedCoordinators() async {
+        var endedCoordinators: Set<UUID> = []
+        for child in await taskStore.allTasks() where !child.status.isTerminal {
+            guard let coordinatorID = child.coordinatorTaskID, !endedCoordinators.contains(coordinatorID) else { continue }
+            if await taskStore.task(id: coordinatorID)?.isCoordinatingChildren != true {
+                endedCoordinators.insert(coordinatorID)
+            }
+        }
+        for coordinatorID in endedCoordinators {
+            scheduleStopOfChildrenOfEndedCoordinator(coordinatorID)
         }
     }
 

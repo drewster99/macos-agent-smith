@@ -81,6 +81,9 @@ public enum CoordinatorTaskBriefing {
         // down with it.
         case .capacityShed, .providerUnavailable, .sessionShutdown, .sessionDeletion, .coldBootRecovery:
             return nil
+        // Only ever written once the coordinator has stopped coordinating, so there is no one to tell.
+        case .coordinatorEnded:
+            return nil
         // Never moves a task to paused or interrupted.
         case .scheduledAction(.run), .scheduledAction(.summarize), .startClaimed, .startAbandoned,
              .spawnFailed, .spawnFailedAtRuntimeStart, .preconditionUnmet, .workerStarted, .workerStartedAtRuntimeStart,
