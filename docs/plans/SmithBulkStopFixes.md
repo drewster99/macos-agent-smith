@@ -210,3 +210,25 @@ Test: `coordinatorWithoutWorkerDoesNotStartItsChild`.
   4. A coordinator reopened (run_task retry) after its children's stop was scheduled still lost
      them. The child is now failed through `TaskStore.failChildOfEndedCoordinator`, which re-checks the
      coordinator in the same write, BEFORE its worker is terminated.
+
+## Live replay (2026-10-11 20:33–20:41) and the fix it forced
+
+12 "Replay sleeper" tasks (`sleep 240`), worker capacity full: 6 running, 1 starting, 5 queued when
+the user's "stop and delete all of the Replay sleeper tasks" was sent.
+
+Passed:
+- Every Smith call auto-approved; zero WARN on `manage_task_disposition`.
+- Smith deleted the 4 queued tasks FIRST (F3), then terminated the running ones, then deleted them.
+- No sleeper started after the request except the one already starting; all 12 ended in Recently
+  Deleted (2 had completed on their own first).
+- The start that was choosing its tools was interrupted ("set aside so a stop could run first").
+
+Failed: the first terminate still waited 33 s (request 20:38:37.7, `Runtime.terminateAgent entry`
+20:39:10.96). The interrupt worked, but a DUPLICATE start of the same task was already queued AHEAD of
+the stop (from `create_task`'s auto-start and the drain). It claimed the task the interrupt had just
+set back to pending, and ran a full scoping call. The general case: any start queued ahead of a stop
+made it wait — the incident's auto-advance backlog.
+
+Fix: deliberate stops are counted while queued (`deliberateStopsWaiting`, via `enqueueDeliberateStop`),
+and a start that comes up while one waits steps behind it before claiming anything. Test:
+`stopRunsAheadOfQueuedStarts` (fails without it).

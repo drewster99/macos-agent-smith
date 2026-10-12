@@ -405,9 +405,36 @@ public actor OrchestrationRuntime {
     /// urgent, and interrupting for it would throw away a scoping call for nothing — repeatedly,
     /// for a run of such stops, since each would interrupt the retry of the last.
     ///
-    /// MUST be called synchronously right before the stop enqueues itself, with no suspension
-    /// between: the interrupted start can't resume until this actor turn ends, so the stop is
-    /// already queued ahead of the retry.
+    /// Called only from `enqueueDeliberateStop`, in the same actor turn that queues the stop: the
+    /// interrupted start can't resume until this turn ends, so the stop is already queued ahead of
+    /// the retry.
+    /// Deliberate stops queued on the lifecycle queue that have not finished. A task start that comes
+    /// up while one waits steps behind it (`performStartTaskWithLiveSmith`), so a stop waits for no
+    /// start — not the one choosing its tools (interrupted) and not the ones queued ahead of it, which
+    /// in the 2026-10-11 incident were a backlog of auto-advance starts, each a full scoping call.
+    /// Written only by `enqueueDeliberateStop` and its item's completion.
+    private var deliberateStopsWaiting = 0
+
+    /// A deliberate stop's ONE way onto the lifecycle queue: interrupt the start that is choosing its
+    /// tools, count this stop as waiting, and queue it — all in one actor turn, so neither the
+    /// interrupted start's retry nor a start already queued can get ahead of it.
+    private func enqueueDeliberateStop<T: Sendable>(
+        _ target: StopTarget,
+        _ work: @escaping @Sendable () async -> T
+    ) -> Task<T, Never> {
+        interruptStartForStop(target)
+        deliberateStopsWaiting += 1
+        return lifecycleQueue.enqueue { [weak self] in
+            let value = await work()
+            await self?.finishDeliberateStop()
+            return value
+        }
+    }
+
+    private func finishDeliberateStop() {
+        deliberateStopsWaiting -= 1
+    }
+
     private func interruptStartForStop(_ target: StopTarget) {
         guard var start = interruptibleStart, !start.interruptedByStop else { return }
         switch target {
@@ -2393,9 +2420,7 @@ public actor OrchestrationRuntime {
     /// already failed when the start tries to claim it.
     private func stopChildOfEndedCoordinator(childTaskID: UUID, coordinatorTitle: String) async {
         let child = await taskStore.task(id: childTaskID)
-        // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
-        interruptStartForStop(.task(childTaskID, child))
-        let failed = await lifecycleQueue.enqueue { [weak self] () -> Bool in
+        let failed = await enqueueDeliberateStop(.task(childTaskID, child)) { [weak self] () -> Bool in
             guard let self else { return false }
             // Fail FIRST, in the store's one check-and-write: a coordinator reopened since this stop
             // was scheduled (a `run_task` retry) keeps its child. Then end the child's worker.
@@ -3888,6 +3913,15 @@ public actor OrchestrationRuntime {
     /// with one appended turn instead of being rebuilt from scratch.
     private func performStartTaskWithLiveSmith(taskID: UUID, origin: TaskStartOrigin) async {
         guard !aborted, !stopRequested else { return }
+        // A deliberate stop is queued behind this start: step behind it instead of making it wait
+        // (`deliberateStopsWaiting`). Nothing has been claimed, so this changes only the order. The
+        // gates already passed; the start resumes here, not at `restartForNewTask`.
+        if deliberateStopsWaiting > 0 {
+            lifecycleQueue.schedule { [weak self] in
+                await self?.performStartTaskWithLiveSmith(taskID: taskID, origin: origin)
+            }
+            return
+        }
         guard let task = await taskStore.task(id: taskID) else {
             await channel.post(ChannelMessage(
                 sender: .system,
@@ -6017,11 +6051,12 @@ public actor OrchestrationRuntime {
 
     private func terminateAgent(id: UUID, callerID: UUID?, interruptsStartingTask: Bool) async -> Bool {
         let wasWorker = supervisor.role(of: id) == .brown
-        // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
-        if interruptsStartingTask { interruptStartForStop(.worker(id)) }
-        let removed = await lifecycleQueue.enqueue { [weak self] in
+        let terminate: @Sendable () async -> Bool = { [weak self] in
             await self?.performTerminateAgent(id: id, callerID: callerID) ?? false
-        }.value
+        }
+        let removed = interruptsStartingTask
+            ? await enqueueDeliberateStop(.worker(id), terminate).value
+            : await lifecycleQueue.enqueue(terminate).value
         // A freed worker slot is a schedulable event, and THIS is the moment it frees.
         //
         // The terminal-status hook fires too early to see it: `TaskStore.updateStatus` calls
@@ -6123,9 +6158,7 @@ public actor OrchestrationRuntime {
     /// from the UI — the task status alone doesn't stop Brown's LLM loop.
     public func terminateTaskAgents(taskID: UUID) async {
         let task = await taskStore.task(id: taskID)
-        // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
-        interruptStartForStop(.task(taskID, task))
-        await lifecycleQueue.enqueue { [weak self] in
+        await enqueueDeliberateStop(.task(taskID, task)) { [weak self] in
             await self?.performTerminateTaskAgents(taskID: taskID)
         }.value
     }

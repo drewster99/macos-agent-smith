@@ -113,6 +113,42 @@ struct StopInterruptsStartTests {
         await runtime.stopAll()
     }
 
+    /// The 2026-10-11 incident's backlog: starts already queued AHEAD of the stop, each a full
+    /// scoping call. They step behind a waiting stop instead of running first.
+    @Test("a stop does not wait behind starts queued ahead of it — another task's, or a duplicate of the interrupted one")
+    func stopRunsAheadOfQueuedStarts() async throws {
+        let security = SlowScopingProvider()
+        let runtime = try await makeRuntime(securityProvider: security)
+        let store = await runtime.taskStore
+
+        let running = await store.addTask(title: "Already running", description: "d")
+        await runtime.restartForNewTask(taskID: running.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let runningWorker = try #require(await runtime.liveWorkerID(taskID: running.id))
+
+        let starting = await store.addTask(title: "\(Self.slowMarker) first", description: "d")
+        await runtime.restartForNewTask(taskID: starting.id, origin: .explicitUser)
+        #expect(await waitUntil { security.slowCalls == 1 })
+        // Queued behind the scoping start, ahead of the stop: a duplicate start of the same task (the
+        // replay found these re-claiming the task the interrupt had just set aside) and another task.
+        await runtime.restartForNewTask(taskID: starting.id, origin: .autoAdvance)
+        let queued = await store.addTask(title: "\(Self.slowMarker) queued", description: "d")
+        await runtime.restartForNewTask(taskID: queued.id, origin: .autoAdvance)
+
+        let stopped = Flag()
+        Task {
+            _ = await runtime.stopWorker(id: runningWorker, callerID: UUID())
+            stopped.set()
+        }
+        #expect(await waitUntil { stopped.isSet }, "the stop waited behind a start queued ahead of it")
+        #expect(await runtime.liveWorkerID(taskID: running.id) == nil)
+        // Every start still happens, after the stop: the set-aside one once, and the queued one.
+        #expect(await waitUntil { await store.task(id: starting.id)?.status == .starting })
+        #expect(await store.task(id: queued.id)?.status == .pending, "the queued start ran ahead of the set-aside one's retry")
+
+        await runtime.stopAll()
+    }
+
     @Test("stopping the task that is being started does not interrupt its start")
     func stopOfStartingTaskWaits() async throws {
         let security = SlowScopingProvider()
