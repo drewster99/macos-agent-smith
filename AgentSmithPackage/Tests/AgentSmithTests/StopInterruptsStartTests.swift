@@ -175,7 +175,7 @@ struct StopInterruptsStartTests {
 
     /// Archiving a finished task runs `terminateTaskAgents` with nothing to end. Interrupting for
     /// it would throw away the scoping call — once per archived task in a bulk archive.
-    @Test("a stop with no live worker to end does not interrupt a start")
+    @Test("a stop with no live worker to end skips the queue and does not interrupt a start")
     func stopWithoutWorkerDoesNotInterrupt() async throws {
         let security = SlowScopingProvider()
         let runtime = try await makeRuntime(securityProvider: security)
@@ -191,9 +191,8 @@ struct StopInterruptsStartTests {
             await runtime.terminateTaskAgents(taskID: idle.id)
             stopped.set()
         }
-        try await Task.sleep(for: .seconds(1))
+        #expect(await waitUntil { stopped.isSet }, "a stop with nothing to end waited behind the start")
         #expect(security.slowCalls == 1, "a stop with nothing to end cut the start short")
-        #expect(stopped.isSet == false, "the stop ran ahead of the start without interrupting it")
         let notices = await runtime.channel.allMessages().filter { $0.content.contains("set aside so a stop could run first") }
         #expect(notices.isEmpty)
 
@@ -229,6 +228,33 @@ struct StopInterruptsStartTests {
 
         await runtime.stopAll()
         #expect(await waitUntil { tornDown.isSet })
+    }
+
+    /// The user archives a finished task while a start is choosing its tools: the archive's stop
+    /// has nothing to end, so it must not wait 30–60 s behind that start (2026-10-11: the user's
+    /// archive clicks waited out an 86 s stall).
+    @Test("archiving a finished task does not wait for a start choosing its tools")
+    func archiveOfFinishedTaskSkipsQueue() async throws {
+        let security = SlowScopingProvider()
+        let runtime = try await makeRuntime(securityProvider: security)
+        let store = await runtime.taskStore
+
+        let finished = await store.addTask(title: "Finished", description: "d")
+        #expect(await store.updateStatus(id: finished.id, status: .failed, cause: .smithSetStatus))
+        let starting = await store.addTask(title: "\(Self.slowMarker) task", description: "d")
+        await runtime.restartForNewTask(taskID: starting.id, origin: .explicitUser)
+        #expect(await waitUntil { security.slowCalls == 1 })
+
+        let stopped = Flag()
+        Task {
+            await runtime.terminateTaskAgents(taskID: finished.id)
+            stopped.set()
+        }
+        #expect(await waitUntil { stopped.isSet }, "the archive's stop waited behind the start")
+        #expect(security.slowCalls == 1)
+        #expect(await store.task(id: starting.id)?.status == .starting, "the start was disturbed")
+
+        await runtime.stopAll()
     }
 
     @Test("starts never interrupt each other")

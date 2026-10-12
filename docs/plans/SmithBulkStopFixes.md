@@ -232,3 +232,12 @@ made it wait — the incident's auto-advance backlog.
 Fix: deliberate stops are counted while queued (`deliberateStopsWaiting`, via `enqueueDeliberateStop`),
 and a start that comes up while one waits steps behind it before claiming anything. Test:
 `stopRunsAheadOfQueuedStarts` (fails without it).
+
+## Archive of a finished task skips the queue (2026-10-12, user)
+
+The user's 2026-10-11 19:12:38 archive clicks waited out the 86 s stall: the app's `archiveTask` calls
+`terminateTaskAgents`, which queued behind the start choosing its tools even with no worker to end.
+Now `terminateTaskAgents` returns without queuing when the task has no live worker and is in a status
+no worker can be arriving for (`statusesWithNoWorkerComing`: pending, scheduled, paused, interrupted,
+completed, failed). Tests: `archiveOfFinishedTaskSkipsQueue`; `stopWithoutWorkerDoesNotInterrupt` now
+asserts the stop returns immediately (user-approved change to that test).

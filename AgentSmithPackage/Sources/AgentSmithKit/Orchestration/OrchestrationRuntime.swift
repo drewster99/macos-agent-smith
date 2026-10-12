@@ -6154,10 +6154,24 @@ public actor OrchestrationRuntime {
         return []
     }
 
+    /// Statuses in which a task's worker can only appear through a later claim (`.starting`) — so a
+    /// task in one with no live worker has nothing for `terminateTaskAgents` to end. Excludes
+    /// `.starting` (a spawn is in flight), `.awaitingHelp` (`provide_help` respawns without a claim),
+    /// `.validating` (its validation must be cancelled) and `.running` / `.awaitingReview`.
+    private static let statusesWithNoWorkerComing: Set<AgentTask.Status> =
+        [.pending, .scheduled, .paused, .interrupted, .completed, .failed]
+
     /// Terminates all agents assigned to a task. Used when the user stops or pauses a task
     /// from the UI — the task status alone doesn't stop Brown's LLM loop.
     public func terminateTaskAgents(taskID: UUID) async {
         let task = await taskStore.task(id: taskID)
+        // Nothing to end — no live worker, and a status no worker can be arriving for and no
+        // validation runs in — so don't queue at all: archiving a finished task must not wait out a
+        // start's tool-scoping call (decided 2026-10-11, user). Checked in this one actor turn, and a
+        // worker is only ever registered by a queue item running on this actor, so none can appear
+        // between the check and the return.
+        guard let task else { return }
+        if Self.statusesWithNoWorkerComing.contains(task.status), liveWorkerID(for: task) == nil { return }
         await enqueueDeliberateStop(.task(taskID, task)) { [weak self] in
             await self?.performTerminateTaskAgents(taskID: taskID)
         }.value
