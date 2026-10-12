@@ -1581,6 +1581,17 @@ public actor TaskStore {
         return CoordinatorChildren.collect(active, inactive)
     }
 
+    /// Fails a child because its coordinator ended (`coordinatorEnded`) — only while the coordinator
+    /// is STILL not coordinating, checked in the same actor turn as the write, so a coordinator
+    /// reopened after its children's stop was scheduled keeps them. False when the child is gone,
+    /// finished, not a child, or its coordinator is coordinating again.
+    public func failChildOfEndedCoordinator(id childID: UUID) -> Bool {
+        guard let child = tasks[childID], let coordinatorID = child.coordinatorTaskID,
+              !child.status.isTerminal,
+              tasks[coordinatorID]?.isCoordinatingChildren != true else { return false }
+        return applyStatus(id: childID, to: .failed, cause: .coordinatorEnded)
+    }
+
     /// Promotes a `.scheduled` task to `.pending` so the queue (or `run_task`) can pick it up.
     /// No-op when the task is missing, already non-`.scheduled`, or has a future scheduledRunAt
     /// the caller didn't ask to bypass.

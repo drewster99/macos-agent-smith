@@ -384,11 +384,13 @@ public actor OrchestrationRuntime {
         var abandonedForStop = false
     }
 
-    /// What a stop is about to stop, so it never interrupts the start of the very task it stops.
+    /// What a stop is about to stop.
     private enum StopTarget {
-        /// A live worker. Never the starting task's: that task has no worker until its start ends.
-        case worker
-        case task(UUID)
+        /// A worker, by instance. Never the starting task's: that task has no worker until its
+        /// start ends.
+        case worker(UUID)
+        /// A task's worker, by the task as the caller just read it (nil: no such task).
+        case task(UUID, AgentTask?)
     }
 
     /// Lets a stop run ahead of a start that is waiting on its tool-scoping call, instead of
@@ -398,14 +400,23 @@ public actor OrchestrationRuntime {
     /// the interrupted start simply ends early — so no new interleaving exists.
     ///
     /// Only stops call this; a start never interrupts another start. A stop of the task being
-    /// started does not interrupt it: it runs after the start finishes, as before.
+    /// started does not interrupt it: it runs after the start finishes, as before. Nor does a stop
+    /// with no live worker to end (archiving a finished task, failing a queued child): it is not
+    /// urgent, and interrupting for it would throw away a scoping call for nothing — repeatedly,
+    /// for a run of such stops, since each would interrupt the retry of the last.
     ///
     /// MUST be called synchronously right before the stop enqueues itself, with no suspension
     /// between: the interrupted start can't resume until this actor turn ends, so the stop is
     /// already queued ahead of the retry.
     private func interruptStartForStop(_ target: StopTarget) {
         guard var start = interruptibleStart, !start.interruptedByStop else { return }
-        if case .task(let stoppingTaskID) = target, stoppingTaskID == start.taskID { return }
+        switch target {
+        case .worker(let workerID):
+            guard supervisor.handlesByID[workerID] != nil else { return }
+        case .task(let stoppingTaskID, let stoppingTask):
+            guard stoppingTaskID != start.taskID,
+                  let stoppingTask, liveWorkerID(for: stoppingTask) != nil else { return }
+        }
         switch start.phase {
         case .afterScoping:
             return
@@ -2364,7 +2375,12 @@ public actor OrchestrationRuntime {
 
     func stopChildrenOfEndedCoordinator(_ coordinatorTaskID: UUID) async {
         guard await taskStore.task(id: coordinatorTaskID)?.isCoordinatingChildren != true else { return }
-        let coordinatorTitle = await taskStore.taskAnyDisposition(id: coordinatorTaskID)?.title ?? coordinatorTaskID.uuidString
+        let coordinator = await taskStore.taskAnyDisposition(id: coordinatorTaskID)
+        // Runs for EVERY task that finishes or leaves the list, and the child lookup scans the
+        // inactive store: skip it for a task that never created a child (`addChildTask`, the only
+        // writer of a child link, counts every one). A permanently deleted task is still looked up.
+        if let coordinator, coordinator.childTasksCreated == 0 { return }
+        let coordinatorTitle = coordinator?.title ?? coordinatorTaskID.uuidString
         let unfinished = await taskStore.childTasks(ofCoordinator: coordinatorTaskID)
             .filter { $0.disposition == .active && !$0.status.isTerminal }
         for child in unfinished {
@@ -2372,32 +2388,29 @@ public actor OrchestrationRuntime {
         }
     }
 
-    /// Terminate-then-fail as ONE lifecycle step, so a start of the same child can't land between
+    /// Fail-then-terminate as ONE lifecycle step, so a start of the same child can't land between
     /// them: either the start finished first and its worker is terminated here, or the child is
     /// already failed when the start tries to claim it.
     private func stopChildOfEndedCoordinator(childTaskID: UUID, coordinatorTitle: String) async {
+        let child = await taskStore.task(id: childTaskID)
         // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
-        interruptStartForStop(.task(childTaskID))
+        interruptStartForStop(.task(childTaskID, child))
         let failed = await lifecycleQueue.enqueue { [weak self] () -> Bool in
             guard let self else { return false }
+            // Fail FIRST, in the store's one check-and-write: a coordinator reopened since this stop
+            // was scheduled (a `run_task` retry) keeps its child. Then end the child's worker.
+            guard await self.taskStore.failChildOfEndedCoordinator(id: childTaskID) else { return false }
             await self.performTerminateTaskAgents(taskID: childTaskID)
-            return await self.taskStore.updateStatus(
-                id: childTaskID,
-                to: .failed,
-                ifCurrentlyIn: Self.statusesStoppedWithEndedCoordinator,
-                cause: .coordinatorEnded
-            )
+            return true
         }.value
         guard failed else { return }
+        // The failure's own drain ran while the child's worker still held its slot.
+        await advanceAfterFreedWorkerSlot()
         await taskStore.addUpdate(
             id: childTaskID,
             message: "Stopped: the task coordinating it, \"\(coordinatorTitle)\", ended."
         )
     }
-
-    /// Every status a child can be stopped from: all the non-terminal ones.
-    private static let statusesStoppedWithEndedCoordinator: Set<AgentTask.Status> =
-        Set(AgentTask.Status.allCases.filter { !$0.isTerminal })
 
     /// Cold boot: a coordinator that ended while the stop of its children was still pending (a crash
     /// between the two) leaves children that would otherwise run for nobody.
@@ -2582,6 +2595,13 @@ public actor OrchestrationRuntime {
         return false
     }
 
+    /// Whether `task` is a child whose coordinator is no longer coordinating — finished, archived,
+    /// deleted, or a template — judged against the session's active tasks (`activeTasksByID`).
+    static func isChildOfEndedCoordinator(_ task: AgentTask, activeTasksByID: [UUID: AgentTask]) -> Bool {
+        guard let coordinatorTaskID = task.coordinatorTaskID else { return false }
+        return activeTasksByID[coordinatorTaskID]?.isCoordinatingChildren != true
+    }
+
     /// Starts queued work while worker slots are free — the step that runs whenever a slot may have
     /// freed (a task terminates, a worker is torn down, capacity changes, a coordinator starts
     /// waiting) and at cold boot. Each queue oldest-first, in this order:
@@ -2590,7 +2610,8 @@ public actor OrchestrationRuntime {
     ///    queues. A coordinator holds a worker for them, so starting them is a commitment like a
     ///    deferred scheduled run: not gated on the auto-run settings, and started with origin
     ///    `.coordinatorTool` so a start never takes the cold path that would stop the coordinator.
-    ///    A child of a paused, interrupted or finished coordinator is ordinary queued work.
+    ///    A child of a paused or interrupted coordinator is ordinary queued work; a child of a
+    ///    finished, archived or deleted one is never started here (`isChildOfEndedCoordinator`).
     /// 2. **Capacity-deferred work** (`capacityDeferredQueue`) — it was running before the user
     ///    shrank the pool; not gated on the auto-run settings.
     /// 3. **The launch-interrupted batch** (`launchResumeQueue`, `autoRunInterruptedTasks`) — an
@@ -2653,7 +2674,7 @@ public actor OrchestrationRuntime {
             // says so: `terminate_agent` ends the worker and only then fails the task, and the drain
             // its freed slot triggers runs in between. Synchronous (the handle leaves the supervisor
             // before the terminate's first suspension), so this pass still sees one picture.
-            return coordinator.assigneeIDs.contains { supervisor.handlesByID[$0] != nil }
+            return liveWorkerID(for: coordinator) != nil
         }
 
         var runnable: [(task: AgentTask, origin: TaskStartOrigin)] = activeTasks
@@ -2681,7 +2702,13 @@ public actor OrchestrationRuntime {
         // One start per task even if it sits on more than one queue; a task a watch is waiting to
         // start is never picked up automatically (only its watch, or the user's Play, starts it).
         var queued: Set<UUID> = []
-        runnable = runnable.filter { $0.task.startHolds.isEmpty && queued.insert($0.task.id).inserted }
+        // A child of a coordinator that stopped coordinating is not queued work: the coordinator-ended
+        // stop fails it (user decision 2026-10-11), and starting it first would spawn a worker only
+        // to end it.
+        runnable = runnable.filter {
+            !Self.isChildOfEndedCoordinator($0.task, activeTasksByID: byID)
+                && $0.task.startHolds.isEmpty && queued.insert($0.task.id).inserted
+        }
         let toStart = Array(runnable.prefix(startsAboveCapacity ? 1 : freeSlots))
         // Drop resumed IDs from the queue immediately, so a later mid-session Stop of the same
         // task can't put it back on the auto-resume path.
@@ -3672,6 +3699,14 @@ public actor OrchestrationRuntime {
     public func liveWorkerID(taskID: UUID) async -> UUID? {
         if let stamped = supervisor.workerHandle(taskID: taskID)?.id { return stamped }
         guard let task = await taskStore.task(id: taskID) else { return nil }
+        return liveWorkerID(for: task)
+    }
+
+    /// `liveWorkerID(taskID:)` against a task snapshot the caller already holds, without
+    /// suspending — for a pass that must act on one consistent picture (the queue drain), or that
+    /// must not give up the actor before its next step (`interruptStartForStop`).
+    func liveWorkerID(for task: AgentTask) -> UUID? {
+        if let stamped = supervisor.workerHandle(taskID: task.id)?.id { return stamped }
         let live = task.assigneeIDs.filter { supervisor.role(of: $0) == .brown }
         return live.count == 1 ? live[0] : nil
     }
@@ -3836,6 +3871,10 @@ public actor OrchestrationRuntime {
             metadata: ["messageKind": .kind(.preparing), "taskID": .string(task.id.uuidString)],
             taskID: task.id
         ))
+        // A Stop All that landed during the awaits above is queued behind this item, and its teardown
+        // clears `stopRequested`: a retry queued now would run after it and cold-start the session
+        // the user just stopped. The flag is still up here, so check it last.
+        guard !aborted, !stopRequested else { return }
         restartForNewTask(taskID: task.id, origin: origin)
     }
 
@@ -5962,10 +6001,24 @@ public actor OrchestrationRuntime {
     }
 
     /// Terminates a specific agent. If it's a Brown, also cleans up its SecurityEvaluator.
+    /// Routine teardown — a finished task's worker, a rework rollback, a worker that blocked
+    /// itself — waits its turn on the lifecycle queue. A deliberate stop goes through `stopWorker`.
     public func terminateAgent(id: UUID, callerID: UUID? = nil) async -> Bool {
+        await terminateAgent(id: id, callerID: callerID, interruptsStartingTask: false)
+    }
+
+    /// A deliberate stop of a worker (Smith's `terminate_agent`): runs ahead of another task's start
+    /// that is choosing its tools (`interruptStartForStop`). Routine teardown must NOT come this
+    /// way — validation tears down a worker after every completion, and each would throw away an
+    /// unrelated start's scoping call.
+    public func stopWorker(id: UUID, callerID: UUID) async -> Bool {
+        await terminateAgent(id: id, callerID: callerID, interruptsStartingTask: true)
+    }
+
+    private func terminateAgent(id: UUID, callerID: UUID?, interruptsStartingTask: Bool) async -> Bool {
         let wasWorker = supervisor.role(of: id) == .brown
         // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
-        interruptStartForStop(.worker)
+        if interruptsStartingTask { interruptStartForStop(.worker(id)) }
         let removed = await lifecycleQueue.enqueue { [weak self] in
             await self?.performTerminateAgent(id: id, callerID: callerID) ?? false
         }.value
@@ -6069,8 +6122,9 @@ public actor OrchestrationRuntime {
     /// Terminates all agents assigned to a task. Used when the user stops or pauses a task
     /// from the UI — the task status alone doesn't stop Brown's LLM loop.
     public func terminateTaskAgents(taskID: UUID) async {
+        let task = await taskStore.task(id: taskID)
         // Interrupt, then queue, in one actor turn: see `interruptStartForStop`.
-        interruptStartForStop(.task(taskID))
+        interruptStartForStop(.task(taskID, task))
         await lifecycleQueue.enqueue { [weak self] in
             await self?.performTerminateTaskAgents(taskID: taskID)
         }.value
@@ -6440,7 +6494,8 @@ public actor OrchestrationRuntime {
             },
             terminateAgent: { [weak self] id, callerID in
                 guard let self else { return false }
-                return await self.terminateAgent(id: id, callerID: callerID)
+                // Smith's `terminate_agent`, the one tool that ends a worker: a deliberate stop.
+                return await self.stopWorker(id: id, callerID: callerID)
             },
             abort: { [weak self] reason, callerRole in
                 guard let self else { return }

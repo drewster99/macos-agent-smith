@@ -103,7 +103,9 @@ leaves a half-started task visible to every other operation. Instead a stop INTE
 choosing its tools: its scoping call is cancelled, the task goes back to pending (interrupted when the
 start was resuming an interrupted task, same rule as a capacity refusal), and it is started again
 through `restartForNewTask`, queued behind the stop. Every operation still runs alone on the lifecycle
-queue. Only stops interrupt (`terminateAgent`, `terminateTaskAgents`, a coordinator-ended child stop);
+queue. Only stops interrupt (`terminateAgent`, `terminateTaskAgents`, a coordinator-ended child stop), and only
+when they end a live worker (an archive of a finished task must not throw away a scoping call — once per
+task in a bulk archive);
 a stop of the starting task itself waits, as before. The stop interrupts and enqueues in ONE actor turn
 (`SerialChainedTaskQueue.enqueue`, synchronous): `run` is a nonisolated async function and gives up the
 actor before it queues, which would let the retry jump ahead of the stop. A stop that arrives before
@@ -184,3 +186,27 @@ that day's default-level unified logs are gone. Not investigated further.
 between and, reading only the coordinator's STATUS (`occupiesWorkerSlot`), started its queued child,
 which the cascade then stopped. Now a coordinator counts as working only while its worker is live.
 Test: `coordinatorWithoutWorkerDoesNotStartItsChild`.
+
+## Recheck fixes (2026-10-11)
+
+- A stop interrupts a start only when it ends a LIVE worker (`liveWorkerID(for:)`). Before this,
+  archiving a finished task (`terminateTaskAgents` with nothing to end) discarded the start's scoping
+  call, and a bulk archive would have discarded it again for each task. Test:
+  `stopWithoutWorkerDoesNotInterrupt` (fails ungated).
+- `liveWorkerID(for:)` is the synchronous form of `liveWorkerID(taskID:)`, which now calls it, so the
+  drain's "working coordinator" check and the stop interrupt use the ONE task-to-worker lookup.
+- The coordinator-ended cascade runs on every task's end; it now skips the inactive-store scan for a
+  task that never created a child (`childTasksCreated == 0`).
+- Independent review (codex + fresh Opus), all four verified against the code and fixed:
+  1. Routine worker teardown (`TaskValidationCoordinator` after every completion, rework rollbacks,
+     a worker's self-block) went through `terminateAgent` and so interrupted unrelated starts. Now
+     only `stopWorker` (Smith's `terminate_agent`) and `terminateTaskAgents` (user/scheduled stops)
+     interrupt; `terminateAgent` waits its turn. Test: `routineTeardownDoesNotInterrupt`.
+  2. A Stop All landing during the requeue's awaits: the retry would run after the teardown (which
+     clears `stopRequested`) and cold-start the stopped session. The requeue now checks
+     `aborted`/`stopRequested` last, before scheduling.
+  3. The drain (auto-advance, resume queues) could start a pending child of an ended coordinator
+     before its stop ran. The drain now never starts one (`isChildOfEndedCoordinator`).
+  4. A coordinator reopened (run_task retry) after its children's stop was scheduled still lost
+     them. The child is now failed through `TaskStore.failChildOfEndedCoordinator`, which re-checks the
+     coordinator in the same write, BEFORE its worker is terminated.

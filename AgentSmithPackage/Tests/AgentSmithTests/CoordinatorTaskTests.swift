@@ -609,6 +609,43 @@ struct CoordinatorTaskTests {
         await runtime.stopAll()
     }
 
+    @Test("a child is failed for its ended coordinator only while that coordinator is still not coordinating")
+    func failChildOnlyWhileCoordinatorEnded() async throws {
+        let store = TaskStore()
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        let child = try await createChild(store, coordinator: coordinator.id)
+        let unrelated = await store.addTask(title: "Not a child", description: "d")
+
+        // Pending is coordinating: reopened (or never ended) — the child is kept.
+        #expect(await store.failChildOfEndedCoordinator(id: child.id) == false)
+        #expect(await store.task(id: child.id)?.status == .pending)
+        #expect(await store.failChildOfEndedCoordinator(id: unrelated.id) == false)
+
+        #expect(await store.updateStatus(id: coordinator.id, status: .failed, cause: .smithSetStatus))
+        #expect(await store.failChildOfEndedCoordinator(id: child.id))
+        #expect(await store.task(id: child.id)?.status == .failed)
+        #expect(await store.failChildOfEndedCoordinator(id: child.id) == false, "an already-finished child is left alone")
+    }
+
+    @Test("the drain treats a child of a finished, archived or deleted coordinator as not startable")
+    func childOfEndedCoordinatorIsNotStartable() async throws {
+        let store = TaskStore()
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        let child = try await createChild(store, coordinator: coordinator.id)
+        let plain = await store.addTask(title: "Plain", description: "d")
+        func activeByID() async -> [UUID: AgentTask] {
+            Dictionary(uniqueKeysWithValues: await store.allTasks().map { ($0.id, $0) })
+        }
+
+        #expect(OrchestrationRuntime.isChildOfEndedCoordinator(child, activeTasksByID: await activeByID()) == false)
+        #expect(OrchestrationRuntime.isChildOfEndedCoordinator(plain, activeTasksByID: await activeByID()) == false)
+        #expect(await store.updateStatus(id: coordinator.id, status: .failed, cause: .smithSetStatus))
+        #expect(OrchestrationRuntime.isChildOfEndedCoordinator(child, activeTasksByID: await activeByID()))
+        // Gone from the active list entirely (archived or deleted).
+        #expect(OrchestrationRuntime.isChildOfEndedCoordinator(child, activeTasksByID: [:]))
+        #expect(OrchestrationRuntime.isChildOfEndedCoordinator(plain, activeTasksByID: [:]) == false)
+    }
+
     @Test("a coordinator-ended stop is permitted from every unfinished status, and only to failed")
     func coordinatorEndedTransitionRule() {
         for from in AgentTask.Status.allCases {

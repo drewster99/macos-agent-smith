@@ -81,7 +81,7 @@ struct StopInterruptsStartTests {
         return await predicate()
     }
 
-    @Test("terminating a worker does not wait for another task's tool scoping; that start is retried after it")
+    @Test("stopping a worker does not wait for another task's tool scoping; that start is retried after it")
     func stopRunsAheadOfScopingStart() async throws {
         let security = SlowScopingProvider()
         let runtime = try await makeRuntime(securityProvider: security)
@@ -98,7 +98,7 @@ struct StopInterruptsStartTests {
 
         let stopped = Flag()
         Task {
-            _ = await runtime.terminateAgent(id: runningWorker)
+            _ = await runtime.stopWorker(id: runningWorker, callerID: UUID())
             stopped.set()
         }
         #expect(await waitUntil { stopped.isSet }, "the stop waited behind the other task's tool scoping")
@@ -135,6 +135,64 @@ struct StopInterruptsStartTests {
 
         await runtime.stopAll()
         #expect(await waitUntil { stopped.isSet })
+    }
+
+    /// Archiving a finished task runs `terminateTaskAgents` with nothing to end. Interrupting for
+    /// it would throw away the scoping call — once per archived task in a bulk archive.
+    @Test("a stop with no live worker to end does not interrupt a start")
+    func stopWithoutWorkerDoesNotInterrupt() async throws {
+        let security = SlowScopingProvider()
+        let runtime = try await makeRuntime(securityProvider: security)
+        let store = await runtime.taskStore
+
+        let idle = await store.addTask(title: "Never started", description: "d")
+        let starting = await store.addTask(title: "\(Self.slowMarker) task", description: "d")
+        await runtime.restartForNewTask(taskID: starting.id, origin: .explicitUser)
+        #expect(await waitUntil { security.slowCalls == 1 })
+
+        let stopped = Flag()
+        Task {
+            await runtime.terminateTaskAgents(taskID: idle.id)
+            stopped.set()
+        }
+        try await Task.sleep(for: .seconds(1))
+        #expect(security.slowCalls == 1, "a stop with nothing to end cut the start short")
+        #expect(stopped.isSet == false, "the stop ran ahead of the start without interrupting it")
+        let notices = await runtime.channel.allMessages().filter { $0.content.contains("set aside so a stop could run first") }
+        #expect(notices.isEmpty)
+
+        await runtime.stopAll()
+        #expect(await waitUntil { stopped.isSet })
+    }
+
+    /// Validation tears down a finished task's worker through `terminateAgent` after every
+    /// completion; in a busy pool each would discard another task's scoping call.
+    @Test("routine worker teardown does not interrupt a start")
+    func routineTeardownDoesNotInterrupt() async throws {
+        let security = SlowScopingProvider()
+        let runtime = try await makeRuntime(securityProvider: security)
+        let store = await runtime.taskStore
+
+        let finished = await store.addTask(title: "Finishing", description: "d")
+        await runtime.restartForNewTask(taskID: finished.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let finishedWorker = try #require(await runtime.liveWorkerID(taskID: finished.id))
+
+        let starting = await store.addTask(title: "\(Self.slowMarker) task", description: "d")
+        await runtime.restartForNewTask(taskID: starting.id, origin: .explicitUser)
+        #expect(await waitUntil { security.slowCalls == 1 })
+
+        let tornDown = Flag()
+        Task {
+            _ = await runtime.terminateAgent(id: finishedWorker)
+            tornDown.set()
+        }
+        try await Task.sleep(for: .seconds(1))
+        #expect(security.slowCalls == 1, "a routine teardown cut the start short")
+        #expect(tornDown.isSet == false)
+
+        await runtime.stopAll()
+        #expect(await waitUntil { tornDown.isSet })
     }
 
     @Test("starts never interrupt each other")
