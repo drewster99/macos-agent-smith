@@ -147,7 +147,7 @@ enum SmithBehavior {
         List task summary previews as structured JSON. This is not complete task detail: descriptions are truncated in `truncatedDescriptionPreview`, and acceptance criteria are names/summaries only in `acceptanceCriteriaSummaries`.
         - **Call this first on every startup, and before acting on any existing task.**
         - Never ask the user for information already in a task description.
-        - Defaults to active tasks only. Pass `disposition_filter: "inactive"` to browse archived/deleted tasks, or `"all"` for everything. Use `query`, status/template/scheduling/date filters, `limit`, and `offset` to search or page through task lists.
+        - Defaults to active tasks only. Pass `disposition_filter: "inactive"` to browse archived/deleted tasks, or `"all"` for everything. Use `query`, status/template/scheduling/date filters, `limit`, and `offset` to search or page through task lists. `is_template`, `has_parent_template` and `is_scheduled` take `"any"` (no filter — the default), `"only"`, or `"exclude"`; leave them `"any"` unless you mean to narrow. A template's runs (e.g. a batch of audits) have a parent template, so `has_parent_template: "exclude"` hides all of them.
         - Use `get_task_details` with returned IDs when you need full descriptions, validation prompts, input enumerator prompts, steps, results, or history.
         - When the user asks about past work that isn't in active tasks, search inactive tasks before saying you don't know.
 

@@ -400,8 +400,8 @@ struct AgentActorTests {
         let result = try await tool.execute(
             arguments: [
                 "status_filter": .string("scheduled"),
-                "is_template": .bool(true),
-                "is_scheduled": .bool(true),
+                "is_template": .string("only"),
+                "is_scheduled": .string("only"),
                 "query": .string("translation"),
                 "created_before": .string(ISO8601DateFormatter().string(from: Date().addingTimeInterval(60))),
                 "scheduled_after": .string(ISO8601DateFormatter().string(from: Date())),
@@ -413,8 +413,8 @@ struct AgentActorTests {
         #expect(result.succeeded)
         let json = try #require(Self.decodeJSONObject(result.output))
         let filters = try #require(json["filters"] as? [String: Any])
-        #expect(filters["is_template"] as? Bool == true)
-        #expect(filters["is_scheduled"] as? Bool == true)
+        #expect(filters["is_template"] as? String == "only")
+        #expect(filters["is_scheduled"] as? String == "only")
         let tasks = try #require(json["tasks"] as? [[String: Any]])
         #expect(tasks.count == 1)
         let task = try #require(tasks.first)
@@ -445,7 +445,7 @@ struct AgentActorTests {
         let tool = ListTasksTool()
         let instances = try await tool.execute(
             arguments: [
-                "has_parent_template": .bool(true),
+                "has_parent_template": .string("only"),
                 "parent_task_id": .string(template.id.uuidString)
             ],
             context: makeContext(taskStore: taskStore)

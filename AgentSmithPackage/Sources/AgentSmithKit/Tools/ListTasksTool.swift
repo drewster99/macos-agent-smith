@@ -31,22 +31,17 @@ struct ListTasksTool: AgentTool {
                 "description": .string("Optional status filter applied after the disposition filter. Omit to include all statuses."),
                 "enum": .array(AgentTask.Status.allCases.map { .string($0.rawValue) })
             ]),
-            "is_template": .dictionary([
-                "type": .string("boolean"),
-                "description": .string("Optional template filter. true = only template launcher tasks; false = only non-template tasks.")
-            ]),
-            "has_parent_template": .dictionary([
-                "type": .string("boolean"),
-                "description": .string("Optional cloned-instance filter. true = only instances cloned from a template; false = only tasks without a parent template.")
-            ]),
+            "is_template": ListTasksPropertyFilter.schema(
+                only: "only template launcher tasks", exclude: "no template launcher tasks"),
+            "has_parent_template": ListTasksPropertyFilter.schema(
+                only: "only instances cloned from a template (a template's runs)",
+                exclude: "only tasks that are not a template's run"),
             "parent_task_id": .dictionary([
                 "type": .string("string"),
                 "description": .string("Optional UUID of a template; returns only cloned instances whose parentTemplateID matches it.")
             ]),
-            "is_scheduled": .dictionary([
-                "type": .string("boolean"),
-                "description": .string("Optional scheduled filter. true = only tasks with scheduledRunAt; false = only tasks without scheduledRunAt.")
-            ]),
+            "is_scheduled": ListTasksPropertyFilter.schema(
+                only: "only tasks with a scheduledRunAt", exclude: "only tasks without a scheduledRunAt"),
             "query": .dictionary([
                 "type": .string("string"),
                 "description": .string("Optional case-insensitive text search over task title and description.")
@@ -133,6 +128,18 @@ struct ListTasksTool: AgentTool {
             return .failure("Invalid parent_task_id: '\(raw)' is not a valid UUID.")
         }
 
+        let isTemplateFilter: ListTasksPropertyFilter
+        let hasParentTemplateFilter: ListTasksPropertyFilter
+        let isScheduledFilter: ListTasksPropertyFilter
+        switch (ListTasksPropertyFilter.read(arguments, "is_template"),
+                ListTasksPropertyFilter.read(arguments, "has_parent_template"),
+                ListTasksPropertyFilter.read(arguments, "is_scheduled")) {
+        case (.success(let template), .success(let parent), .success(let scheduled)):
+            (isTemplateFilter, hasParentTemplateFilter, isScheduledFilter) = (template, parent, scheduled)
+        case (.failure(let error), _, _), (_, .failure(let error), _), (_, _, .failure(let error)):
+            return .failure(error.description)
+        }
+
         let dateFilters: DateFilters
         switch Self.parseDateFilters(arguments) {
         case .success(let parsed): dateFilters = parsed
@@ -170,18 +177,12 @@ struct ListTasksTool: AgentTool {
             tasks = tasks.filter { $0.status == status }
         }
 
-        if case .bool(let value) = arguments["is_template"] {
-            tasks = tasks.filter { $0.isTemplate == value }
-        }
-        if case .bool(let value) = arguments["has_parent_template"] {
-            tasks = tasks.filter { ($0.parentTaskID != nil) == value }
-        }
+        tasks = tasks.filter { isTemplateFilter.admits($0.isTemplate) }
+        tasks = tasks.filter { hasParentTemplateFilter.admits($0.parentTaskID != nil) }
         if let parentTaskID {
             tasks = tasks.filter { $0.parentTaskID == parentTaskID }
         }
-        if case .bool(let value) = arguments["is_scheduled"] {
-            tasks = tasks.filter { ($0.scheduledRunAt != nil) == value }
-        }
+        tasks = tasks.filter { isScheduledFilter.admits($0.scheduledRunAt != nil) }
         if let query = ToolArguments.optionalString(arguments, "query") {
             tasks = tasks.filter {
                 $0.title.localizedCaseInsensitiveContains(query)
@@ -443,5 +444,56 @@ struct ListTasksTool: AgentTool {
     private struct TemplateInputDefinitionSummary: Encodable {
         let name: String
         let required: Bool
+    }
+}
+
+/// One of `list_tasks`'s filters on a yes/no property of a task (`is_template`, `has_parent_template`,
+/// `is_scheduled`). Three-way rather than a boolean ON PURPOSE: some models fill in every optional
+/// argument on every call, and a boolean's filler is `false`, which meant "exclude". Every search
+/// then silently dropped template runs and scheduled tasks — on 2026-10-11 Smith missed 46 failed
+/// audit tasks that way. Here the obvious filler is `any`, and narrowing takes a deliberate choice.
+enum ListTasksPropertyFilter: String, CaseIterable {
+    case any, only, exclude
+
+    func admits(_ hasProperty: Bool) -> Bool {
+        switch self {
+        case .any: return true
+        case .only: return hasProperty
+        case .exclude: return !hasProperty
+        }
+    }
+
+    /// Absent, `null` or blank is `any`. Anything else that is not one of the three — a JSON boolean
+    /// (the old form) included — is refused, never guessed at.
+    static func read(_ arguments: [String: AnyCodable], _ key: String) -> Result<ListTasksPropertyFilter, ListTasksFilterError> {
+        switch arguments[key] {
+        case nil, .null?:
+            return .success(.any)
+        case .string(let raw)?:
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { return .success(.any) }
+            if let filter = ListTasksPropertyFilter(rawValue: trimmed) { return .success(filter) }
+            return .failure(ListTasksFilterError(key: key, received: "'\(raw)'"))
+        case let other?:
+            return .failure(ListTasksFilterError(key: key, received: "\(other)"))
+        }
+    }
+
+    static func schema(only: String, exclude: String) -> AnyCodable {
+        .dictionary([
+            "type": .string("string"),
+            "description": .string("Optional. any (default) = no filter on this; only = \(only); exclude = \(exclude)."),
+            "enum": .array(allCases.map { .string($0.rawValue) })
+        ])
+    }
+}
+
+/// A `list_tasks` property filter that is not `any`, `only` or `exclude`.
+struct ListTasksFilterError: Error, CustomStringConvertible {
+    let key: String
+    let received: String
+
+    var description: String {
+        "Invalid \(key): \(received). Valid values: any (no filter), only, exclude — as a string."
     }
 }
