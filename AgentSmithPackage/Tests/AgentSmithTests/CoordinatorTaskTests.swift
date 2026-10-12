@@ -552,6 +552,37 @@ struct CoordinatorTaskTests {
         await runtime.stopAll()
     }
 
+    /// `terminate_agent` ends the worker, then fails the task: between the two the coordinator still
+    /// READS running. The slot the terminate frees must not go to its child — no worker is left to
+    /// coordinate it (and the child would be stopped a moment later anyway).
+    @Test("a coordinator whose worker is gone does not get its queued child started, though its status still reads running")
+    func coordinatorWithoutWorkerDoesNotStartItsChild() async throws {
+        let runtime = makeRuntime(brownProvider: StillThinkingLLMProvider())
+        await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(
+            autoRunNextTask: false,
+            autoRunInterruptedTasks: false,
+            enableTaskCompletionValidators: false,
+            scopeToolSetOnTaskStart: false
+        )))
+        await runtime.setWorkerCapacity(2)
+        await runtime.start()
+        let store = await runtime.taskStore
+
+        let coordinator = await store.addTask(title: "Coordinator", description: "d")
+        await runtime.restartForNewTask(taskID: coordinator.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let coordinatorWorker = try #require(await runtime.liveWorkerID(taskID: coordinator.id))
+        let child = try await createChild(store, coordinator: coordinator.id)
+
+        // The terminate drains the freed slot before anything marks the coordinator failed.
+        #expect(await runtime.terminateAgent(id: coordinatorWorker))
+        await runtime.waitForPendingRestarts()
+        #expect(await store.task(id: coordinator.id)?.status == .running)
+        #expect(await store.task(id: child.id)?.status == .pending, "the child of a worker-less coordinator was started")
+        #expect(await store.task(id: child.id)?.startedAt == nil)
+        await runtime.stopAll()
+    }
+
     @Test("deleting a coordinator fails its queued children; an unrelated coordinator's children are untouched")
     func deletedCoordinatorStopsItsChildren() async throws {
         let runtime = makeRuntime(brownProvider: StillThinkingLLMProvider())

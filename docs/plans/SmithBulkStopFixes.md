@@ -177,3 +177,10 @@ none. Parking in `request_help` is a misuse.
 next launch (10-10 13:37), yet that run kept working until at least 10:47 (LLM logs, `tasks.json`
 updates at 10:00–10:28). About 55 minutes of transcript never reached disk. No crash report exists;
 that day's default-level unified logs are gone. Not investigated further.
+
+## Follow-up: a terminated coordinator's slot went to its child (fixed 2026-10-11)
+
+`terminate_agent` ends the worker, then fails the task. The drain the freed slot triggers ran in
+between and, reading only the coordinator's STATUS (`occupiesWorkerSlot`), started its queued child,
+which the cascade then stopped. Now a coordinator counts as working only while its worker is live.
+Test: `coordinatorWithoutWorkerDoesNotStartItsChild`.

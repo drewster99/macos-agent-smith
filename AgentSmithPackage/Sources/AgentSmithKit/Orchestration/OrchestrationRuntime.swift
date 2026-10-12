@@ -2648,7 +2648,12 @@ public actor OrchestrationRuntime {
         func isCommittedChild(_ task: AgentTask) -> Bool {
             guard !task.isTemplate, let coordinatorTaskID = task.coordinatorTaskID else { return false }
             if startsAboveCapacity { return blockedCoordinatorTaskIDs.contains(coordinatorTaskID) }
-            return byID[coordinatorTaskID]?.occupiesWorkerSlot == true
+            guard let coordinator = byID[coordinatorTaskID], coordinator.occupiesWorkerSlot else { return false }
+            // A coordinator is WORKING only while its worker is live, not merely while its status
+            // says so: `terminate_agent` ends the worker and only then fails the task, and the drain
+            // its freed slot triggers runs in between. Synchronous (the handle leaves the supervisor
+            // before the terminate's first suspension), so this pass still sees one picture.
+            return coordinator.assigneeIDs.contains { supervisor.handlesByID[$0] != nil }
         }
 
         var runnable: [(task: AgentTask, origin: TaskStartOrigin)] = activeTasks
