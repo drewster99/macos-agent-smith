@@ -1370,25 +1370,19 @@ private struct MessageRow: View, Equatable {
         return !content.hasPrefix("Successfully")
     }
 
-    /// Handles a tap on a tool call's file path. If the path exists, previews files in
-    /// Quick Look and reveals directories in Finder. If the path doesn't exist
+    /// Handles a tap on a tool call's file path. If the path exists, opens it with the standard
+    /// macOS default behavior (`open`): files in their default app, directories in Finder.
+    /// If the path doesn't exist
     /// (e.g., already deleted, or a path the tool couldn't resolve), falls through to
     /// toggling the row's expand state so the tap still does something useful.
     private func openFileOrFallback(path: String) {
         let expanded = (path as NSString).expandingTildeInPath
         let url = URL(fileURLWithPath: expanded)
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else {
+        guard FileManager.default.fileExists(atPath: expanded) else {
             isExpanded.toggle()
             return
         }
-        if isDir.boolValue {
-            // Folder: open it in Finder showing its contents.
-            NSWorkspace.shared.open(url)
-        } else {
-            // File: preview it rather than launching whatever app owns the extension.
-            QuickLookPreview.present(url)
-        }
+        NSWorkspace.shared.open(url)
     }
 
     /// Extracts (old_string, new_string) from a `file_edit` tool_request's params metadata.
