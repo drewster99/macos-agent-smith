@@ -185,6 +185,15 @@ public actor OrchestrationRuntime {
     /// user Stop was head-of-line blocked behind a start stuck in a slow scoping call
     /// (flagged independently by all three reviews).
     var stopRequested = false
+
+    /// Whether a queue drain may queue starts: only into a running session nobody is stopping and
+    /// that wasn't aborted. A start queued behind a pending stop, or with no session, takes the cold
+    /// path: it brings back a session the user stopped, loops forever after an abort (each attempt ends
+    /// at `performStart`'s abort gate with no worker, and its `finishQueuedStart` drains again), or
+    /// loops on a start that can't come up (no Smith or Security Agent model).
+    private var acceptsQueuedStarts: Bool {
+        !aborted && !stopRequested && supervisor.currentGeneration != nil
+    }
     /// Callback to notify the app layer when abort is triggered.
     private var onAbort: (@Sendable (String) -> Void)?
     /// Callback to notify the app layer when an agent starts or stops an LLM call.
@@ -454,6 +463,14 @@ public actor OrchestrationRuntime {
             return
         }
         queuedStarts[taskID] = count > 1 ? count - 1 : nil
+    }
+
+    /// Moves a queued start's reservation to the task it now starts — a template's fresh instance, or
+    /// a clone of a task from another session. Synchronous, so no reader sees that start counted twice
+    /// or not at all.
+    private func moveStartReservation(from sourceID: UUID, to targetID: UUID) {
+        reserveStart(targetID)
+        releaseStart(sourceID)
     }
 
     /// Ends a queued start. One that ended without a worker for its task — the task deleted
@@ -2596,6 +2613,8 @@ public actor OrchestrationRuntime {
     @discardableResult
     private func drainPendingScheduledRunQueue() async -> Bool {
         guard !pendingScheduledRunQueue.isEmpty else { return false }
+        // Entries stay queued (and persisted) for the next session's drain.
+        guard acceptsQueuedStarts else { return false }
         // The worker's model can't be used: leave the (persisted) entries queued rather than move
         // them onto the in-memory outage list, so a relaunch still has them. The release drains.
         guard workerOutage == nil else { return false }
@@ -2655,6 +2674,13 @@ public actor OrchestrationRuntime {
                     continue
                 }
             }
+            // The checks above suspend: an entry taken off the queue for a session that is now
+            // stopping goes back on the front, for the next session's drain.
+            guard acceptsQueuedStarts else {
+                pendingScheduledRunQueue.insert(next, at: 0)
+                await savePendingScheduledRunQueue()
+                return false
+            }
             restartForNewTask(taskID: next.taskID, amendment: next.amendment, origin: next.origin)
             return true
         }
@@ -2712,6 +2738,8 @@ public actor OrchestrationRuntime {
         let activeTasks = await taskStore.allTasks().filter {
             $0.disposition == .active && !$0.belongsToAnotherSession(than: homeSessionID)
         }
+        // After the read, the pass's last suspension: nothing below suspends before the restarts.
+        guard acceptsQueuedStarts else { return }
         // Read the pool AFTER the suspension: a worker that parked or left during the read is seen
         // here, and nothing below suspends, so this pass acts on one consistent picture. The
         // restarts are enqueued (not awaited), so the live count doesn't move within the pass —
@@ -2720,8 +2748,11 @@ public actor OrchestrationRuntime {
         let byID = Dictionary(activeTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         // A queued start that has no live worker yet will take a slot when it runs (#37): count it,
         // or a pass while the queue is backed up hands the same slots out again.
+        // One whose task isn't in this list — a clone not yet written, a task deleted or archived
+        // meanwhile — counts too: it holds its slot until it ends, and `finishQueuedStart` drains again
+        // if it ends without a worker.
         let slotsReservedByQueuedStarts = queuedStarts.keys.filter { id in
-            byID[id].map { liveWorkerID(for: $0) == nil } ?? false
+            byID[id].map { liveWorkerID(for: $0) == nil } ?? (supervisor.workerHandle(taskID: id) == nil)
         }.count
         let freeSlots = maxConcurrentWorkers - supervisor.handles(role: .brown).count - slotsReservedByQueuedStarts
         let blockedCoordinatorTaskIDs: Set<UUID> = freeSlots > 0 ? [] : coordinatorsBlockedOnCapacity()
@@ -3824,20 +3855,21 @@ public actor OrchestrationRuntime {
         reserveStart(taskID)
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
-            await self.performQueuedStart(taskID: taskID, amendment: amendment, templateInputValues: templateInputValues, origin: origin)
-            await self.finishQueuedStart(taskID)
+            let reservedTaskID = await self.performQueuedStart(taskID: taskID, amendment: amendment, templateInputValues: templateInputValues, origin: origin)
+            await self.finishQueuedStart(reservedTaskID)
         }
     }
 
     /// The body of a start queued by `restartForNewTask`. Runs ONLY as that lifecycle-queue item,
-    /// bracketed by its reservation in `queuedStarts`.
+    /// bracketed by its reservation in `queuedStarts`. Returns the task whose reservation the start now
+    /// holds: `taskID`, or the clone `resolveStartTarget` moved it to.
     private func performQueuedStart(
         taskID: UUID,
         amendment: String?,
         templateInputValues: [String: String],
         origin: TaskStartOrigin
-    ) async {
-        guard await passesStartGate(taskID: taskID, origin: origin) else { return }
+    ) async -> UUID {
+        guard await passesStartGate(taskID: taskID, origin: origin) else { return taskID }
         // Clone interception (`resolveStartTarget`): starting a template never runs the
         // template, and starting a task that belongs to another session never runs it here
         // in place (#15) — each clones a fresh task and runs THAT, leaving the source as it
@@ -3849,11 +3881,11 @@ public actor OrchestrationRuntime {
             amendment: amendment,
             templateInputValues: templateInputValues
         ) else {
-            return
+            return taskID
         }
         // Before choosing a path: the cold path starts tasks too, and the user's Play must
         // release the outage whichever path it takes.
-        guard await passesProviderOutageGate(taskID: startID, origin: origin) else { return }
+        guard await passesProviderOutageGate(taskID: startID, origin: origin) else { return startID }
         // A child task's start must never take the cold path below: it stops every worker,
         // the coordinator that is waiting on this child included. That path exists to bring
         // Smith up, which a child's start does not need.
@@ -3861,25 +3893,30 @@ public actor OrchestrationRuntime {
         if !startsWithoutColdPath { startsWithoutColdPath = hasLiveSmith() }
         if startsWithoutColdPath {
             await performStartTaskWithLiveSmith(taskID: startID, origin: origin)
-            return
+            return startID
         }
         // Cold path — no Smith to preserve. Capture the most recent user message
         // before stopping (it may contain permissions or instructions), and the
         // session ID so Smith's pre-task planning calls get attributed to the task.
         let lastUserMessage = await captureLastUserMessage()
         let priorSessionID = currentSessionID
+        // The teardown below clears `stopRequested`: run while a Stop is pending, it would swallow that
+        // Stop and bring a session up behind it. No await sits between this check and that clear.
+        guard !aborted, !stopRequested else { return startID }
         await performStopAll(preserveObserverCallbacks: true)
         if let priorSessionID {
             await usageStore.backfillTaskID(startID, forSession: priorSessionID)
         }
         await performStart(resumingTaskID: startID, resumingOrigin: origin, lastUserMessage: lastUserMessage)
+        return startID
     }
 
     /// The task a start of `taskID` actually runs. A template is never run: a fresh instance is
     /// cloned from it and noted on the template. A task that belongs to another session is never run
     /// here in place either (#15): it is cloned into this session, because running it here would
     /// split its transcript across two sessions' logs. Anything else runs as itself. Returns nil
-    /// when a needed clone could not be made. Runs on the lifecycle queue via `restartForNewTask`.
+    /// when a needed clone could not be made. Runs on the lifecycle queue via `restartForNewTask`. When it
+    /// returns a clone, the start's reservation has moved to that clone; nil leaves it on `taskID`.
     private func resolveStartTarget(
         taskID: UUID,
         amendment: String? = nil,
@@ -3889,10 +3926,16 @@ public actor OrchestrationRuntime {
         let clone: AgentTask
         let source: ClonedRunSource
         if task.isTemplate {
-            switch await taskStore.instantiateTemplate(templateID: taskID, inputValues: templateInputValues) {
+            // The instance's id is minted first and the reservation moved onto it BEFORE the instance
+            // exists, so no drain or create_task sees the pending instance unreserved, or this one start
+            // counted under both ids.
+            let instanceID = UUID()
+            moveStartReservation(from: taskID, to: instanceID)
+            switch await taskStore.instantiateTemplate(templateID: taskID, inputValues: templateInputValues, instanceID: instanceID) {
             case .success(let created):
                 clone = created
             case .failure(let message):
+                moveStartReservation(from: instanceID, to: taskID)
                 await channel.post(ChannelMessage(
                     sender: .system,
                     content: "Could not start template \"\(task.title)\": \(message)",
@@ -3903,7 +3946,9 @@ public actor OrchestrationRuntime {
             source = .template(taskID)
             await taskStore.addUpdate(id: taskID, message: "Started instance \(clone.id.uuidString) from this template.")
         } else if await taskStore.originatesElsewhere(task) {
-            clone = await taskStore.cloneForRunInThisSession(source: task)
+            let cloneID = UUID()
+            moveStartReservation(from: taskID, to: cloneID)
+            clone = await taskStore.cloneForRunInThisSession(source: task, cloneID: cloneID)
             source = .taskFromAnotherSession(taskID)
         } else {
             return taskID
@@ -3951,17 +3996,20 @@ public actor OrchestrationRuntime {
             stopLogger.notice("interrupted start of \(task.id.uuidString, privacy: .public) not retried — the task left .starting meanwhile")
             return
         }
+        // Decided before the notice's await, so the notice says what happens. A Stop All that landed
+        // during the revert is queued behind this item, and its teardown clears `stopRequested`: a retry
+        // queued now would run after it and cold-start the session the user just stopped. One that lands
+        // after this point finds the retry queued AHEAD of its teardown, where the retry's own gate turns
+        // it away.
+        let retries = !aborted && !stopRequested
+        if retries { restartForNewTask(taskID: task.id, origin: origin) }
+        let outcome = retries ? "starting it again" : "not started again, because the session is stopping"
         await channel.post(ChannelMessage(
             sender: .system,
-            content: "Start of \"\(task.title)\" set aside so a stop could run first — starting it again.",
+            content: "Start of \"\(task.title)\" set aside so a stop could run first — \(outcome).",
             metadata: ["messageKind": .kind(.preparing), "taskID": .string(task.id.uuidString)],
             taskID: task.id
         ))
-        // A Stop All that landed during the awaits above is queued behind this item, and its teardown
-        // clears `stopRequested`: a retry queued now would run after it and cold-start the session
-        // the user just stopped. The flag is still up here, so check it last.
-        guard !aborted, !stopRequested else { return }
-        restartForNewTask(taskID: task.id, origin: origin)
     }
 
     private func hasLiveSmith() -> Bool {
@@ -4067,9 +4115,20 @@ public actor OrchestrationRuntime {
             case nil:
                 break
             }
+            // Whether the drain will start it on its own: the capacity-deferred and provider-recovered
+            // queues always drain, the launch batch only while auto-resume is on, and a plain pending
+            // task only while auto-advance is on.
+            let startsOnItsOwn: Bool
+            switch resumeQueue {
+            case .capacityDeferred?, .providerRecovered?: startsOnItsOwn = true
+            case .launchResume?: startsOnItsOwn = autoRunInterruptedTasks
+            case nil: startsOnItsOwn = autoAdvanceEnabled
+            }
             await channel.post(ChannelMessage(
                 sender: .system,
-                content: "Task \"\(task.title)\" queued — all \(maxConcurrentWorkers) worker slot(s) are busy. It will start automatically when one frees.",
+                content: startsOnItsOwn
+                    ? "Task \"\(task.title)\" queued — all \(maxConcurrentWorkers) worker slot(s) are busy. It will start automatically when one frees."
+                    : "Task \"\(task.title)\" is waiting — all \(maxConcurrentWorkers) worker slot(s) are busy and auto-run is off, so it stays waiting until it is started again.",
                 metadata: [
                     "messageKind": .kind(.taskQueuedAtCapacity),
                     "taskID": .string(taskID.uuidString)
@@ -4085,8 +4144,16 @@ public actor OrchestrationRuntime {
         let abandonedForStop = interruptibleStart?.token == startToken && interruptibleStart?.abandonedForStop == true
         interruptibleStart = nil
         guard let brownID = spawnedWorkerID else {
-            // An abort/stop mid-spawn is not the task's failure (same rule as performStart).
-            guard !aborted, !stopRequested else { return }
+            // An abort/stop mid-spawn is not the task's failure (same rule as performStart). Hand the
+            // task back where it was: left "Starting…", nothing would return it until the next launch —
+            // a stop changes no task's status, and the app demotes only `.running` ones. Only OUR claim,
+            // since a wake may have paused it. The resume queue isn't refilled: the next start rebuilds
+            // the launch batch from the store.
+            if aborted || stopRequested {
+                let (_, revertStatus) = Self.refusedStartReturn(claimedFrom: task.status, origin: origin)
+                await taskStore.updateStatus(id: taskID, to: revertStatus, ifCurrentlyIn: [.starting], cause: .startAbandoned)
+                return
+            }
             if abandonedForStop {
                 await requeueStartInterruptedByStop(task: task, origin: origin)
                 return
@@ -5232,8 +5299,6 @@ public actor OrchestrationRuntime {
     /// The actual teardown implementation. Runs ONLY as a lifecycle-queue item (or from
     /// another implementation already inside one).
     private func performStopAll(preserveObserverCallbacks: Bool = false) async {
-        // This stop is the answer to any pending stop request.
-        stopRequested = false
         // A worker-outage re-check that succeeded with nothing running would start tasks into a
         // stopped session; the outage itself stands, and `start()` resumes its re-check.
         workerOutageRecheck?.cancel()
@@ -5267,6 +5332,9 @@ public actor OrchestrationRuntime {
         // interleaved flow after this line belongs to a NEW generation this stopAll
         // doesn't touch; the lifecycle queue makes that interleaving impossible anyway.
         let handles = supervisor.endGeneration()
+        // This stop answers any pending stop request. Cleared only now the generation is gone, so a
+        // drain during the awaits above still saw the stop and queued nothing (`acceptsQueuedStarts`).
+        stopRequested = false
         refreshBrownWorkerActivityCount()
         // Drop per-Smith delivery tracking. Anything delivered-but-not-incorporated stays in
         // `pendingUserMessages` and will be redelivered to the next Smith by its start-drain.
@@ -5282,7 +5350,7 @@ public actor OrchestrationRuntime {
         // DETACHED Task (not an agent handle), so endGeneration()/agent.stop() don't touch it. Without
         // this, a validation could finish its LLM call after teardown and either deliver a result or
         // spawn a fresh Brown on a torn-down runtime (the zombie class this file guards against).
-        // `stopRequested` is reset at entry, so the coordinator's guards can't rely on it here — the
+        // `stopRequested` is reset once the generation has ended, so the coordinator's guards can't rely on it here — the
         // Task cancellation plus the `Task.isCancelled` guard checks are what actually stop it.
         for id in tasksBeingValidated {
             validationTasks[id]?.cancel()

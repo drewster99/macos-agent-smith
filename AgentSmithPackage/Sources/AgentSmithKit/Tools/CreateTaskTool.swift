@@ -557,18 +557,9 @@ public struct CreateTaskTool: AgentTool {
         // where Smith creates a task and then idles instead of immediately calling
         // run_task. Beyond capacity the task queues as pending — auto-run starts it when
         // a slot frees; Smith must NOT poll run_task for it.
-        let capacity = await context.workerCapacity()
-        let slotHolders = existingTasks.filter { other in
-            other.id != task.id &&
-            other.disposition == .active &&
-            other.occupiesWorkerSlot
-        }
-        // A start already queued but not yet running takes a slot too (#37): without it, tasks created
-        // while the queue is backed up each queued a start, past capacity.
-        let queuedStarts = await context.tasksWithQueuedStart()
-            .subtracting(slotHolders.map(\.id))
-            .subtracting([task.id])
-        if slotHolders.count + queuedStarts.count < capacity {
+        // A start already queued but not yet running takes a slot too (#37).
+        let slots = await TaskCreationSupport.workerSlotUsage(excludingSlotHolder: task.id, context: context)
+        if !slots.isFull {
             await context.restartForNewTask(task.id, nil)
             if let held = await TaskCreationSupport.outageHoldNote(context: context) {
                 return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) \(held)")
@@ -576,7 +567,10 @@ public struct CreateTaskTool: AgentTool {
             return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) A worker is being spawned to begin work on it now.")
         }
 
-        return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) All \(capacity) task slot(s) are busy — it is queued as pending and auto-run will start it when a slot frees. Do NOT call `run_task` on it.")
+        let whatNext = await context.autoAdvanceEnabled()
+            ? "it is queued as pending and auto-run will start it when a slot frees. Do NOT call `run_task` on it."
+            : "it waits as pending, and auto-run is off, so nothing starts it on its own — tell the user; it starts when they press Play or ask you to run it."
+        return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) All \(slots.capacity) task slot(s) are busy — \(whatNext)")
     }
 
     /// Build the "missing title" tool error. If there's exactly one pending task

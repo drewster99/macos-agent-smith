@@ -1259,7 +1259,12 @@ public actor TaskStore {
     }
 
 
-    public func instantiateTemplate(templateID: UUID, inputValues: [String: String]) async -> TemplateInstantiationResult {
+    /// - Parameter instanceID: The new instance's id. A runtime start mints it first so its place in the
+    ///   queued-start record is on the instance before the instance exists.
+    public func instantiateTemplate(templateID: UUID, inputValues: [String: String], instanceID: UUID = UUID()) async -> TemplateInstantiationResult {
+        guard tasks[instanceID] == nil else {
+            return .failure("A task with id \(instanceID.uuidString) already exists; a template instance needs a fresh id.")
+        }
         // A template may live in this session's tasks (before the global migration) or in the shared
         // library (after it). Prefer a local copy, fall back to the library. The instance is always
         // minted into THIS per-session store (stamped with `sessionID`), wherever the template lives.
@@ -1366,6 +1371,7 @@ public actor TaskStore {
             instanceTitle = titleInheritedFromTemplate
         }
         let instance = AgentTask(
+            id: instanceID,
             title: instanceTitle,
             description: substituted(template.description),
             status: .pending,
@@ -1420,8 +1426,12 @@ public actor TaskStore {
     /// status, result, validation, updates, approved tools, saved worker context, queued worker
     /// messages, pending effects, watches, start holds, schedule, or the coordinator link (a
     /// coordinator in another session cannot be waiting on it).
-    public func cloneForRunInThisSession(source: AgentTask) -> AgentTask {
+    /// - Parameter cloneID: The clone's id. A runtime start mints it first so its queued-start reservation
+    ///   is on the clone before the clone exists. Must be fresh.
+    public func cloneForRunInThisSession(source: AgentTask, cloneID: UUID = UUID()) -> AgentTask {
+        assert(tasks[cloneID] == nil, "cloneForRunInThisSession given an id already in use")
         let clone = AgentTask(
+            id: cloneID,
             title: source.title,
             description: source.description,
             status: .pending,

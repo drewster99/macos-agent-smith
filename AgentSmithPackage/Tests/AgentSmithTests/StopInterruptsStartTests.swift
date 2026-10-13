@@ -40,34 +40,36 @@ struct StopInterruptsStartTests {
         func set() { lock.withLock { _isSet = true } }
     }
 
-    private func makeRuntime(securityProvider: SlowScopingProvider) async throws -> OrchestrationRuntime {
+    private func makeRuntime(securityProvider: SlowScopingProvider, autoAdvance: Bool = false, capacity: Int = 4, withSmith: Bool = true) async throws -> OrchestrationRuntime {
         let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("agent-smith-stop-interrupts-start-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
         let configuration = ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")
+        var providers: [AgentRole: any LLMProvider] = [.securityAgent: securityProvider, .brown: StillThinkingLLMProvider()]
+        var configurations: [AgentRole: ModelConfiguration] = [.securityAgent: configuration, .brown: configuration]
+        if withSmith {
+            providers[.smith] = MockLLMProvider(responses: [LLMResponse(text: "Standing by.")])
+            configurations[.smith] = configuration
+        }
         let runtime = OrchestrationRuntime(
-            providers: [
-                .smith: MockLLMProvider(responses: [LLMResponse(text: "Standing by.")]),
-                .securityAgent: securityProvider,
-                .brown: StillThinkingLLMProvider()
-            ],
-            configurations: [.smith: configuration, .securityAgent: configuration, .brown: configuration],
+            providers: providers,
+            configurations: configurations,
             providerAPITypes: [:],
             agentTuning: [:],
             semanticSearchEngine: SemanticSearchEngine(),
             usageStore: UsageStore(persistence: PersistenceManager(testingRoot: tmpRoot)),
-            autoAdvanceEnabled: false,
+            autoAdvanceEnabled: autoAdvance,
             autoRunInterruptedTasks: false,
             memoryStore: nil
         )
         await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(
-            autoRunNextTask: false,
+            autoRunNextTask: autoAdvance,
             autoRunInterruptedTasks: false,
             enableTaskCompletionValidators: false,
             scopeToolSetOnTaskStart: true
         )))
-        await runtime.setWorkerCapacity(4)
+        await runtime.setWorkerCapacity(capacity)
         await runtime.start()
         return runtime
     }
@@ -275,5 +277,74 @@ struct StopInterruptsStartTests {
         #expect(await store.task(id: second.id)?.status == .pending, "the second start ran ahead of the first")
 
         await runtime.stopAll()
+    }
+
+    // MARK: - A Stop or abort starts nothing behind it
+
+    @Test("Stop All during tool scoping returns the task to pending and leaves nothing running", .timeLimit(.minutes(1)))
+    func stopAllDuringScopingRevertsStart() async throws {
+        let security = SlowScopingProvider()
+        let runtime = try await makeRuntime(securityProvider: security)
+        let store = await runtime.taskStore
+        let starting = await store.addTask(title: "\(Self.slowMarker) task", description: "d")
+        await runtime.restartForNewTask(taskID: starting.id, origin: .explicitUser)
+        #expect(await waitUntil { security.slowCalls == 1 })
+
+        await runtime.stopAll()
+        #expect(await store.task(id: starting.id)?.status == .pending, "a stopped start was left Starting…")
+        #expect(await runtime.liveWorkerID(taskID: starting.id) == nil)
+        #expect(await runtime.currentSessionID == nil)
+        let notices = await runtime.channel.allMessages().filter { $0.content.contains("set aside so a stop could run first") }
+        #expect(notices.isEmpty)
+    }
+
+    @Test("Stop All during scoping does not auto-advance into the stopped session", .timeLimit(.minutes(1)))
+    func stopAllDoesNotResurrectViaDrain() async throws {
+        let security = SlowScopingProvider()
+        let runtime = try await makeRuntime(securityProvider: security, autoAdvance: true, capacity: 1)
+        let store = await runtime.taskStore
+        let starting = await store.addTask(title: "\(Self.slowMarker) task", description: "d")
+        await runtime.restartForNewTask(taskID: starting.id, origin: .explicitUser)
+        #expect(await waitUntil { security.slowCalls == 1 })
+        let pending = await store.addTask(title: "Pending", description: "d")
+
+        await runtime.stopAll()
+        await runtime.waitForPendingRestarts()
+        #expect(await runtime.currentSessionID == nil, "the stopped session was started again")
+        #expect(await runtime.liveWorkerID(taskID: pending.id) == nil)
+        #expect(await store.task(id: pending.id)?.status == .pending)
+        #expect(await store.task(id: starting.id)?.status == .pending)
+        #expect(await runtime.taskIDsWithQueuedStart().isEmpty)
+    }
+
+    @Test("an abort during scoping does not loop queued starts", .timeLimit(.minutes(1)))
+    func abortDoesNotLoopStarts() async throws {
+        let security = SlowScopingProvider()
+        let runtime = try await makeRuntime(securityProvider: security, autoAdvance: true, capacity: 1)
+        let store = await runtime.taskStore
+        let starting = await store.addTask(title: "\(Self.slowMarker) task", description: "d")
+        await runtime.restartForNewTask(taskID: starting.id, origin: .explicitUser)
+        #expect(await waitUntil { security.slowCalls == 1 })
+        let pending = await store.addTask(title: "Pending", description: "d")
+
+        await runtime.abort(reason: "test")
+        await runtime.waitForPendingRestarts()
+        await runtime.start()   // a lifecycle item that does nothing while aborted: a quiescence probe
+        #expect(await runtime.taskIDsWithQueuedStart().isEmpty, "an aborted session keeps re-queuing starts")
+        #expect(await store.task(id: starting.id)?.status == .pending)
+        #expect(await store.task(id: pending.id)?.status == .pending)
+    }
+
+    @Test("a start that cannot bring the session up is not retried by the drain", .timeLimit(.minutes(1)))
+    func failedColdStartDoesNotLoop() async throws {
+        let runtime = try await makeRuntime(securityProvider: SlowScopingProvider(), autoAdvance: true, withSmith: false)
+        let store = await runtime.taskStore
+        let task = await store.addTask(title: "Q", description: "d")
+        await runtime.restartForNewTask(taskID: task.id, origin: .explicitUser)
+        await runtime.waitForPendingRestarts()
+        let failures: @Sendable () async -> Int = { await runtime.channel.allMessages().filter { $0.content.contains("No Smith provider configured") }.count }
+        let settled = await failures()
+        #expect(await waitUntil(timeout: .seconds(2)) { await failures() > settled } == false, "the failed start loops")
+        #expect(await runtime.currentSessionID == nil)
     }
 }

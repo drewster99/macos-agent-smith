@@ -36,6 +36,30 @@ enum TaskCreationSupport {
         return "Queued, not started: the worker's model '\(outage.modelID)' can't be used (\(outage.kind.displayDescription)). It starts on its own when the user changes the worker's model or presses Play on it. Do NOT call `run_task` on it again or recreate it."
     }
 
+    /// How the worker pool is spoken for, as a start tool sees it: active tasks holding a slot, plus
+    /// starts queued on the lifecycle queue that take one when they run (#37). Read-then-act — the
+    /// runtime's start gate (`admitsWorker`) stays the backstop.
+    struct WorkerSlotUsage {
+        let capacity: Int
+        /// Active tasks holding a slot (`AgentTask.occupiesWorkerSlot`).
+        let slotHolders: [AgentTask]
+        /// Tasks with a start queued that don't already hold a slot.
+        let queuedStartTaskIDs: Set<UUID>
+        var isFull: Bool { slotHolders.count + queuedStartTaskIDs.count >= capacity }
+    }
+
+    /// The pool as it stands — the ONE tool-side slot rule (`create_task`, `run_task`).
+    /// `excludedTaskID`, the task being started, never counts as a slot holder; its own queued start,
+    /// if any, still counts, and the caller decides what that means.
+    static func workerSlotUsage(excludingSlotHolder excludedTaskID: UUID, context: ToolContext) async -> WorkerSlotUsage {
+        let capacity = await context.workerCapacity()
+        let slotHolders = await context.taskStore.allTasks().filter {
+            $0.id != excludedTaskID && $0.disposition == .active && $0.occupiesWorkerSlot
+        }
+        let queued = await context.tasksWithQueuedStart().subtracting(slotHolders.map(\.id))
+        return WorkerSlotUsage(capacity: capacity, slotHolders: slotHolders, queuedStartTaskIDs: queued)
+    }
+
     /// Retrieves memories and prior tasks relevant to a new (non-template) task, attaches them, and
     /// returns the sentence the tool result uses to say what was attached ("" when nothing was).
     static func attachRelevantContext(to task: AgentTask, context: ToolContext) async -> String {

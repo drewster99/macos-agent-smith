@@ -183,37 +183,51 @@ struct RunTaskTool: AgentTool {
             }
         }
 
-        // Capacity gate: each in-flight task (running/validating, plus awaitingReview —
-        // whose parked worker still holds its slot) occupies one of the configured
-        // worker slots. Refuse only when they're all taken.
-        let allTasks = await context.taskStore.allTasks()
-        let capacity = await context.workerCapacity()
-        let slotHolders = allTasks.filter {
-            $0.disposition == .active && $0.id != taskID && $0.occupiesWorkerSlot
+        let runsInPlace = !task.isTemplate && !runsAsCloneFromAnotherSession
+        let slots = await TaskCreationSupport.workerSlotUsage(excludingSlotHolder: taskID, context: context)
+        // A task whose own start is already queued is not started twice: the second start finds it
+        // claimed and is dropped, so "Running" would promise nothing. After `prepareForRun` on purpose —
+        // a finished task with a stale queued start was just reopened, and that start now runs it. Before
+        // the amendment below, which a refused call must not write.
+        if runsInPlace && slots.queuedStartTaskIDs.contains(taskID) {
+            return .failure("""
+                Task '\(task.title)' already has a start queued; it claims the task when it reaches the front \
+                of the start queue. Do NOT call run_task on it again. Your instructions were NOT applied — \
+                if they matter, call amend_task with this task's ID.
+                """)
         }
-        // A clone (of a template, or of a task from another session) is created regardless and its
-        // start is pended by the runtime's capacity gate, from where auto-run starts it — refusing
-        // here would leave the original, which nothing ever starts automatically.
-        if !task.isTemplate && !runsAsCloneFromAnotherSession && slotHolders.count >= capacity {
+        // Capacity gate: slot holders (`AgentTask.occupiesWorkerSlot`) plus starts queued ahead (#37).
+        // A clone (of a template, or of a task from another session) is created regardless and its start
+        // pended by the runtime's gate — refusing here would leave the original, which nothing ever
+        // starts automatically.
+        if runsInPlace && slots.isFull {
             // A blocker deserves a pointed message — resolving one is usually the fastest way to
             // free a slot. (A validator-error park does NOT hold a slot — its worker is gone — so
             // it never appears here; the only slot-holding `.awaitingReview` is a config block.)
-            if let helpTask = slotHolders.first(where: { $0.status == .awaitingHelp }) {
+            if let helpTask = slots.slotHolders.first(where: { $0.status == .awaitingHelp }) {
                 return .failure("""
-                    Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(helpTask.title)' \
+                    Cannot start '\(task.title)' — all \(slots.capacity) task slot(s) are busy, and task '\(helpTask.title)' \
                     has a blocker from Brown awaiting your help. Resolve it with `provide_help` to free a slot.
                     """)
             }
-            if let blockedTask = slotHolders.first(where: { $0.status == .awaitingReview }) {
+            if let blockedTask = slots.slotHolders.first(where: { $0.status == .awaitingReview }) {
                 return .failure("""
-                    Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy, and task '\(blockedTask.title)' \
+                    Cannot start '\(task.title)' — all \(slots.capacity) task slot(s) are busy, and task '\(blockedTask.title)' \
                     is parked waiting on validator configuration. Assign a Validator model to release it and free a slot.
                     """)
             }
-            let names = slotHolders.map { "'\($0.title)'" }.joined(separator: ", ")
+            var busy = slots.slotHolders.map { "'\($0.title)'" }
+            if !slots.queuedStartTaskIDs.isEmpty {
+                busy.append("\(slots.queuedStartTaskIDs.count) start(s) queued ahead of it")
+            }
+            // Only the auto-advance drain starts a waiting task, and only a pending one.
+            let autoRunStartsIt = task.status == .pending ? await context.autoAdvanceEnabled() : false
+            let whatNext = autoRunStartsIt
+                ? "It stays pending; auto-run starts it when a slot frees. Do not retry run_task."
+                : "Auto-run starts only pending tasks, and only while it is on, so it may not start on its own — tell the user it is waiting for a slot."
             return .failure("""
-                Cannot start '\(task.title)' — all \(capacity) task slot(s) are busy (\(names)). \
-                It stays queued; auto-run starts it when a slot frees. Do not retry run_task.
+                Cannot start '\(task.title)' — all \(slots.capacity) task slot(s) are busy (\(busy.joined(separator: ", "))). \
+                \(whatNext) Your instructions were NOT applied.
                 """)
         }
 
@@ -309,6 +323,11 @@ struct RunTaskTool: AgentTool {
             startTaskID = task.id
         }
 
+        // A clone always starts; whether it waits for a slot is read now, after it exists — the reading
+        // above predates the clone's announcement (a retrieval call).
+        let cloneSlots: TaskCreationSupport.WorkerSlotUsage? = runsInPlace
+            ? nil
+            : await TaskCreationSupport.workerSlotUsage(excludingSlotHolder: startTaskID, context: context)
         await context.restartForNewTask(startTaskID, nil)
 
         if let held = await TaskCreationSupport.outageHoldNote(context: context) {
@@ -317,6 +336,12 @@ struct RunTaskTool: AgentTool {
         let autoNote = autoResolved
             ? " (auto-resolved task_id because it was omitted from the call and only one task was eligible)"
             : ""
+        if let cloneSlots, cloneSlots.isFull {
+            let whatNext = await context.autoAdvanceEnabled()
+                ? "it starts when one frees. Do NOT call run_task on it again."
+                : "it waits as pending, and auto-run is off, so nothing starts it on its own — tell the user; it starts when they press Play or ask you to run it (run_task on \(startTaskID))."
+            return .success("Queued task '\(task.title)' (ID: \(startTaskID)).\(cloneNote)\(autoNote)\(amendmentNote) All \(cloneSlots.capacity) task slot(s) are taken, so \(whatNext)")
+        }
         return .success("Running task '\(task.title)' (ID: \(startTaskID)).\(cloneNote)\(autoNote)\(amendmentNote) System is restarting with a clean context to begin work.")
     }
 

@@ -475,7 +475,7 @@ enum ListTasksPropertyFilter: String, CaseIterable {
             if let filter = ListTasksPropertyFilter(rawValue: trimmed) { return .success(filter) }
             return .failure(ListTasksFilterError(key: key, received: "'\(raw)'"))
         case let other?:
-            return .failure(ListTasksFilterError(key: key, received: "\(other)"))
+            return .failure(ListTasksFilterError(key: key, received: ListTasksFilterError.jsonText(of: other)))
         }
     }
 
@@ -495,5 +495,32 @@ struct ListTasksFilterError: Error, CustomStringConvertible {
 
     var description: String {
         "Invalid \(key): \(received). Valid values: any (no filter), only, exclude — as a string."
+    }
+
+    /// The value as the JSON the model sent (`false`, `3`, `["a"]`). `AnyCodable` interpolates as Swift
+    /// cases the model never wrote (`bool(false)`), which it can't map back to its argument.
+    /// Hand-rendered so it can't fail; dictionary keys are sorted so the message is deterministic.
+    fileprivate static func jsonText(of value: AnyCodable) -> String {
+        switch value {
+        case .null: return "null"
+        case .bool(let flag): return flag ? "true" : "false"
+        case .int(let number): return "\(number)"
+        case .double(let number): return "\(number)"
+        case .string(let text):
+            let escaped = text
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "\n", with: "\\n")
+                .replacingOccurrences(of: "\r", with: "\\r")
+                .replacingOccurrences(of: "\t", with: "\\t")
+            return "\"\(escaped)\""
+        case .array(let elements):
+            return "[" + elements.map { jsonText(of: $0) }.joined(separator: ",") + "]"
+        case .dictionary(let members):
+            let rendered = members.sorted { $0.key < $1.key }.map { member in
+                "\(jsonText(of: .string(member.key))):\(jsonText(of: member.value))"
+            }
+            return "{" + rendered.joined(separator: ",") + "}"
+        }
     }
 }

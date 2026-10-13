@@ -110,4 +110,21 @@ struct ListTasksPropertyFilterTests {
             #expect(property["enum"] == .array([.string("any"), .string("only"), .string("exclude")]), "\(key)")
         }
     }
+
+    @Test("a non-string value is echoed as the JSON the model sent, not as Swift enum cases",
+          arguments: [
+              (AnyCodable.bool(false), "false"),
+              (AnyCodable.int(3), "3"),
+              (AnyCodable.string("x") , "'x'"),
+              (AnyCodable.array([.string("a\"b")]), #"["a\"b"]"#),
+              (AnyCodable.dictionary(["k": .int(1), "a": .bool(true)]), #"{"a":true,"k":1}"#)
+          ])
+    func nonStringValueIsEchoedAsJSON(value: AnyCodable, expected: String) {
+        guard case .failure(let error) = ListTasksPropertyFilter.read(["is_scheduled": value], "is_scheduled") else {
+            Issue.record("expected a refusal for \(expected)")
+            return
+        }
+        #expect(error.description.hasPrefix("Invalid is_scheduled: \(expected). "), "\(error.description)")
+        #expect(!error.description.contains("AnyCodable") && !error.description.contains("bool("))
+    }
 }
