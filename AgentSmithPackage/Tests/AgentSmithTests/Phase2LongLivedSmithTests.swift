@@ -146,6 +146,22 @@ struct Phase2LongLivedSmithTests {
         await runtime.stopAll()
     }
 
+    @Test("A task that is no longer in the store gets no worker")
+    func spawnRefusesTaskMissingFromStore() async {
+        let runtime = makeRuntime()
+        await runtime.setOrchestrationSettings(OrchestrationSettings.builtIn.applying(OrchestrationSettingsOverride(autoRunNextTask: false, autoRunInterruptedTasks: true, scopeToolSetOnTaskStart: false)))
+        await runtime.start()
+
+        // A caller's snapshot of a task deleted before its queued start ran.
+        let gone = AgentTask(title: "Deleted", description: "d")
+        #expect(await runtime.taskStore.task(id: gone.id) == nil)
+        #expect(await runtime.spawnBrown(for: gone) == nil)
+        #expect(await runtime.liveWorkerID(taskID: gone.id) == nil)
+        #expect(await runtime.agentIDForRole(.brown) == nil, "no worker of any kind was started")
+
+        await runtime.stopAll()
+    }
+
     @Test("At capacity 2, workers for two tasks coexist; a third spawn is refused")
     func capacityTwoAllowsConcurrentWorkers() async {
         let runtime = makeRuntime()

@@ -46,6 +46,61 @@ struct TaskPreconditionTests {
         #expect(capabilityReencoded == ["type": "workerModelSupports", "capability": "audio"])
     }
 
+    /// Same hazard as the checker below, one record over: `errorKind` lives in the task's validation
+    /// ledger, and a newer build may write a kind this one doesn't know.
+    @Test("A verdict record with an error kind this build doesn't know still decodes its task, and is written back unchanged")
+    func unknownErrorKindCoding() throws {
+        var task = AgentTask(title: "t", description: "d")
+        let record = CriterionVerdictRecord(
+            criterionID: UUID(), verdict: .error(message: "timed out"), errorKind: .timeout,
+            validatorName: "v", validatorHash: "h", round: 1)
+        task.validation = TaskValidationState(round: 1, verdictRecords: [record])
+        let json = try #require(String(data: try JSONEncoder().encode(task), encoding: .utf8))
+        #expect(json.contains(#""errorKind":"timeout""#))
+        let future = Data(json.replacingOccurrences(of: #""errorKind":"timeout""#, with: #""errorKind":"quota_exhausted""#).utf8)
+
+        let decoded = try JSONDecoder().decode(AgentTask.self, from: future)
+        let decodedRecord = try #require(decoded.validation?.verdictRecords.first)
+        #expect(decodedRecord.errorKind == nil, "a kind this build can't name is not reported as one it can")
+        #expect(decodedRecord.verdict == .error(message: "timed out"))
+        let reencoded = try #require(String(data: try JSONEncoder().encode(decoded), encoding: .utf8))
+        #expect(reencoded.contains(#""errorKind":"quota_exhausted""#), "the newer build's kind is written back unchanged")
+
+        // Known kinds and absent ones keep their form.
+        #expect(try JSONDecoder().decode(AgentTask.self, from: Data(json.utf8)).validation?.verdictRecords.first?.errorKind == .timeout)
+        let none = CriterionVerdictRecord(criterionID: UUID(), verdict: .accepted, validatorName: "v", validatorHash: "h", round: 1)
+        let noneJSON = try #require(String(data: try JSONEncoder().encode(none), encoding: .utf8))
+        #expect(!noneJSON.contains("errorKind"))
+        #expect(try JSONDecoder().decode(CriterionVerdictRecord.self, from: Data(noneJSON.utf8)).errorKind == nil)
+    }
+
+    @Test("A block record naming a checker this build doesn't know still decodes its task, and is written back unchanged")
+    func unknownCheckerCoding() throws {
+        var task = AgentTask(title: "t", description: "d")
+        task.preconditionFailure = PreconditionFailureRecord(
+            precondition: TaskPrecondition(kind: .fileExists(path: "/tmp/x"), origin: .smith),
+            detail: "missing", checkedBy: .startCheck)
+        let json = try #require(String(data: try JSONEncoder().encode(task), encoding: .utf8))
+        #expect(json.contains(#""checkedBy":"startCheck""#))
+        let future = Data(json.replacingOccurrences(of: #""checkedBy":"startCheck""#, with: #""checkedBy":"auditor""#).utf8)
+
+        let decoded = try JSONDecoder().decode(AgentTask.self, from: future)
+        let record = try #require(decoded.preconditionFailure)
+        let reencoded = try #require(String(data: try JSONEncoder().encode(decoded), encoding: .utf8))
+        #expect(reencoded.contains(#""checkedBy":"auditor""#))
+        #expect(record.detail == "missing")
+        #expect(record.checkedBy == .unknown("auditor"))
+        // Nothing this build can't name may move a task.
+        for from in AgentTask.Status.allCases {
+            #expect(!TaskTransitionCause.preconditionUnmet(.unknown("auditor")).permits(from: from, to: .failed))
+        }
+        // The known checkers keep their wire form, inside a transition cause as well.
+        for checker: PreconditionFailureRecord.CheckedBy in [.startCheck, .worker] {
+            let cause = TaskTransitionCause.preconditionUnmet(checker)
+            #expect(try JSONDecoder().decode(TaskTransitionCause.self, from: try JSONEncoder().encode(cause)) == cause)
+        }
+    }
+
     @Test("Authoring refuses a relative path, a multi-word command, and an empty statement")
     func authoringRules() {
         #expect(TaskPrecondition.authoringProblem(in: .fileExists(path: "relative/file")) != nil)

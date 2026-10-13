@@ -162,6 +162,9 @@ public enum TaskTransitionCause: Codable, Sendable, Equatable, Hashable {
         case .preconditionUnmet(.worker):
             // Only a working worker reports, never mid-validation: a submitted result is judged.
             return from == .running && to == .failed
+        case .preconditionUnmet(.unknown):
+            // Only ever decoded from a newer build's record; this build can't say what it may do.
+            return false
         case .workerStarted, .workerStartedAtRuntimeStart:
             return [.starting, .pending, .paused, .interrupted].contains(from) && to == .running
         case .submittedForValidation:

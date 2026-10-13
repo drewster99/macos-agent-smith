@@ -18,7 +18,7 @@ final class JudgmentTelemetryBox: Sendable {
         var outputTokens = 0
         var cacheReadTokens = 0
         var retries = 0
-        var firstAttemptError: String?
+        var firstAttemptError: EvaluationRunner.Failure?
         var dynamicItemCount: Int?
     }
 
@@ -39,7 +39,7 @@ final class JudgmentTelemetryBox: Sendable {
 
     /// Notes an internal ERROR retry; the FIRST error is kept — it names the attempt that
     /// used to vanish without a trace (a rescued turn-exhaustion, a transient outage).
-    func noteRetry(firstError: String) {
+    func noteRetry(firstError: EvaluationRunner.Failure) {
         state.withLock { s in
             s.retries += 1
             if s.firstAttemptError == nil { s.firstAttemptError = firstError }
@@ -60,7 +60,8 @@ final class JudgmentTelemetryBox: Sendable {
                 outputTokens: s.outputTokens,
                 cacheReadTokens: s.cacheReadTokens,
                 attempts: 1 + s.retries,
-                firstAttemptError: s.firstAttemptError,
+                firstAttemptError: s.firstAttemptError?.message,
+                firstAttemptErrorKind: s.firstAttemptError?.kind,
                 durationMs: duration,
                 dynamicItemCount: s.dynamicItemCount
             )
@@ -565,7 +566,13 @@ extension OrchestrationRuntime {
         let criteriaByID = Dictionary(task.acceptanceCriteria.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let sessionID = currentSessionID
         let validatorConfig = llmConfigs[.validator]
-        let rows = landed.map { record -> ValidationMetricsRow in
+        let rows = landed.compactMap { record -> ValidationMetricsRow? in
+            // Every judged criterion's telemetry is collected before its verdict lands, so a miss is a
+            // bug here — said out loud, not papered over with counts guessed from the transcript.
+            guard let telemetry = telemetryByCriterion[record.criterionID] else {
+                validationLogger.fault("No judgment telemetry for criterion \(record.criterionID.uuidString, privacy: .public); its metrics row is not written")
+                return nil
+            }
             let criterion = criteriaByID[record.criterionID]
             return ValidationMetricsRow(
                 record: record,
@@ -579,7 +586,7 @@ extension OrchestrationRuntime {
                 contractVersion: token.contractVersion,
                 modelID: validatorConfig?.model,
                 providerID: validatorConfig?.providerID,
-                telemetry: telemetryByCriterion[record.criterionID]
+                telemetry: telemetry
             )
         }
         // Fire-and-forget: the ledger's serial queue does the file I/O off this actor.
@@ -607,6 +614,7 @@ extension OrchestrationRuntime {
             return (CriterionVerdictRecord(
                 criterionID: criterion.id,
                 verdict: .error(message: problem),
+                errorKind: .invalidValidatorPrompt,
                 validatorName: criterion.name,
                 validatorHash: "-",
                 round: round
@@ -614,13 +622,14 @@ extension OrchestrationRuntime {
         }
 
         var (outcome, transcript) = await runValidator(definition, criterion: criterion, task: task, telemetry: telemetry)
-        if case .error(let firstErrorMessage) = outcome {
-            telemetry.noteRetry(firstError: firstErrorMessage)
+        if case .error(let firstError) = outcome {
+            telemetry.noteRetry(firstError: firstError)
             validationLogger.notice("Criterion \(criterion.id.uuidString.prefix(8), privacy: .public) errored — retrying once")
             (outcome, transcript) = await runValidator(definition, criterion: criterion, task: task, telemetry: telemetry)
         }
 
         let verdict: CriterionVerdictRecord.Verdict
+        var errorKind: ValidationErrorKind?
         switch outcome {
         case .verdict("ACCEPT", _):
             verdict = .accepted
@@ -631,17 +640,22 @@ extension OrchestrationRuntime {
                 verdict = .waived(reason: reason ?? "no reason given")
             } else {
                 verdict = .error(message: "validator attempted to WAIVE a non-waivable criterion: \(reason ?? "no reason given")")
+                errorKind = .waiveNonWaivable
             }
         case .verdict(let token, let reason):
             verdict = .error(message: "unexpected verdict token '\(token)' (\(reason ?? ""))")
+            errorKind = .unexpectedVerdictToken
         case .items:
             verdict = .error(message: "validator returned items where a verdict was required")
-        case .error(let message):
-            verdict = .error(message: message)
+            errorKind = .itemsWhereVerdict
+        case .error(let failure):
+            verdict = .error(message: failure.message)
+            errorKind = failure.kind
         }
         return (CriterionVerdictRecord(
             criterionID: criterion.id,
             verdict: verdict,
+            errorKind: errorKind,
             validatorName: definition.name,
             validatorHash: definition.contentHash,
             round: round,
@@ -670,9 +684,16 @@ extension OrchestrationRuntime {
         let telemetry = JudgmentTelemetryBox()
 
         func record(_ verdict: CriterionVerdictRecord.Verdict, validator: EvaluatorDefinition? = nil) -> (record: CriterionVerdictRecord, telemetry: ValidationJudgmentTelemetry) {
+            record(verdict, errorKind: nil, validator: validator)
+        }
+        func record(_ failure: EvaluationRunner.Failure, validator: EvaluatorDefinition? = nil) -> (record: CriterionVerdictRecord, telemetry: ValidationJudgmentTelemetry) {
+            record(.error(message: failure.message), errorKind: failure.kind, validator: validator)
+        }
+        func record(_ verdict: CriterionVerdictRecord.Verdict, errorKind: ValidationErrorKind?, validator: EvaluatorDefinition?) -> (record: CriterionVerdictRecord, telemetry: ValidationJudgmentTelemetry) {
             (CriterionVerdictRecord(
                 criterionID: criterion.id,
                 verdict: verdict,
+                errorKind: errorKind,
                 validatorName: validator?.name ?? "-",
                 validatorHash: validator?.contentHash ?? "-",
                 round: round,
@@ -690,15 +711,15 @@ extension OrchestrationRuntime {
         if let prompt = criterion.effectiveInputEnumeratorPrompt {
             switch EvaluatorDefaults.makeCustomDefinition(name: prepareName, description: "Task-scoped input enumerator", kind: .prepare, authoredPrompt: prompt) {
             case .success(let definition): prepareDefinition = definition
-            case .failure(let problem): return record(.error(message: problem.message))
+            case .failure(let problem): return record(EvaluationRunner.Failure(.invalidValidatorPrompt, problem.message))
             }
         } else {
-            return record(.error(message: "input enumerator is unavailable"))
+            return record(EvaluationRunner.Failure(.enumeratorFailure, "input enumerator is unavailable"))
         }
 
         var (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task, telemetry: telemetry)
         if case .error(let prepareError) = prepareOutcome {
-            telemetry.noteRetry(firstError: "prepare: \(prepareError)")
+            telemetry.noteRetry(firstError: EvaluationRunner.Failure(prepareError.kind, "prepare: \(prepareError.message)"))
             (prepareOutcome, prepareTranscript) = await runValidator(prepareDefinition, criterion: criterion, task: task, telemetry: telemetry)
         }
         prepareRenderedInput = prepareTranscript.renderedInput
@@ -711,13 +732,14 @@ extension OrchestrationRuntime {
             // compact JSON fragments — bound to {{item}} verbatim.
             items = raw
         case .verdict(let token, _):
-            return record(.error(message: "prepare '\(prepareName)' returned verdict '\(token)' where a JSON array was required"), validator: prepareDefinition)
-        case .error(let message):
-            return record(.error(message: "prepare '\(prepareName)' failed: \(message)"), validator: prepareDefinition)
+            return record(EvaluationRunner.Failure(.enumeratorFailure, "prepare '\(prepareName)' returned verdict '\(token)' where a JSON array was required"), validator: prepareDefinition)
+        case .error(let failure):
+            // The cause's kind, not the wrapper's: a prepare that timed out is a timeout.
+            return record(EvaluationRunner.Failure(failure.kind, "prepare '\(prepareName)' failed: \(failure.message)"), validator: prepareDefinition)
         }
 
         guard items.count <= Self.maxPrepareItems else {
-            return record(.error(message: "prepare '\(prepareName)' emitted \(items.count) items (cap \(Self.maxPrepareItems)) — narrow the prepare or split the criterion"), validator: prepareDefinition)
+            return record(EvaluationRunner.Failure(.enumeratorFailure, "prepare '\(prepareName)' emitted \(items.count) items (cap \(Self.maxPrepareItems)) — narrow the prepare or split the criterion"), validator: prepareDefinition)
         }
         guard !items.isEmpty else {
             // An empty enumeration is the dynamic analogue of "nothing to check". Honor it as a pass
@@ -727,7 +749,7 @@ extension OrchestrationRuntime {
             if criterion.waivable {
                 return record(.waived(reason: "prepare '\(prepareName)' enumerated no items"), validator: prepareDefinition)
             }
-            return record(.error(message: "prepare '\(prepareName)' enumerated no items for a non-waivable criterion — cannot confirm the requirement"), validator: prepareDefinition)
+            return record(EvaluationRunner.Failure(.enumeratorFailure, "prepare '\(prepareName)' enumerated no items for a non-waivable criterion — cannot confirm the requirement"), validator: prepareDefinition)
         }
 
         let resolution = resolveValidator(for: criterion)
@@ -736,7 +758,7 @@ extension OrchestrationRuntime {
         case .success(let resolved):
             perItemDefinition = resolved
         case .failure(let problem):
-            return record(.error(message: problem))
+            return record(EvaluationRunner.Failure(.invalidValidatorPrompt, problem))
         }
 
         // Items run sequentially: this criterion is already inside the round's parallel
@@ -748,7 +770,7 @@ extension OrchestrationRuntime {
         for (index, item) in items.enumerated() {
             var (outcome, transcript) = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item], telemetry: telemetry)
             if case .error(let itemError) = outcome {
-                telemetry.noteRetry(firstError: "item \(index + 1): \(itemError)")
+                telemetry.noteRetry(firstError: EvaluationRunner.Failure(itemError.kind, "item \(index + 1): \(itemError.message)"))
                 (outcome, transcript) = await runValidator(perItemDefinition, criterion: criterion, task: task, extraSlots: ["item": item], telemetry: telemetry)
             }
             debugLog.append("## item \(index + 1): \(item.prefix(120))\n" + transcript.turnLog.joined(separator: "\n---\n"))
@@ -761,14 +783,14 @@ extension OrchestrationRuntime {
                 if criterion.waivable {
                     waives.append("item \(index + 1) (\(item)): \(reason ?? "")")
                 } else {
-                    return record(.error(message: "validator attempted to WAIVE item \(index + 1) (\(item)) of a non-waivable criterion"), validator: perItemDefinition)
+                    return record(EvaluationRunner.Failure(.waiveNonWaivable, "validator attempted to WAIVE item \(index + 1) (\(item)) of a non-waivable criterion"), validator: perItemDefinition)
                 }
             case .verdict(let token, let reason):
-                return record(.error(message: "unexpected verdict token '\(token)' on item \(index + 1) (\(reason ?? ""))"), validator: perItemDefinition)
+                return record(EvaluationRunner.Failure(.unexpectedVerdictToken, "unexpected verdict token '\(token)' on item \(index + 1) (\(reason ?? ""))"), validator: perItemDefinition)
             case .items:
-                return record(.error(message: "per-item validator returned items where a verdict was required"), validator: perItemDefinition)
-            case .error(let message):
-                return record(.error(message: "item \(index + 1) (\(item)): \(message)"), validator: perItemDefinition)
+                return record(EvaluationRunner.Failure(.itemsWhereVerdict, "per-item validator returned items where a verdict was required"), validator: perItemDefinition)
+            case .error(let failure):
+                return record(EvaluationRunner.Failure(failure.kind, "item \(index + 1) (\(item)): \(failure.message)"), validator: perItemDefinition)
             }
         }
 
@@ -859,7 +881,7 @@ extension OrchestrationRuntime {
         telemetry: JudgmentTelemetryBox?
     ) async -> (outcome: EvaluationRunner.Outcome, transcript: EvaluationRunner.Transcript, interruption: EvaluationRunner.Interruption?) {
         guard let resolved = validatorModel() else {
-            return (.error("no model is assigned to the Validator role"), EvaluationRunner.Transcript(), nil)
+            return (.error(EvaluationRunner.Failure(.noModel, "no model is assigned to the Validator role")), EvaluationRunner.Transcript(), nil)
         }
         let provider = resolved.provider
         let config = resolved.config
@@ -887,7 +909,7 @@ extension OrchestrationRuntime {
         // orders impossible fixes. A missing scope is an invariant violation, not a fallback case —
         // error out so it escalates for manual review rather than fabricating a toolset.
         guard let workerToolNames = task.approvedTools, !workerToolNames.isEmpty else {
-            return (.error("worker tool scope (task.approvedTools) is unavailable — cannot judge feasibility; escalating for manual review"), EvaluationRunner.Transcript(), nil)
+            return (.error(EvaluationRunner.Failure(.noWorkerScope, "worker tool scope (task.approvedTools) is unavailable — cannot judge feasibility; escalating for manual review")), EvaluationRunner.Transcript(), nil)
         }
 
         var fields: [String: String] = [

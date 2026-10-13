@@ -165,11 +165,35 @@ public struct TaskPrecondition: Codable, Sendable, Equatable, Identifiable {
 /// Why a task is BLOCKED: which precondition failed, how, and who found it. Stored on the task with
 /// its `.failed` status (`AgentTask.preconditionFailure`) and cleared when the task leaves `.failed`.
 public struct PreconditionFailureRecord: Codable, Sendable, Equatable {
-    public enum CheckedBy: String, Codable, Sendable {
+    public enum CheckedBy: Codable, Sendable, Hashable {
         /// The runtime's own check before a worker started.
         case startCheck
         /// The worker reported it false (`report_precondition_unmet`).
         case worker
+        /// A checker this build doesn't know (written by a newer one). Decoding it must not fail,
+        /// because the record lives inside its task and a throw would lose the whole task. It is kept
+        /// and written back unchanged; no live write can produce it, and it permits no transition.
+        case unknown(String)
+
+        private enum Known: String { case startCheck, worker }
+
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            switch Known(rawValue: raw) {
+            case .startCheck: self = .startCheck
+            case .worker: self = .worker
+            case nil: self = .unknown(raw)
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            switch self {
+            case .startCheck: try container.encode(Known.startCheck.rawValue)
+            case .worker: try container.encode(Known.worker.rawValue)
+            case .unknown(let raw): try container.encode(raw)
+            }
+        }
     }
 
     public let preconditionID: UUID

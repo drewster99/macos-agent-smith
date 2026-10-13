@@ -299,7 +299,8 @@ struct EvaluationRunnerLoopTests {
             Issue.record("expected error, got \(outcome)")
             return
         }
-        #expect(why.contains("unparseable"))
+        #expect(why.kind == .unparseable)
+        #expect(why.message.contains("unparseable"))
         #expect(provider.callCount == 2)
     }
 
@@ -314,7 +315,7 @@ struct EvaluationRunnerLoopTests {
             Issue.record("expected error, got \(outcome)")
             return
         }
-        #expect(why.contains("empty response"))
+        #expect(why.kind == .emptyResponse)
         #expect(provider.callCount == 1)
     }
 
@@ -334,7 +335,8 @@ struct EvaluationRunnerLoopTests {
             Issue.record("expected error, got \(outcome)")
             return
         }
-        #expect(why.contains("contradicted successful file_read"))
+        #expect(why.kind == .contradictionGuard)
+        #expect(why.message.contains("contradicted successful file_read"))
     }
 
     @Test("The final allowed turn withholds tools and asks for the verdict")
@@ -407,8 +409,8 @@ struct EvaluationRunnerLoopTests {
             Issue.record("expected error, got \(outcome)")
             return
         }
-        #expect(why.contains("forced final turn"))
-        #expect(ValidationErrorKind.classify(why) == "forced_verdict_failed")
+        #expect(why.kind == .forcedVerdictFailed)
+        #expect(why.message.contains("forced final turn"))
         #expect(provider.callCount == 2)
     }
 
@@ -421,6 +423,7 @@ struct EvaluationRunnerLoopTests {
             Issue.record("expected error, got \(outcome)")
             return
         }
-        #expect(why.contains("turns"))
+        #expect(why.kind == .forcedVerdictFailed)
+        #expect(why.message.contains("turns"))
     }
 }

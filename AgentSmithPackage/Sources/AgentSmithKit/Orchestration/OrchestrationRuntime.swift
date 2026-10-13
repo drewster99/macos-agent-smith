@@ -5676,9 +5676,15 @@ public actor OrchestrationRuntime {
         for worker in sameTaskWorkers {
             _ = await performTerminateAgent(id: worker.id)
         }
-        // Every worker start passes the task's preconditions first (#18): read fresh, since the
-        // caller's snapshot may predate an edit. An unmet one blocks the task and starts nothing.
-        let current = await taskStore.task(id: task.id) ?? task
+        // Read fresh, since the caller's snapshot may predate an edit — and a task that is no longer
+        // in the store (deleted while its start was queued) gets no worker at all: there is nothing
+        // for the worker to report to, and its status writes would all be refused.
+        guard let current = await taskStore.task(id: task.id) else {
+            stopLogger.notice("spawnBrown refused — task \(task.id.uuidString, privacy: .public) is no longer in the task store")
+            return nil
+        }
+        // Every worker start passes the task's preconditions first (#18). An unmet one blocks the
+        // task and starts nothing.
         if let failure = await PreconditionEvaluator.firstUnmet(current.preconditions, in: preconditionEnvironment()) {
             guard !aborted, !stopRequested else { return nil }
             // Only if the task hasn't moved during the (possibly slow) check: a pause wins.

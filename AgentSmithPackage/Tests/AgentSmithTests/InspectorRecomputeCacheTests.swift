@@ -40,19 +40,18 @@ struct InspectorRecomputeCacheTests {
         #expect(byRole.values.flatMap(\.self).count == 3)
     }
 
-    /// `ChannelLogView.ChannelBannerKind` lives in the app target so we can't import it directly
-    /// here, but its raw values must match what the runtime posts. This test records which kinds
-    /// the inspector renders as banners and which fall through to a plain row.
+    /// `ChannelLogView.ChannelBannerKind` lives in the app target, so it can't be imported here. This
+    /// test records which kinds the transcript renders as banners and which fall through to a plain
+    /// row — and, so the record can't go stale again, reads the app's own `init?(_ kind:)` switch from
+    /// source and requires the two to agree exactly.
     ///
     /// It used to double as the guard against `messageKind` renames, enumerated by hand "from a
-    /// grep" — and it did not work: it listed 18 kinds when the runtime emitted more than thirty,
-    /// so most of the surface it claimed to pin was never covered. `ChannelMessageKind` owns that
-    /// job now (its wire strings are asserted directly, and a source guard blocks new bare
-    /// literals), which leaves this test the narrower question it can actually answer: the
-    /// banner/plain-row CLASSIFICATION. The sets are typed, so a rename is a compile error rather
-    /// than a silently-stale string.
-    @Test("Inspector banner classification is exhaustive and unambiguous")
-    func bannerClassificationIsUnambiguous() {
+    /// grep" — and it did not work: it listed 18 kinds when the runtime emitted more than thirty.
+    /// `ChannelMessageKind` owns that job now (its wire strings are asserted directly, and a source
+    /// guard blocks new bare literals). The hand list then drifted too: `.mcpStatus` became a banner
+    /// (`mcpFailed`) without this test noticing, which is why the source comparison exists.
+    @Test("Inspector banner classification is exhaustive, unambiguous, and matches the app")
+    func bannerClassificationIsUnambiguous() throws {
         // Kinds that ChannelBannerKind has explicit cases for (renders a banner or hides the row).
         let bannerKinds: Set<ChannelMessageKind> = [
             .taskCreated,
@@ -67,28 +66,59 @@ struct InspectorRecomputeCacheTests {
             .changesRequested,
             .memorySaved,
             .memorySearched,
+            .mcpStatus,
             .restartChrome,
             .timerActivity,
             .userTaskAction
         ]
-        // Kinds that the runtime emits but ChannelBannerKind intentionally doesn't list —
-        // they fall through to MessageRow via the `.none` case in `bannerView(for:…)`.
-        // The tool subsystem handles tool_request/tool_output separately. The scheduled-run
-        // and submission-auto-rejected kinds are advisory system messages that render fine
-        // as plain MessageRows; promoting them to banners is a future polish task.
-        let nonBannerKinds: Set<ChannelMessageKind> = [
-            .toolRequest,
-            .toolOutput,
-            .scheduledRunDeferred,
-            .scheduledRunRefused,
-            .submissionAutoRejected
-        ]
-        // If you remove a kind from `bannerKinds`, also remove its case from
-        // `ChannelLogView.ChannelBannerKind` (else you'll have a dead enum case).
+        // Every other kind falls through to MessageRow (`ChannelBannerKind.init?` returns nil).
+        let nonBannerKinds = Set(ChannelMessageKind.allCases).subtracting(bannerKinds)
         #expect(
             bannerKinds.intersection(nonBannerKinds).isEmpty,
             "A kind should be either a banner or a plain row, not both"
         )
+
+        let source = try String(
+            contentsOf: CodeStyleGuardTests.appTargetRoot.appendingPathComponent("Views/ChannelLogView.swift"),
+            encoding: .utf8)
+        let scanned = try Self.bannerSwitch(in: source)
+        // The switch spells case names; the kinds here only expose wire strings.
+        let caseNames = try Self.caseNamesByWireString()
+        #expect(scanned.banner == Set(bannerKinds.compactMap { caseNames[$0.rawValue] }), "banner kinds in ChannelBannerKind.init? differ from this test's list")
+        #expect(scanned.plain == Set(nonBannerKinds.compactMap { caseNames[$0.rawValue] }), "plain-row kinds in ChannelBannerKind.init? differ from every other kind")
+    }
+
+    /// Every `ChannelMessageKind` case name keyed by its wire string, read from the enum's source
+    /// (`case toolRequest = "tool_request"`). Complete or the test fails.
+    private static func caseNamesByWireString() throws -> [String: String] {
+        let url = CodeStyleGuardTests.appTargetRoot
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("AgentSmithPackage/Sources/AgentSmithKit/Channel/ChannelMessageKind.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let declaration = try NSRegularExpression(pattern: #"^\s*case\s+(\w+)\s*=\s*"([^"]+)""#, options: .anchorsMatchLines)
+        var names: [String: String] = [:]
+        for match in declaration.matches(in: source, range: NSRange(source.startIndex..., in: source)) {
+            guard let name = Range(match.range(at: 1), in: source), let wire = Range(match.range(at: 2), in: source) else { continue }
+            names[String(source[wire])] = String(source[name])
+        }
+        #expect(Set(names.keys) == Set(ChannelMessageKind.allCases.map(\.rawValue)), "couldn't read every case of ChannelMessageKind")
+        return names
+    }
+
+    /// The case names `ChannelBannerKind.init?(_ kind:)` maps to a banner (`self = …`) and to a plain
+    /// row (`return nil`), read from the app's source.
+    private static func bannerSwitch(in source: String) throws -> (banner: Set<String>, plain: Set<String>) {
+        let start = try #require(source.range(of: "init?(_ kind: ChannelMessageKind) {"), "ChannelBannerKind.init? not found")
+        let body = String(source[start.upperBound...])
+        let clause = try NSRegularExpression(pattern: #"case\s+((?:\.\w+\s*,\s*)*\.\w+)\s*:\s*(self\s*=|return nil)"#)
+        var banner: Set<String> = [], plain: Set<String> = []
+        for match in clause.matches(in: body, range: NSRange(body.startIndex..., in: body)) {
+            guard let list = Range(match.range(at: 1), in: body), let action = Range(match.range(at: 2), in: body) else { continue }
+            let names = body[list].split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).dropFirst() }.map(String.init)
+            if body[action].hasPrefix("self") { banner.formUnion(names) } else { plain.formUnion(names) }
+            if body[action] == "return nil" { break }
+        }
+        return (banner, plain)
     }
 
     @Test("metadata keys task_summarized + isError discriminate summary vs error rows")
@@ -124,3 +154,4 @@ struct InspectorRecomputeCacheTests {
         #expect(errorCount == 1)
     }
 }
+

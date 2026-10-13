@@ -7,12 +7,14 @@ struct ValidationMetricsLedgerTests {
 
     private func makeRow(
         verdict: CriterionVerdictRecord.Verdict,
+        errorKind: ValidationErrorKind? = nil,
         responseLog: String = "",
-        telemetry: ValidationJudgmentTelemetry? = nil
+        telemetry: ValidationJudgmentTelemetry = ValidationJudgmentTelemetry()
     ) -> ValidationMetricsRow {
         let record = CriterionVerdictRecord(
             criterionID: UUID(),
             verdict: verdict,
+            errorKind: errorKind,
             validatorName: "default",
             validatorHash: "abcd1234",
             round: 3,
@@ -82,24 +84,19 @@ struct ValidationMetricsLedgerTests {
         #expect(row.durationMs == 481_000)
     }
 
-    @Test("Without telemetry, turn and tool-call counts derive from the runner's transcript rendering")
-    func transcriptCountsMatchRendering() {
-        // Two tool-round turns (three calls, then one) and a final text turn, joined the way
-        // EvaluationRunner composes responseLog.
+    @Test("Turn and tool-call counts come from live telemetry, never from the transcript's text")
+    func countsComeFromTelemetryNotTranscript() {
+        // A log that LOOKS like three turns and four tool calls, rendered the way the runner renders.
         let log = [
             "→ file_read({\"path\":\"/a\"}) → contents\n→ grep({\"pattern\":\"x\"}) → hits\n→ file_read({\"path\":\"/b\"}) → contents",
             "→ directory_listing({\"path\":\"/c\"}) → entries",
             "ACCEPT"
         ].joined(separator: "\n---\n")
-        let row = makeRow(verdict: .accepted, responseLog: log)
-        #expect(row.llmTurns == 3)
-        #expect(row.evidenceToolCalls == 4)
-        #expect(row.inputTokens == nil)
+        let row = makeRow(verdict: .accepted, responseLog: log,
+                          telemetry: ValidationJudgmentTelemetry(llmTurns: 1, evidenceToolCalls: 0))
+        #expect(row.llmTurns == 1)
+        #expect(row.evidenceToolCalls == 0)
         #expect(row.attempts == 1)
-
-        let empty = ValidationMetricsRow.transcriptCounts(fromResponseLog: "")
-        #expect(empty.turns == 0)
-        #expect(empty.toolCalls == 0)
     }
 
     @Test("Oversized rejection detail is capped, not dropped")
@@ -108,29 +105,22 @@ struct ValidationMetricsLedgerTests {
         #expect(row.detail?.count == 2000)
     }
 
-    @Test("Error kinds classify from our own message formats, including dynamic-criterion wrappers")
-    func errorKindClassification() {
-        let cases: [(String, String)] = [
-            ("exhausted 10 turns without a conforming result", "turn_exhaustion"),
-            ("item 3 (foo.txt): exhausted 10 turns without a conforming result", "turn_exhaustion"),
-            ("timed out after 600s", "timeout"),
-            ("prepare 'x-input-enumerator' failed: timed out after 600s", "timeout"),
-            ("cancelled", "cancelled"),
-            ("LLM call failed: The request timed out.", "transport"),
-            ("empty response from validator; retrying requires a fresh validator conversation", "empty_response"),
-            ("unparseable after 3 attempts: no verdict token", "unparseable"),
-            ("validator rejection contradicted successful file_read for /a; discarding this validator attempt", "contradiction_guard"),
-            ("validator attempted to WAIVE a non-waivable criterion: n/a", "waive_non_waivable"),
-            ("unexpected verdict token 'MAYBE' ()", "unexpected_verdict_token"),
-            ("validator returned items where a verdict was required", "items_where_verdict"),
-            ("prepare 'x' emitted 900 items (cap 200) — narrow the prepare or split the criterion", "enumerator_failure"),
-            ("input enumerator is unavailable", "enumerator_failure"),
-            ("no model is assigned to the Validator role", "no_model"),
-            ("worker tool scope (task.approvedTools) is unavailable — cannot judge feasibility; escalating for manual review", "no_worker_scope"),
-            ("something entirely new", "other")
+    @Test("Every error kind keeps its wire string, retired ones included")
+    func errorKindWireStrings() throws {
+        // Independent of the enum: renaming a case is free, changing what is written is a failure.
+        let wire: [ValidationErrorKind: String] = [
+            .timeout: "timeout", .cancelled: "cancelled", .transport: "transport",
+            .modelChanged: "model_changed", .emptyResponse: "empty_response", .unparseable: "unparseable",
+            .forcedVerdictFailed: "forced_verdict_failed", .contradictionGuard: "contradiction_guard",
+            .waiveNonWaivable: "waive_non_waivable", .unexpectedVerdictToken: "unexpected_verdict_token",
+            .itemsWhereVerdict: "items_where_verdict", .enumeratorFailure: "enumerator_failure",
+            .invalidValidatorPrompt: "invalid_validator_prompt", .noModel: "no_model",
+            .noWorkerScope: "no_worker_scope", .turnExhaustion: "turn_exhaustion", .other: "other"
         ]
-        for (message, expected) in cases {
-            #expect(ValidationErrorKind.classify(message) == expected, "\(message)")
+        #expect(Set(ValidationErrorKind.allCases) == Set(wire.keys), "a new kind needs a pinned wire string")
+        for (kind, raw) in wire {
+            #expect(kind.rawValue == raw)
+            #expect(try JSONDecoder().decode(ValidationErrorKind.self, from: Data("\"\(raw)\"".utf8)) == kind)
         }
     }
 
@@ -214,23 +204,28 @@ struct ValidationMetricsLedgerTests {
         #expect(ValidationRoundOutcome(parkingFor: .userAcceptanceRequested) == .userAcceptanceRequested)
     }
 
-    @Test("An errored judgment row carries the typed kind alongside the prose")
+    @Test("An errored judgment row carries the kind its producer declared, whatever the message says")
     func errorRowsCarryKind() {
-        let telemetry = ValidationJudgmentTelemetry(attempts: 2, firstAttemptError: "timed out after 600s")
-        let row = makeRow(verdict: .error(message: "exhausted 10 turns without a conforming result"), telemetry: telemetry)
-        #expect(row.errorKind == "turn_exhaustion")
-        #expect(row.firstAttemptErrorKind == "timeout")
+        let telemetry = ValidationJudgmentTelemetry(attempts: 2, firstAttemptError: "LLM call failed: timed out after 600s",
+                                                    firstAttemptErrorKind: .transport)
+        // A message that reads like a different kind: the declared kind is what's written.
+        let row = makeRow(verdict: .error(message: "timed out after 600s, then cancelled"), errorKind: .forcedVerdictFailed,
+                          telemetry: telemetry)
+        #expect(row.errorKind == .forcedVerdictFailed)
+        #expect(row.firstAttemptErrorKind == .transport)
+        #expect(makeRow(verdict: .rejected(reason: "timed out")).errorKind == nil)
     }
 
     @Test("The telemetry box accumulates across attempts and keeps the FIRST error")
     func telemetryBoxAccumulates() {
         let box = JudgmentTelemetryBox()
-        box.noteRetry(firstError: "first failure")
-        box.noteRetry(firstError: "second failure")
+        box.noteRetry(firstError: EvaluationRunner.Failure(.timeout, "first failure"))
+        box.noteRetry(firstError: EvaluationRunner.Failure(.transport, "second failure"))
         box.noteDynamicItemCount(7)
         let snapshot = box.snapshot()
         #expect(snapshot.attempts == 3)
         #expect(snapshot.firstAttemptError == "first failure")
+        #expect(snapshot.firstAttemptErrorKind == .timeout)
         #expect(snapshot.dynamicItemCount == 7)
         #expect(snapshot.llmTurns == 0)
     }

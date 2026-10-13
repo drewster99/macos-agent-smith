@@ -213,11 +213,48 @@ public struct CriterionVerdictRecord: Codable, Sendable, Equatable, Identifiable
     /// previews, text turns verbatim including grammar-retry rounds. For dynamic
     /// criteria this is the prepare exchange followed by each item's exchange.
     public let responseLog: String?
+    /// Why an `.error` verdict errored, declared by the code that produced it. Nil for every other
+    /// verdict, for an error recorded before kinds were declared, and for a kind a newer build wrote
+    /// that this one can't name — telemetry reads it, nothing in validation does.
+    public var errorKind: ValidationErrorKind? {
+        if case .known(let kind)? = storedErrorKind { return kind }
+        return nil
+    }
+
+    /// `errorKind` as stored. Decoding must not fail on a kind this build doesn't know: the record
+    /// lives inside its task's ledger, and a throw would lose the whole task. Such a kind is kept and
+    /// written back unchanged.
+    private let storedErrorKind: StoredErrorKind?
+
+    private enum StoredErrorKind: Codable, Sendable, Equatable {
+        case known(ValidationErrorKind)
+        case unrecognized(String)
+
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = ValidationErrorKind(rawValue: raw).map(StoredErrorKind.known) ?? .unrecognized(raw)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            switch self {
+            case .known(let kind): try container.encode(kind.rawValue)
+            case .unrecognized(let raw): try container.encode(raw)
+            }
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, criterionID, verdict, validatorName, validatorHash, round, recordedAt
+        case renderedInput, renderedSystemPrompt, responseLog
+        case storedErrorKind = "errorKind"
+    }
 
     public init(
         id: UUID = UUID(),
         criterionID: UUID,
         verdict: Verdict,
+        errorKind: ValidationErrorKind? = nil,
         validatorName: String,
         validatorHash: String,
         round: Int,
@@ -229,6 +266,7 @@ public struct CriterionVerdictRecord: Codable, Sendable, Equatable, Identifiable
         self.id = id
         self.criterionID = criterionID
         self.verdict = verdict
+        self.storedErrorKind = errorKind.map(StoredErrorKind.known)
         self.validatorName = validatorName
         self.validatorHash = validatorHash
         self.round = round

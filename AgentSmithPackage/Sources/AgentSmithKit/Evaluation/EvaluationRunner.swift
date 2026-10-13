@@ -24,7 +24,19 @@ public enum EvaluationRunner {
         /// exhaustion, provider failure, or persistent parse failure. NEVER to be
         /// conflated with a rejection — an error parks work for escalation, it does not
         /// send a worker chasing ghosts.
-        case error(String)
+        case error(Failure)
+    }
+
+    /// Why a run produced no grammar-conforming result: the typed kind, declared where the run
+    /// ended, and a message for a person. Nothing reads the kind back out of the message.
+    public struct Failure: Sendable, Equatable {
+        public let kind: ValidationErrorKind
+        public let message: String
+
+        public init(_ kind: ValidationErrorKind, _ message: String) {
+            self.kind = kind
+            self.message = message
+        }
     }
 
     /// Why a run ended before producing its own outcome.
@@ -139,10 +151,10 @@ public enum EvaluationRunner {
 
         while turns < turnLimit {
             if Date() > deadline {
-                return (.error("timed out after \(Int(definition.timeoutSeconds))s"), transcript, nil)
+                return (.error(Failure(.timeout, "timed out after \(Int(definition.timeoutSeconds))s")), transcript, nil)
             }
             if Task.isCancelled {
-                return (.error("cancelled"), transcript, nil)
+                return (.error(Failure(.cancelled, "cancelled")), transcript, nil)
             }
             turns += 1
             let forced = isForced(turnNumber: turns)
@@ -189,7 +201,7 @@ public enum EvaluationRunner {
                           transportAttempt < LLMRetryPolicy.maxAttempts,
                           Date() <= deadline,
                           !Task.isCancelled else {
-                        return (.error("LLM call failed: \(error.localizedDescription)"), transcript, nil)
+                        return (.error(Failure(.transport, "LLM call failed: \(error.localizedDescription)")), transcript, nil)
                     }
                     let delay = LLMRetryPolicy.delay(attempt: transportAttempt, retryAfter: retryAfter)
                     if transportAttempt == 1 { waitStreakStartedAt = Date() }
@@ -209,9 +221,9 @@ public enum EvaluationRunner {
                     case .elapsed:
                         continue
                     case .cancelled:
-                        return (.error("LLM call failed: \(error.localizedDescription)"), transcript, nil)
+                        return (.error(Failure(.transport, "LLM call failed: \(error.localizedDescription)")), transcript, nil)
                     case .wokenForModelChange:
-                        return (.error("interrupted: the validator's model changed while it waited on its provider"), transcript, .modelChanged)
+                        return (.error(Failure(.modelChanged, "interrupted: the validator's model changed while it waited on its provider")), transcript, .modelChanged)
                     }
                 }
             }
@@ -227,13 +239,13 @@ public enum EvaluationRunner {
                     transcript.turnLog.append("[forced final turn] " + text)
                     if let contradiction = contradictedToolClaim(in: outcome, observations: toolObservations) {
                         transcript.turnLog.append("[validator runtime guard] \(contradiction)")
-                        return (.error(contradiction), transcript, nil)
+                        return (.error(Failure(.contradictionGuard, contradiction)), transcript, nil)
                     }
                     return (outcome, transcript, nil)
                 }
                 transcript.turnLog.append("[forced final turn: tool calls not run] \(response.toolCalls.map(\.name).joined(separator: ", "))")
                 guard allowForcedRepair() else {
-                    return (.error("no conforming verdict after forced final turn (\(turns) turns)"), transcript, nil)
+                    return (.error(Failure(.forcedVerdictFailed, "no conforming verdict after forced final turn (\(turns) turns)")), transcript, nil)
                 }
                 messages.append(.assistant(from: response))
                 let demand = "Not executed: no more evidence calls are available. " + Self.forcedVerdictInstruction(for: definition.outputGrammar)
@@ -344,28 +356,27 @@ public enum EvaluationRunner {
             case .success(let outcome):
                 if let contradiction = contradictedToolClaim(in: outcome, observations: toolObservations) {
                     transcript.turnLog.append("[validator runtime guard] \(contradiction)")
-                    return (.error(contradiction), transcript, nil)
+                    return (.error(Failure(.contradictionGuard, contradiction)), transcript, nil)
                 }
                 return (outcome, transcript, nil)
+            case .empty:
+                return (.error(Failure(.emptyResponse, "empty response from validator; retrying requires a fresh validator conversation")), transcript, nil)
             case .failure(let why):
-                if isEmptyParseFailure(why) && isVerdictGrammar(definition.outputGrammar) {
-                    return (.error("empty response from validator; retrying requires a fresh validator conversation"), transcript, nil)
-                }
                 if forced {
                     guard allowForcedRepair() else {
-                        return (.error("no conforming verdict after forced final turn (\(turns) turns): \(why)"), transcript, nil)
+                        return (.error(Failure(.forcedVerdictFailed, "no conforming verdict after forced final turn (\(turns) turns): \(why)")), transcript, nil)
                     }
                 } else {
                     parseRetries += 1
                     guard parseRetries <= maxParseRetries(for: definition.outputGrammar) else {
-                        return (.error("unparseable after \(parseRetries) attempts: \(why)"), transcript, nil)
+                        return (.error(Failure(.unparseable, "unparseable after \(parseRetries) attempts: \(why)")), transcript, nil)
                     }
                 }
                 messages.append(.assistant(from: response))
                 messages.append(.user(formatRetryNudge(for: definition.outputGrammar, problem: why)))
             }
         }
-        return (.error("no conforming verdict after forced final turn (\(turns) turns)"), transcript, nil)
+        return (.error(Failure(.forcedVerdictFailed, "no conforming verdict after forced final turn (\(turns) turns)")), transcript, nil)
     }
 
     private struct ToolObservation {
@@ -388,15 +399,6 @@ public enum EvaluationRunner {
         case .jsonArray:
             return maxJSONParseRetries
         }
-    }
-
-    private static func isVerdictGrammar(_ grammar: EvaluatorDefinition.OutputGrammar) -> Bool {
-        if case .verdictLine = grammar { return true }
-        return false
-    }
-
-    private static func isEmptyParseFailure(_ problem: String) -> Bool {
-        problem.localizedCaseInsensitiveContains("empty response")
     }
 
     /// Phrases a rejection uses to claim a file was missing or unreadable. Matching prose is
@@ -434,6 +436,10 @@ public enum EvaluationRunner {
 
     enum ParseResult {
         case success(Outcome)
+        /// A verdict-line response with nothing in it. Typed, not a `failure` message, because the
+        /// runner acts on it: an empty reply ends the attempt so a fresh conversation can retry,
+        /// where a malformed one is re-prompted in place.
+        case empty
         case failure(String)
     }
 
@@ -451,7 +457,7 @@ public enum EvaluationRunner {
     static func parseVerdictLine(_ text: String, allowed: [EvaluatorDefinition.VerdictSpec]) -> ParseResult {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
         guard let first = lines.first?.trimmingCharacters(in: .whitespaces), !first.isEmpty else {
-            return .failure("empty response")
+            return .empty
         }
         // Split on any whitespace (space OR tab — a tab-separated verdict is still a verdict) and
         // match the token case-insensitively (a judge emitting "Reject" instead of "REJECT" is a

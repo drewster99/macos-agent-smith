@@ -2,9 +2,8 @@ import Foundation
 import os
 
 /// Per-judgment execution telemetry, captured live by the coordinator (LLM calls observed via
-/// `onResponse`, retries noted where they happen) rather than re-derived from the persisted
-/// transcript. Optional on a row: rows built without it (or read from old files) simply carry
-/// nil token fields and transcript-derived counts.
+/// `onResponse`, retries noted where they happen) — never re-derived from the persisted transcript,
+/// whose text is written for a person.
 public struct ValidationJudgmentTelemetry: Sendable, Equatable {
     /// LLM calls across the whole judgment — BOTH attempts when an ERROR was retried, and for
     /// dynamic criteria the prepare exchange plus every per-item exchange.
@@ -20,6 +19,8 @@ public struct ValidationJudgmentTelemetry: Sendable, Equatable {
     /// The first attempt's error when a retry happened — the previously INVISIBLE population
     /// (a rescued turn-exhaustion left no trace anywhere but the usage records).
     public var firstAttemptError: String?
+    /// The first attempt's error kind, as declared where that attempt failed.
+    public var firstAttemptErrorKind: ValidationErrorKind?
     public var durationMs: Int
     /// For dynamic (enumerated) criteria: how many items the prepare emitted. Nil for plain.
     public var dynamicItemCount: Int?
@@ -32,6 +33,7 @@ public struct ValidationJudgmentTelemetry: Sendable, Equatable {
         cacheReadTokens: Int = 0,
         attempts: Int = 1,
         firstAttemptError: String? = nil,
+        firstAttemptErrorKind: ValidationErrorKind? = nil,
         durationMs: Int = 0,
         dynamicItemCount: Int? = nil
     ) {
@@ -42,6 +44,7 @@ public struct ValidationJudgmentTelemetry: Sendable, Equatable {
         self.cacheReadTokens = cacheReadTokens
         self.attempts = attempts
         self.firstAttemptError = firstAttemptError
+        self.firstAttemptErrorKind = firstAttemptErrorKind
         self.durationMs = durationMs
         self.dynamicItemCount = dynamicItemCount
     }
@@ -82,10 +85,11 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
     /// The rejection reason or error message, capped — kept so identical-rejection convergence
     /// analysis works from this file alone. Nil for accepts.
     public var detail: String?
-    /// Typed classification of `detail` when the verdict is an error — see `ValidationErrorKind`.
-    public var errorKind: String?
-    /// Same classification for `firstAttemptError`, when a retry happened.
-    public var firstAttemptErrorKind: String?
+    /// Why an error verdict errored, as declared where it was produced (`ValidationErrorKind`). Nil
+    /// for other verdicts, and for an error whose record predates declared kinds.
+    public var errorKind: ValidationErrorKind?
+    /// The same for `firstAttemptError`, when a retry happened.
+    public var firstAttemptErrorKind: ValidationErrorKind?
     public var round: Int
     public var contractVersion: Int
     public var validatorName: String
@@ -96,29 +100,15 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
     /// See `ValidationJudgmentTelemetry.attempts` / `.firstAttemptError`.
     public var attempts: Int
     public var firstAttemptError: String?
-    /// From live telemetry when available (total across attempts); otherwise derived from the
-    /// record's own transcript rendering (final attempt only).
+    /// Live telemetry, totalled across attempts.
     public var llmTurns: Int
     public var evidenceToolCalls: Int
-    /// Nil = unknown (no live telemetry, e.g. rows synthesized from old verdict records).
+    /// Optional for rows written before every judgment carried live telemetry; nil = unknown.
     public var inputTokens: Int?
     public var outputTokens: Int?
     public var cacheReadTokens: Int?
     public var durationMs: Int?
     public var dynamicItemCount: Int?
-
-    /// Derives (turns, tool calls) from a `CriterionVerdictRecord.responseLog`, which
-    /// `EvaluationRunner` composes as turn entries joined by "\n---\n", tool rounds rendered as
-    /// lines starting "→ name(…) → …". Parsing a format this module itself renders is fine for
-    /// TELEMETRY; it must never steer behavior (see the no-prose-control-flow rule).
-    public static func transcriptCounts(fromResponseLog log: String) -> (turns: Int, toolCalls: Int) {
-        guard !log.isEmpty else { return (0, 0) }
-        let turns = log.components(separatedBy: "\n---\n").count
-        let toolCalls = log.components(separatedBy: "\n")
-            .filter { $0.hasPrefix("→ ") }
-            .count
-        return (turns, toolCalls)
-    }
 
     private static let maxDetailLength = 2000
 
@@ -134,7 +124,7 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
         contractVersion: Int,
         modelID: String?,
         providerID: String?,
-        telemetry: ValidationJudgmentTelemetry?
+        telemetry: ValidationJudgmentTelemetry
     ) {
         self.recordedAt = record.recordedAt
         self.sessionID = sessionID
@@ -159,72 +149,23 @@ public struct ValidationMetricsRow: Codable, Sendable, Equatable {
             self.verdict = "error"
             self.detail = String(message.prefix(Self.maxDetailLength))
         }
-        self.errorKind = {
-            if case .error(let message) = record.verdict { return ValidationErrorKind.classify(message) }
-            return nil
-        }()
+        self.errorKind = record.errorKind
         self.round = record.round
         self.contractVersion = contractVersion
         self.validatorName = record.validatorName
         self.validatorHash = record.validatorHash
         self.modelID = modelID
         self.providerID = providerID
-        if let telemetry {
-            self.attempts = telemetry.attempts
-            self.firstAttemptError = telemetry.firstAttemptError.map { String($0.prefix(Self.maxDetailLength)) }
-            self.firstAttemptErrorKind = telemetry.firstAttemptError.map { ValidationErrorKind.classify($0) }
-            self.llmTurns = telemetry.llmTurns
-            self.evidenceToolCalls = telemetry.evidenceToolCalls
-            self.inputTokens = telemetry.inputTokens
-            self.outputTokens = telemetry.outputTokens
-            self.cacheReadTokens = telemetry.cacheReadTokens
-            self.durationMs = telemetry.durationMs
-            self.dynamicItemCount = telemetry.dynamicItemCount
-        } else {
-            let counts = Self.transcriptCounts(fromResponseLog: record.responseLog ?? "")
-            self.attempts = 1
-            self.firstAttemptError = nil
-            self.firstAttemptErrorKind = nil
-            self.llmTurns = counts.turns
-            self.evidenceToolCalls = counts.toolCalls
-            self.inputTokens = nil
-            self.outputTokens = nil
-            self.cacheReadTokens = nil
-            self.durationMs = nil
-            self.dynamicItemCount = nil
-        }
-    }
-}
-
-/// Typed classification of validation error MESSAGES — every string matched here is composed
-/// by this codebase (`EvaluationRunner` and `TaskValidationCoordinator`), so this is parsing
-/// our own output, and it is TELEMETRY ONLY: nothing may ever branch behavior on it (the
-/// no-prose-control-flow rule). When adding a new error message at the source, extend this
-/// table; an unmatched message classifies as "other" rather than failing, so a reworded
-/// message degrades a histogram, never a run.
-public enum ValidationErrorKind {
-    public static func classify(_ message: String) -> String {
-        let lowered = message.lowercased()
-        // Inner-cause checks come FIRST: a dynamic criterion wraps causes as
-        // "item 3 (…): timed out after 600s" and "prepare '…' failed: <cause>", and the
-        // cause is the truer kind than the wrapper.
-        if lowered.contains("forced final turn") { return "forced_verdict_failed" }
-        // No longer written (a run out of turns now ends in a forced verdict turn, #17); kept so the
-        // kind of a message from before that change is still named.
-        if lowered.contains("exhausted"), lowered.contains("turns") { return "turn_exhaustion" }
-        if lowered.contains("timed out after") { return "timeout" }
-        if lowered.contains("cancelled") { return "cancelled" }
-        if lowered.contains("llm call failed") { return "transport" }
-        if lowered.contains("empty response from validator") { return "empty_response" }
-        if lowered.contains("unparseable after") { return "unparseable" }
-        if lowered.contains("contradicted successful file_read") { return "contradiction_guard" }
-        if lowered.contains("waive"), lowered.contains("non-waivable") { return "waive_non_waivable" }
-        if lowered.contains("unexpected verdict token") { return "unexpected_verdict_token" }
-        if lowered.contains("items where a verdict was required") { return "items_where_verdict" }
-        if lowered.contains("prepare '") || lowered.contains("input enumerator is unavailable") { return "enumerator_failure" }
-        if lowered.contains("no model is assigned") { return "no_model" }
-        if lowered.contains("worker tool scope") { return "no_worker_scope" }
-        return "other"
+        self.attempts = telemetry.attempts
+        self.firstAttemptError = telemetry.firstAttemptError.map { String($0.prefix(Self.maxDetailLength)) }
+        self.firstAttemptErrorKind = telemetry.firstAttemptErrorKind
+        self.llmTurns = telemetry.llmTurns
+        self.evidenceToolCalls = telemetry.evidenceToolCalls
+        self.inputTokens = telemetry.inputTokens
+        self.outputTokens = telemetry.outputTokens
+        self.cacheReadTokens = telemetry.cacheReadTokens
+        self.durationMs = telemetry.durationMs
+        self.dynamicItemCount = telemetry.dynamicItemCount
     }
 }
 

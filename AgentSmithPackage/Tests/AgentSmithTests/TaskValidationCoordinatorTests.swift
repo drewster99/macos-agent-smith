@@ -684,6 +684,20 @@ struct TaskValidationCoordinatorTests {
         }
     }
 
+    @Test("An error verdict is recorded with the kind its producer declared")
+    func errorVerdictCarriesDeclaredKind() async {
+        let runtime = makeRuntime(verdictScript: ["ACCEPT"])
+        let task = await makeSubmittedTask(on: runtime)
+        await runtime.taskStore.setApprovedTools(id: task.id, approvedTools: [])
+
+        await runtime.startTaskValidation(taskID: task.id)
+        _ = await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+
+        let records = await runtime.taskStore.task(id: task.id)?.validation?.verdictRecords ?? []
+        #expect(!records.isEmpty)
+        #expect(records.allSatisfy { $0.errorKind == .noWorkerScope }, "\(records.map(\.errorKind))")
+    }
+
     @Test("Validator input keeps rubric and result apart: criterion in the system prompt, result in a JSON field, with the verdict-format firewall")
     func validatorInputSeparatesRubricFromResult() {
         let criterion = AcceptanceCriterion(
