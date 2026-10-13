@@ -186,6 +186,17 @@ struct AbandonedToolFailureReportTests {
         #expect(report.severity == .error)
     }
 
+    /// The streak counts the tool's failures since its last success, with other tools' calls (and
+    /// parallel batches) in between — so the report must not claim they came "in a row" (2026-10-13:
+    /// 8 file_edit failures, 6 of them one parallel batch, with file_reads and bash succeeding between).
+    @Test("The report counts failures without a success, and does not call them consecutive")
+    func reportDoesNotClaimConsecutive() async throws {
+        let posted = await runAndCollect(tool: AlwaysFailingTool(), callCount: 6)
+        let report = try #require(posted.first { $0.recipient == .user && $0.severity == .error })
+        #expect(!report.content.contains("in a row"), "\(report.content)")
+        #expect(report.content.contains("6 times without a single success"), "\(report.content)")
+    }
+
     /// Below the threshold, a couple of failures are ordinary and must stay quiet.
     @Test("A short failure run is not reported")
     func shortStreakIsNotReported() async throws {

@@ -3387,7 +3387,7 @@ public actor AgentActor {
                 recipientID: OrchestrationRuntime.userID,
                 recipient: .user,
                 content: """
-                    `\(toolName)` failed \(streak.count) times in a row and never succeeded — \
+                    `\(toolName)` failed \(streak.count) times without a single success — \
                     \(configuration.role.displayName) has stopped without it working.\(detail)
                     """,
                 metadata: [
