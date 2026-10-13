@@ -3844,7 +3844,7 @@ public actor OrchestrationRuntime {
         // was. This is the single chokepoint every start path funnels through (run_task, the
         // play button, scheduled wakes, watches; auto-advance never picks a foreign task), so
         // all of them clone. Any per-run amendment lands on the clone, not the source.
-        guard let startID = await self.resolveStartTarget(
+        guard let startID = await resolveStartTarget(
             taskID: taskID,
             amendment: amendment,
             templateInputValues: templateInputValues
@@ -3853,26 +3853,26 @@ public actor OrchestrationRuntime {
         }
         // Before choosing a path: the cold path starts tasks too, and the user's Play must
         // release the outage whichever path it takes.
-        guard await self.passesProviderOutageGate(taskID: startID, origin: origin) else { return }
+        guard await passesProviderOutageGate(taskID: startID, origin: origin) else { return }
         // A child task's start must never take the cold path below: it stops every worker,
         // the coordinator that is waiting on this child included. That path exists to bring
         // Smith up, which a child's start does not need.
         var startsWithoutColdPath = origin == .coordinatorTool
-        if !startsWithoutColdPath { startsWithoutColdPath = await self.hasLiveSmith() }
+        if !startsWithoutColdPath { startsWithoutColdPath = hasLiveSmith() }
         if startsWithoutColdPath {
-            await self.performStartTaskWithLiveSmith(taskID: startID, origin: origin)
+            await performStartTaskWithLiveSmith(taskID: startID, origin: origin)
             return
         }
         // Cold path — no Smith to preserve. Capture the most recent user message
         // before stopping (it may contain permissions or instructions), and the
         // session ID so Smith's pre-task planning calls get attributed to the task.
-        let lastUserMessage = await self.captureLastUserMessage()
-        let priorSessionID = await self.currentSessionID
-        await self.performStopAll(preserveObserverCallbacks: true)
+        let lastUserMessage = await captureLastUserMessage()
+        let priorSessionID = currentSessionID
+        await performStopAll(preserveObserverCallbacks: true)
         if let priorSessionID {
-            await self.usageStore.backfillTaskID(startID, forSession: priorSessionID)
+            await usageStore.backfillTaskID(startID, forSession: priorSessionID)
         }
-        await self.performStart(resumingTaskID: startID, resumingOrigin: origin, lastUserMessage: lastUserMessage)
+        await performStart(resumingTaskID: startID, resumingOrigin: origin, lastUserMessage: lastUserMessage)
     }
 
     /// The task a start of `taskID` actually runs. A template is never run: a fresh instance is
