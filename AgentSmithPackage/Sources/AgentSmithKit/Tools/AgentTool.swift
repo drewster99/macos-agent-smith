@@ -329,6 +329,10 @@ public struct ToolContext: Sendable {
     /// tools compare in-progress task counts against this. Defaults to 1 for contexts
     /// built outside the runtime.
     public let workerCapacity: @Sendable () async -> Int
+    /// Tasks with a start queued on the runtime's lifecycle queue that has not finished
+    /// (`OrchestrationRuntime.taskIDsWithQueuedStart`). A queued start takes a slot when it runs, so
+    /// a tool deciding whether a slot is free counts these too (#37). Empty outside the runtime.
+    public let tasksWithQueuedStart: @Sendable () async -> Set<UUID>
     /// Liveness lease check: returns true while the runtime still tracks this agent as a
     /// live, current agent. The agent's run loop consults this around every LLM turn and
     /// self-stops on false — the dead-man's switch that kills an agent whose runtime
@@ -509,6 +513,7 @@ public struct ToolContext: Sendable {
         // be a harsher response than the condition warrants, and the diagnostic is already loud.
         composeTaskBriefing: @escaping @Sendable (UUID) async -> String? = { _ in nil },
         workerCapacity: @escaping @Sendable () async -> Int = { 1 },
+        tasksWithQueuedStart: @escaping @Sendable () async -> Set<UUID> = { [] },
         isAgentCurrent: @escaping @Sendable () async -> Bool = { true },
         onProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
         onSecurityAgentProcessingStateChange: @escaping @Sendable (Bool) -> Void = { _ in },
@@ -582,6 +587,7 @@ public struct ToolContext: Sendable {
         self.reportPreconditionUnmet = reportPreconditionUnmet
         self.composeTaskBriefing = composeTaskBriefing
         self.workerCapacity = workerCapacity
+        self.tasksWithQueuedStart = tasksWithQueuedStart
         self.isAgentCurrent = isAgentCurrent
         self.onProcessingStateChange = onProcessingStateChange
         self.onSecurityAgentProcessingStateChange = onSecurityAgentProcessingStateChange

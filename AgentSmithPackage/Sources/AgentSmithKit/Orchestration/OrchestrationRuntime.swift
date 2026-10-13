@@ -435,6 +435,47 @@ public actor OrchestrationRuntime {
         deliberateStopsWaiting -= 1
     }
 
+    /// Task starts queued on the lifecycle queue that have not finished, counted per task (an explicit
+    /// start can be queued twice) — the ONE record of starts in flight (#37). A queued start claims
+    /// its task only when it reaches the front, and ahead of it each start can spend 30–60 s in its
+    /// scoping call; without this record the task still looked merely pending, so every drain pass
+    /// queued another start for it and `create_task` started past capacity. Written only by
+    /// `reserveStart` / `releaseStart`, which bracket every queued start's whole life.
+    private var queuedStarts: [UUID: Int] = [:]
+
+    private func reserveStart(_ taskID: UUID) {
+        queuedStarts[taskID, default: 0] += 1
+    }
+
+    private func releaseStart(_ taskID: UUID) {
+        guard let count = queuedStarts[taskID] else {
+            stopLogger.fault("releaseStart for \(taskID.uuidString, privacy: .public) with no reservation")
+            assertionFailure("releaseStart without a matching reserveStart")
+            return
+        }
+        queuedStarts[taskID] = count > 1 ? count - 1 : nil
+    }
+
+    /// Ends a queued start. One that ended without a worker for its task — the task deleted
+    /// meanwhile, held, or refused — leaves free the slot its reservation held back from the drain,
+    /// and nothing else would notice, so the drain runs. It only schedules, so calling it from the
+    /// start's own queue item can't deadlock.
+    private func finishQueuedStart(_ taskID: UUID) async {
+        releaseStart(taskID)
+        guard queuedStarts[taskID] == nil, await liveWorkerID(taskID: taskID) == nil else { return }
+        await advanceAfterFreedWorkerSlot()
+    }
+
+    /// How many starts are queued for `taskID` and not finished.
+    func queuedStartCount(taskID: UUID) -> Int {
+        queuedStarts[taskID] ?? 0
+    }
+
+    /// Tasks with a start queued and not finished.
+    func taskIDsWithQueuedStart() -> Set<UUID> {
+        Set(queuedStarts.keys)
+    }
+
     private func interruptStartForStop(_ target: StopTarget) {
         guard var start = interruptibleStart, !start.interruptedByStop else { return }
         switch target {
@@ -2676,11 +2717,16 @@ public actor OrchestrationRuntime {
         // restarts are enqueued (not awaited), so the live count doesn't move within the pass —
         // bound the fan-out by the free-slot count. A racing start elsewhere is safe:
         // performStartTaskWithLiveSmith's serialized gate re-pends the loser.
-        let freeSlots = maxConcurrentWorkers - supervisor.handles(role: .brown).count
+        let byID = Dictionary(activeTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // A queued start that has no live worker yet will take a slot when it runs (#37): count it,
+        // or a pass while the queue is backed up hands the same slots out again.
+        let slotsReservedByQueuedStarts = queuedStarts.keys.filter { id in
+            byID[id].map { liveWorkerID(for: $0) == nil } ?? false
+        }.count
+        let freeSlots = maxConcurrentWorkers - supervisor.handles(role: .brown).count - slotsReservedByQueuedStarts
         let blockedCoordinatorTaskIDs: Set<UUID> = freeSlots > 0 ? [] : coordinatorsBlockedOnCapacity()
         let startsAboveCapacity = freeSlots <= 0 && !blockedCoordinatorTaskIDs.isEmpty
         guard freeSlots > 0 || startsAboveCapacity else { return }
-        let byID = Dictionary(activeTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
 
         // Prune the resume queues to IDs still present AND still interrupted (a task that
         // completed, was manually run, or was archived drops off).
@@ -2730,8 +2776,10 @@ public actor OrchestrationRuntime {
         // A child of a coordinator that stopped coordinating is not queued work: the coordinator-ended
         // stop fails it (user decision 2026-10-11), and starting it first would spawn a worker only
         // to end it.
+        // A task whose start is already queued gets no second one (#37).
         runnable = runnable.filter {
             !Self.isChildOfEndedCoordinator($0.task, activeTasksByID: byID)
+                && queuedStarts[$0.task.id] == nil
                 && $0.task.startHolds.isEmpty && queued.insert($0.task.id).inserted
         }
         let toStart = Array(runnable.prefix(startsAboveCapacity ? 1 : freeSlots))
@@ -3773,45 +3821,58 @@ public actor OrchestrationRuntime {
         templateInputValues: [String: String] = [:],
         origin: TaskStartOrigin
     ) {
+        reserveStart(taskID)
         lifecycleQueue.schedule { [weak self] in
             guard let self else { return }
-            guard await self.passesStartGate(taskID: taskID, origin: origin) else { return }
-            // Clone interception (`resolveStartTarget`): starting a template never runs the
-            // template, and starting a task that belongs to another session never runs it here
-            // in place (#15) — each clones a fresh task and runs THAT, leaving the source as it
-            // was. This is the single chokepoint every start path funnels through (run_task, the
-            // play button, scheduled wakes, watches; auto-advance never picks a foreign task), so
-            // all of them clone. Any per-run amendment lands on the clone, not the source.
-            guard let startID = await self.resolveStartTarget(
-                taskID: taskID,
-                amendment: amendment,
-                templateInputValues: templateInputValues
-            ) else {
-                return
-            }
-            // Before choosing a path: the cold path starts tasks too, and the user's Play must
-            // release the outage whichever path it takes.
-            guard await self.passesProviderOutageGate(taskID: startID, origin: origin) else { return }
-            // A child task's start must never take the cold path below: it stops every worker,
-            // the coordinator that is waiting on this child included. That path exists to bring
-            // Smith up, which a child's start does not need.
-            var startsWithoutColdPath = origin == .coordinatorTool
-            if !startsWithoutColdPath { startsWithoutColdPath = await self.hasLiveSmith() }
-            if startsWithoutColdPath {
-                await self.performStartTaskWithLiveSmith(taskID: startID, origin: origin)
-                return
-            }
-            // Cold path — no Smith to preserve. Capture the most recent user message
-            // before stopping (it may contain permissions or instructions), and the
-            // session ID so Smith's pre-task planning calls get attributed to the task.
-            let lastUserMessage = await self.captureLastUserMessage()
-            let priorSessionID = await self.currentSessionID
-            await self.performStopAll(preserveObserverCallbacks: true)
-            if let priorSessionID {
-                await self.usageStore.backfillTaskID(startID, forSession: priorSessionID)
-            }
-            await self.performStart(resumingTaskID: startID, resumingOrigin: origin, lastUserMessage: lastUserMessage)
+            await self.performQueuedStart(taskID: taskID, amendment: amendment, templateInputValues: templateInputValues, origin: origin)
+            await self.finishQueuedStart(taskID)
         }
+    }
+
+    /// The body of a start queued by `restartForNewTask`. Runs ONLY as that lifecycle-queue item,
+    /// bracketed by its reservation in `queuedStarts`.
+    private func performQueuedStart(
+        taskID: UUID,
+        amendment: String?,
+        templateInputValues: [String: String],
+        origin: TaskStartOrigin
+    ) async {
+        guard await passesStartGate(taskID: taskID, origin: origin) else { return }
+        // Clone interception (`resolveStartTarget`): starting a template never runs the
+        // template, and starting a task that belongs to another session never runs it here
+        // in place (#15) — each clones a fresh task and runs THAT, leaving the source as it
+        // was. This is the single chokepoint every start path funnels through (run_task, the
+        // play button, scheduled wakes, watches; auto-advance never picks a foreign task), so
+        // all of them clone. Any per-run amendment lands on the clone, not the source.
+        guard let startID = await self.resolveStartTarget(
+            taskID: taskID,
+            amendment: amendment,
+            templateInputValues: templateInputValues
+        ) else {
+            return
+        }
+        // Before choosing a path: the cold path starts tasks too, and the user's Play must
+        // release the outage whichever path it takes.
+        guard await self.passesProviderOutageGate(taskID: startID, origin: origin) else { return }
+        // A child task's start must never take the cold path below: it stops every worker,
+        // the coordinator that is waiting on this child included. That path exists to bring
+        // Smith up, which a child's start does not need.
+        var startsWithoutColdPath = origin == .coordinatorTool
+        if !startsWithoutColdPath { startsWithoutColdPath = await self.hasLiveSmith() }
+        if startsWithoutColdPath {
+            await self.performStartTaskWithLiveSmith(taskID: startID, origin: origin)
+            return
+        }
+        // Cold path — no Smith to preserve. Capture the most recent user message
+        // before stopping (it may contain permissions or instructions), and the
+        // session ID so Smith's pre-task planning calls get attributed to the task.
+        let lastUserMessage = await self.captureLastUserMessage()
+        let priorSessionID = await self.currentSessionID
+        await self.performStopAll(preserveObserverCallbacks: true)
+        if let priorSessionID {
+            await self.usageStore.backfillTaskID(startID, forSession: priorSessionID)
+        }
+        await self.performStart(resumingTaskID: startID, resumingOrigin: origin, lastUserMessage: lastUserMessage)
     }
 
     /// The task a start of `taskID` actually runs. A template is never run: a fresh instance is
@@ -3917,17 +3978,18 @@ public actor OrchestrationRuntime {
         // (`deliberateStopsWaiting`). Nothing has been claimed, so this changes only the order. The
         // gates already passed; the start resumes here, not at `restartForNewTask`.
         if deliberateStopsWaiting > 0 {
+            // Still a queued start of this task: it keeps its own place in `queuedStarts`.
+            reserveStart(taskID)
             lifecycleQueue.schedule { [weak self] in
                 await self?.performStartTaskWithLiveSmith(taskID: taskID, origin: origin)
+                await self?.finishQueuedStart(taskID)
             }
             return
         }
+        // Gone since its start was queued (deleted or archived): nobody wants it any more, so this is
+        // not an error to show anyone (#37). Every caller that names a task checks it exists first.
         guard let task = await taskStore.task(id: taskID) else {
-            await channel.post(ChannelMessage(
-                sender: .system,
-                content: "Could not start task \(taskID.uuidString): it was not found in the task store.",
-                metadata: ["messageKind": .kind(.taskLifecycle), "severity": .severity(.error)]
-            ))
+            stopLogger.notice("start of \(taskID.uuidString, privacy: .public) skipped — the task left the store after its start was queued")
             return
         }
 
@@ -6583,6 +6645,9 @@ public actor OrchestrationRuntime {
             },
             workerCapacity: { [weak self] in
                 await self?.maxConcurrentWorkers ?? 1
+            },
+            tasksWithQueuedStart: { [weak self] in
+                await self?.taskIDsWithQueuedStart() ?? []
             },
             // Liveness lease: true only while this exact agent ID is still in the live
             // registry. A deallocated runtime also reads as not-current — an agent whose

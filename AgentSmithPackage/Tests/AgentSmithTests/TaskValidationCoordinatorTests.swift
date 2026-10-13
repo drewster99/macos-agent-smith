@@ -838,8 +838,13 @@ struct TaskValidationCoordinatorTests {
             configurations: [.validator: ModelConfiguration(name: "test", providerID: "test", modelID: "test-model")],
             apiTypes: [.validator: .openAICompatible]
         )
+        // The release goes through `.validating` before it lands; a poll can catch either.
         let released = await waitForStatusChange(on: runtime, taskID: task.id, away: .awaitingReview)
-        #expect(released == .completed, "the parked task resumes validating on its own once configured")
+        #expect(released == .validating || released == .completed, "the parked task resumes validating on its own once configured")
+        let settled = released == .validating
+            ? await waitForStatusChange(on: runtime, taskID: task.id, away: .validating)
+            : released
+        #expect(settled == .completed, "the resumed validation completes the task")
         #expect(await runtime.taskStore.task(id: task.id)?.validationBlockedReason == nil)
     }
 

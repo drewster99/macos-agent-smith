@@ -563,7 +563,12 @@ public struct CreateTaskTool: AgentTool {
             other.disposition == .active &&
             other.occupiesWorkerSlot
         }
-        if slotHolders.count < capacity {
+        // A start already queued but not yet running takes a slot too (#37): without it, tasks created
+        // while the queue is backed up each queued a start, past capacity.
+        let queuedStarts = await context.tasksWithQueuedStart()
+            .subtracting(slotHolders.map(\.id))
+            .subtracting([task.id])
+        if slotHolders.count + queuedStarts.count < capacity {
             await context.restartForNewTask(task.id, nil)
             if let held = await TaskCreationSupport.outageHoldNote(context: context) {
                 return .success("Task created (ID: \(task.id), title: \"\(title)\").\(contextNote)\(gateNote) \(held)")
