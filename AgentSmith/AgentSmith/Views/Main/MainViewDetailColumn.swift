@@ -829,8 +829,7 @@ private struct RunResultDisclosure: View {
                 }
             }
             if !run.resultAttachments.isEmpty {
-                // QuickLook on click is the cheap look; ⌘-click reveals, for when you want the file
-                // itself rather than a peek at it.
+                // Click opens the file with its default app (standard `open`); ⌘-click reveals it in Finder.
                 FlowingAttachmentChips(attachments: run.resultAttachments, viewModel: viewModel)
             }
         }
@@ -856,7 +855,7 @@ private struct FlowingAttachmentChips: View {
                         .background(Capsule().fill(AppColors.secondaryBackground))
                 })
                 .buttonStyle(.plain)
-                .help("Click to preview · ⌘-click to reveal in Finder")
+                .help("Click to open · ⌘-click to reveal in Finder")
             }
         }
     }
@@ -868,7 +867,7 @@ private struct FlowingAttachmentChips: View {
         if reveal {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
-            QuickLookPreview.present(url)
+            NSWorkspace.shared.open(url)
         }
     }
 }

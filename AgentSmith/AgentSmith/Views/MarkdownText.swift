@@ -45,18 +45,12 @@ struct MarkdownText: View, Equatable {
         .environment(\.openURL, OpenURLAction { url in
             guard url.isFileURL else { return .systemAction }
             let path = url.path
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
+            guard FileManager.default.fileExists(atPath: path) else {
                 // Path disappeared between linkification and tap — silently drop.
                 return .handled
             }
-            if isDir.boolValue {
-                // Folder: open it in Finder showing its contents.
-                NSWorkspace.shared.open(url)
-            } else {
-                // File: preview it rather than launching whatever app owns the extension.
-                QuickLookPreview.present(url)
-            }
+            // Standard `open` behavior: folders open in Finder, files in their default app.
+            NSWorkspace.shared.open(url)
             return .handled
         })
     }
