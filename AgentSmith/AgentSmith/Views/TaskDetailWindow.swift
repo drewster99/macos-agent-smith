@@ -756,7 +756,7 @@ private struct TaskDetailAICommentaryInset: View {
                 Spacer()
                 TaskDetailCopyButton(text: commentary)
             }
-            MarkdownText(content: commentary, baseFont: AppFonts.aiCommentaryBody)
+            MarkdownText(content: commentary, baseFont: .aiCommentaryBody)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(10)

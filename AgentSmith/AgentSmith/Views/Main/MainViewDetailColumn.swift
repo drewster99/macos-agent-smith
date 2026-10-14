@@ -273,11 +273,19 @@ private struct BottomTranscriptPane: View {
                 onOpenMCPSettings: onOpenMCPSettings,
                 displayPrefs: displayPrefs,
                 verdictFilter: viewModel.transcriptViewConfig.makeFilter(),
+                scrollBenchmarkRequest: benchmarkRequestForThisSession,
                 selectedImageAttachment: $selectedImageAttachment
             )
             .equatable()
             .environment(\.transcriptTaskActionHandler, viewModel.transcriptTaskActionHandler)
         }
+    }
+
+    /// The Debug menu's benchmark request, if it is for this window's session.
+    private var benchmarkRequestForThisSession: TranscriptScrollBenchmarkRequest? {
+        guard let request = viewModel.shared.transcriptScrollBenchmarkRequest,
+              request.sessionID == viewModel.session.id else { return nil }
+        return request
     }
 
     /// Counts the whole resident session; the config's own scope switch decides what's in scope.

@@ -17,7 +17,6 @@ struct TaskPDFDocumentView: View {
     let generatedAt: Date
 
     private static let timestampStyle = Date.FormatStyle(date: .abbreviated, time: .standard)
-    private static let bodyFont = AppFonts.pdfBody
 
     /// Single-view rendering (used for previews / non-paginated contexts). The exporter
     /// uses `pdfBlocks()` directly instead of this.
@@ -171,14 +170,14 @@ struct TaskPDFDocumentView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
                     .font(AppFonts.pdfSectionHeader)
-                MarkdownText(content: first, baseFont: Self.bodyFont)
+                MarkdownText(content: first, baseFont: .pdfBody)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         )]
         for chunk in chunks.dropFirst() {
             result.append(AnyView(
-                MarkdownText(content: chunk, baseFont: Self.bodyFont)
+                MarkdownText(content: chunk, baseFont: .pdfBody)
                     .frame(maxWidth: .infinity, alignment: .leading)
             ))
         }

@@ -196,6 +196,8 @@ JSON files only (no database) under `~/Library/Application Support/AgentSmith/`.
 - Rows live outside `ChannelLogView`'s SwiftUI environment. A custom environment value a row reads must be carried in `TranscriptRowContext` and re-applied in `TranscriptRowContent`.
 - Follow-the-tail changes only on USER scrolling (wheel, trackpad, scroller) or the jump-to-latest button — never on content growth or a row changing height. Every row mutation goes through `preservingReadingPosition`.
 - Never put a view tree proportional to the row count, or an `@State` write on every scroll frame, back into the transcript.
+- Message prose is a selectable `NSTextView` (`SelectableProseView`) so selection spans lines. Anything that renders through `ImageRenderer` (PDF export) must set `.environment(\.markdownRendering, .staticText)`, and so must a `MarkdownText` inside a `Button` label (the text view takes the click). Color markdown with `textColor:`, never an outer `.foregroundStyle` — it can't reach the AppKit view.
+- **Performance budget.** Before committing a transcript change, run View › Run Transcript Scroll Benchmark (Debug) twice after a fresh launch — cold, then warm — on the session pane. Neither hitch ratio may get worse than the baseline in `docs/plans/TranscriptScrollPerformance.md` §8 by more than 25%; if one does, find out why before landing it.
 
 ### Inspector
 

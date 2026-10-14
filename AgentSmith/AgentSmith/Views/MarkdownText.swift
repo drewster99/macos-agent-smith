@@ -13,54 +13,39 @@ import AgentSmithKit
 /// - Links: `[text](url)` and bare `https://` URLs
 struct MarkdownText: View, Equatable {
     let content: String
-    let baseFont: Font
+    let baseFont: MarkdownFont
+    let textColor: MarkdownTextColor
 
     /// Prevents body re-evaluation (and markdown re-parsing) when nothing rendered has changed.
-    ///
-    /// Both stored properties participate. `baseFont` genuinely varies across call sites
-    /// (`.body`, `.callout`, `AppFonts.channelBody`, `.channelBody.italic()`, …), so omitting
-    /// it would let two views that render differently compare equal — the same defect a
-    /// hand-written `==` introduced in `LiveActivityTracker.Snapshot`. Every `AppFonts` member
-    /// is a `static let` today, so no instance's font actually changes; this keeps that from
-    /// being load-bearing.
+    /// Every stored input participates: two views with different fonts or colors render
+    /// differently and must not compare equal.
     nonisolated static func == (lhs: MarkdownText, rhs: MarkdownText) -> Bool {
-        lhs.content == rhs.content && lhs.baseFont == rhs.baseFont
+        lhs.content == rhs.content && lhs.baseFont == rhs.baseFont && lhs.textColor == rhs.textColor
     }
 
     /// Parsed in `init`, not in a `.task`: a transcript row sizes itself from its first layout,
     /// and a `.task` left that layout empty — every row drew blank, then jumped to its real height
-    /// a frame later. The parse is cheap (0.001ms median over 4,000 real channel messages);
-    /// `InlineMarkdownStyler`, which builds the `Text`, already ran synchronously in the line views.
+    /// a frame later. The parse is cheap (0.001ms median over 4,000 real channel messages).
     private let blocks: [ContentBlock]
 
-    init(content: String, baseFont: Font) {
+    init(content: String, baseFont: MarkdownFont, textColor: MarkdownTextColor = .primary) {
         self.content = content
         self.baseFont = baseFont
+        self.textColor = textColor
         self.blocks = Self.parseContentBlocks(content)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: MarkdownLine.lineSpacing) {
             ForEach(blocks) { block in
-                RenderBlockView(block: block, baseFont: baseFont)
+                RenderBlockView(block: block, baseFont: baseFont, textColor: textColor)
             }
         }
+        .modifier(MarkdownForegroundModifier(textColor: textColor))
+        // Code blocks and tables; prose selects through its own text view.
         .textSelection(.enabled)
         .environment(\.openURL, OpenURLAction { url in
-            guard url.isFileURL else { return .systemAction }
-            let path = url.path
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
-                // Path disappeared between linkification and tap — silently drop.
-                return .handled
-            }
-            if isDir.boolValue {
-                // Folder: open it in Finder showing its contents.
-                NSWorkspace.shared.open(url)
-            } else {
-                // File: preview it rather than launching whatever app owns the extension.
-                QuickLookPreview.present(url)
-            }
+            MarkdownLinkOpener.open(url)
             return .handled
         })
     }
@@ -68,7 +53,8 @@ struct MarkdownText: View, Equatable {
     // MARK: - Block model
 
     private enum ContentBlock: Identifiable {
-        case line(id: Int, text: String)
+        /// Consecutive prose lines — one selectable unit.
+        case prose(id: Int, lines: [MarkdownLine])
         /// Rows × columns; the first row is the header.
         case table(id: Int, rows: [[String]])
         /// Fenced code block with optional language label.
@@ -76,8 +62,8 @@ struct MarkdownText: View, Equatable {
 
         var id: Int {
             switch self {
-            case .line(let id, _):      return id
-            case .table(let id, _):     return id
+            case .prose(let id, _):        return id
+            case .table(let id, _):        return id
             case .codeBlock(let id, _, _): return id
             }
         }
@@ -86,13 +72,22 @@ struct MarkdownText: View, Equatable {
     private static func parseContentBlocks(_ content: String) -> [ContentBlock] {
         let lines = content.components(separatedBy: "\n")
         var result: [ContentBlock] = []
+        var prose: [MarkdownLine] = []
         var i = 0
         var nextID = 0
+
+        func flushProse() {
+            guard !prose.isEmpty else { return }
+            result.append(.prose(id: nextID, lines: prose))
+            nextID += 1
+            prose = []
+        }
 
         while i < lines.count {
             // Fenced code block: ``` with optional language specifier.
             let trimmedLine = lines[i].trimmingCharacters(in: .whitespaces)
             if trimmedLine.hasPrefix("```") {
+                flushProse()
                 let langRaw = String(trimmedLine.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 let language = langRaw.isEmpty ? nil : langRaw
                 i += 1
@@ -114,6 +109,7 @@ struct MarkdownText: View, Equatable {
             if i + 1 < lines.count,
                isTableDataRow(lines[i]),
                isTableSeparatorRow(lines[i + 1]) {
+                flushProse()
                 var tableLines: [String] = []
                 while i < lines.count,
                       isTableDataRow(lines[i]) || isTableSeparatorRow(lines[i]) {
@@ -128,11 +124,11 @@ struct MarkdownText: View, Equatable {
                     nextID += 1
                 }
             } else {
-                result.append(.line(id: nextID, text: lines[i]))
-                nextID += 1
+                prose.append(MarkdownLine(lines[i]))
                 i += 1
             }
         }
+        flushProse()
         return result
     }
 
@@ -158,21 +154,43 @@ struct MarkdownText: View, Equatable {
 
     // MARK: - Extracted View structs (refactored from func ... -> some View helpers)
     
-    /// Nested View struct for rendering content blocks (refactored from renderBlock(_:)
+    /// One block: prose, a table, or a code block.
     private struct RenderBlockView: View {
         let block: MarkdownText.ContentBlock
-        let baseFont: Font
-        
+        let baseFont: MarkdownFont
+        let textColor: MarkdownTextColor
+
         var body: some View {
             switch block {
-            case .line(_, let text):
-                RenderLineView(line: text, baseFont: baseFont)
+            case .prose(_, let lines):
+                ProseBlockView(lines: lines, baseFont: baseFont, textColor: textColor)
             case .table(_, let rows):
                 if let columnCount = rows.map(\.count).max(), columnCount > 0 {
-                    TableView(rows: rows, columnCount: columnCount, baseFont: baseFont)
+                    TableView(rows: rows, columnCount: columnCount, baseFont: baseFont.font)
                 }
             case .codeBlock(_, let language, let lines):
-                CodeBlockView(language: language, lines: lines, baseFont: baseFont)
+                CodeBlockView(language: language, lines: lines, baseFont: baseFont.font)
+            }
+        }
+    }
+
+    /// Prose drawn by whichever renderer the environment asks for.
+    private struct ProseBlockView: View {
+        let lines: [MarkdownLine]
+        let baseFont: MarkdownFont
+        let textColor: MarkdownTextColor
+        @Environment(\.markdownRendering) private var rendering
+
+        var body: some View {
+            switch rendering {
+            case .selectable:
+                SelectableProseView(lines: lines, baseFont: baseFont, textColor: textColor)
+            case .staticText:
+                VStack(alignment: .leading, spacing: MarkdownLine.lineSpacing) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        RenderLineView(line: line, baseFont: baseFont.font)
+                    }
+                }
             }
         }
     }
@@ -252,60 +270,32 @@ struct MarkdownText: View, Equatable {
         }
     }
     
-    /// What a single line renders as — exactly one thing, decided once.
-    ///
-    /// This was seven mutually-exclusive `Text?` properties, and the exclusivity was only
-    /// enforced by `body` picking the first non-nil one. It did not hold in `init`: a heading
-    /// fell through to the `else` branch and was styled a SECOND time into `plainText`, which
-    /// `body` then discarded. Styling is the expensive half of rendering a message (~29x the
-    /// block parse — see ROADMAP.md), so that was real duplicated work on every heading line.
-    /// Making the cases exclusive by construction means it cannot come back.
-    private enum LineContent {
-        case heading(Text)
-        case blank
-        case list(marker: Text, content: Text, indent: CGFloat)
-        case indented(Text, indent: CGFloat)
-        case plain(Text)
-    }
-
-    /// Nested View struct for rendering a single line (refactored from renderLine(_:)
+    /// One prose line as SwiftUI `Text` — the static renderer (PDF export). Styled in `init`, once.
     private struct RenderLineView: View {
-        private let content: LineContent
+        private let content: Content
 
-        init(line: String, baseFont: Font) {
-            self.content = Self.content(of: line, baseFont: baseFont)
+        private enum Content {
+            case heading(Text)
+            case blank
+            case list(marker: Text, content: Text, indent: CGFloat)
+            case indented(Text, indent: CGFloat)
+            case plain(Text)
         }
 
-        /// Branch order is `body`'s old precedence exactly: headings, blank, list, indented,
-        /// plain. The three heading prefixes are mutually exclusive — the character after the
-        /// hashes disambiguates, so `"### x".hasPrefix("# ")` is already false — so their order
-        /// is not load-bearing; longest-first is for the reader.
-        private static func content(of line: String, baseFont: Font) -> LineContent {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("### ") {
-                return .heading(InlineText.styled(String(trimmed.dropFirst(4)), font: AppFonts.markdownH3))
+        init(line: MarkdownLine, baseFont: Font) {
+            switch line {
+            case .heading(let level, let text):
+                content = .heading(InlineText.styled(text, font: MarkdownLine.headingFont(level: level).font))
+            case .blank:
+                content = .blank
+            case .listItem(let marker, let text, let indent):
+                content = .list(marker: Text(marker).font(baseFont),
+                                content: InlineText.styled(text, font: baseFont), indent: indent)
+            case .indented(let text, let indent):
+                content = .indented(InlineText.styled(text, font: baseFont), indent: indent)
+            case .plain(let text):
+                content = .plain(InlineText.styled(text, font: baseFont))
             }
-            if trimmed.hasPrefix("## ") {
-                return .heading(InlineText.styled(String(trimmed.dropFirst(3)), font: AppFonts.markdownH2))
-            }
-            if trimmed.hasPrefix("# ") {
-                return .heading(InlineText.styled(String(trimmed.dropFirst(2)), font: AppFonts.markdownH1))
-            }
-            if trimmed.isEmpty { return .blank }
-
-            let parsed = LineParser.parse(line)
-            // Indent based on leading whitespace: 12pt per 2-space level.
-            let depthPadding = CGFloat(max(0, parsed.indent / 2)) * 12
-            if parsed.isList {
-                return .list(marker: Text(parsed.isNumbered ? parsed.numberPrefix : "•").font(baseFont),
-                             content: InlineText.styled(parsed.content, font: baseFont),
-                             indent: depthPadding)
-            }
-            if parsed.indent > 0 {
-                // Indented non-list text — preserve the indent.
-                return .indented(InlineText.styled(parsed.content, font: baseFont), indent: depthPadding)
-            }
-            return .plain(InlineText.styled(line, font: baseFont))
         }
 
         var body: some View {
@@ -313,9 +303,9 @@ struct MarkdownText: View, Equatable {
             case .heading(let text):
                 text
             case .blank:
-                Color.clear.frame(height: 6)
+                Color.clear.frame(height: MarkdownLine.blankLineHeight)
             case .list(let marker, let text, let indent):
-                HStack(alignment: .top, spacing: 4) {
+                HStack(alignment: .top, spacing: MarkdownLine.listMarkerSpacing) {
                     marker
                     text
                 }
@@ -327,42 +317,7 @@ struct MarkdownText: View, Equatable {
             }
         }
     }
-    
-    /// Helper struct for line parsing results
-    private struct LineParseResult {
-        let indent: Int
-        let isList: Bool
-        let isNumbered: Bool
-        let numberPrefix: String
-        let content: String
-    }
-    
-    /// Helper namespace for line parsing logic
-    private enum LineParser {
-        static func parse(_ line: String) -> LineParseResult {
-            let stripped = line.drop(while: { $0 == " " || $0 == "\t" })
-            let indent = line.count - stripped.count
-            
-            // Bullet markers: "* ", "- "
-            if stripped.hasPrefix("* ") || stripped.hasPrefix("- ") {
-                return LineParseResult(indent: indent, isList: true, isNumbered: false, numberPrefix: "", content: String(stripped.dropFirst(2)))
-            }
-            // Unicode bullet: "•" or "•" (some LLMs omit the trailing space)
-            if stripped.hasPrefix("•") {
-                let afterBullet = stripped.dropFirst(1).drop(while: { $0 == " " })
-                return LineParseResult(indent: indent, isList: true, isNumbered: false, numberPrefix: "", content: String(afterBullet))
-            }
-            
-            // Numbered list: "1. ", "2) ", etc. — preserve the prefix for display
-            if let match = stripped.prefixMatch(of: /\d+[.)]\s+/) {
-                let prefix = String(stripped[match.range]).trimmingCharacters(in: .whitespaces)
-                return LineParseResult(indent: indent, isList: true, isNumbered: true, numberPrefix: prefix, content: String(stripped[match.range.upperBound...]))
-            }
-            
-            return LineParseResult(indent: indent, isList: false, isNumbered: false, numberPrefix: "", content: String(stripped))
-        }
-    }
-    
+
     /// Helper namespace for styled inline text (refactored from styledInlineText(_:font:))
     private enum InlineText {
         /// The parsing/styling pipeline lives in `InlineMarkdownStyler` (AgentSmithKit)

@@ -1,6 +1,6 @@
 # Transcript scroll performance — permanent fix
 
-Status: Phase 2 ✅ (2026-10-14, Option A approved). Phase 0 partial, Phase 1 superseded, Phases 3–4 open — see §8.
+Status: ✅ all phases (2026-10-14). Phase 1 superseded; Release numbers still to take — see §8.
 
 ## 1. Problem
 
@@ -207,9 +207,49 @@ cross-session pane):
   state. The old design lost it sooner (any row that slid out of the 400-row window); persisting
   every banner's expansion outside its view is the fix if this ever matters.
 
+### 2026-10-14 — Phases 3, 0 and 4 ✅
+
+- **Phase 3 — text selection and text cost.** SwiftUI cannot select across `Text` views, and a
+  merged `Text` loses list hanging indents (SwiftUI ignores `NSParagraphStyle.headIndent` —
+  measured with `ImageRenderer`). So `MarkdownText` now draws each run of prose lines as ONE
+  selectable `NSTextView` (`SelectableProseView`); tables and code blocks are unchanged. Both
+  renderers draw from one line model (`MarkdownLine`) and one font source (`MarkdownFont`, an
+  `NSFont` per face with the SwiftUI `Font` derived from it). PDF export can't draw AppKit views,
+  so it sets `.markdownRendering(.staticText)` and keeps the per-line `Text`. Colors moved from an
+  outer `.foregroundStyle` to a `textColor:` parameter, which reaches the AppKit view. Verified in
+  the app: one drag selected and copied four bullet lines.
+  - Not done, by decision: the single table-wide hover tracker. It existed for 400–3,000 live
+    rows' tracking areas; with only visible rows alive it would buy nothing measurable.
+- **Phase 0 — benchmark.** Debug-only View › Run Transcript Scroll Benchmark: scrolls the focused
+  session's main transcript up and down at 4,000 pt/s for 10 s (reversing at each end, so it never
+  idles), judges every frame against its own refresh interval (`FrameTimingStats`, 6 tests), shows
+  the numbers and saves JSON to `$TMPDIR/AgentSmith-Benchmarks/`. It refuses a transcript under
+  five screenfuls of scrollback.
+- **Found with it:** about a tenth of the main thread during a scroll was the WINDOW's SwiftUI
+  layout (the split view, the inspector) re-running every frame — the table's re-tiling
+  invalidated its way up through the `NSViewRepresentable`. The scroll view now sits in a container
+  view that absorbs those invalidations (`TranscriptContainerView`). Hitch time halved.
+- **Independent review (Codex)** of these phases: five findings, all fixed — measuring the text view
+  re-wrapped its drawn text at the last proposed width (now measured on a separate layout
+  manager); trailing blank lines measured a full line tall; a selectable preview inside the
+  "(show more)" button swallowed its click (that label now renders static text); the benchmark
+  idled at the ends on short transcripts; one refresh budget misjudged variable-refresh frames.
+
+**Baseline** (Debug, session pane, 452 rows / 62,000 pt, 4,000 pt/s):
+
+| Run | Hitch ratio | Hitches | p95 | Max |
+|---|---|---|---|---|
+| Cold — rows never shown since launch | 91.1 ms/s | 52 | 33.3 ms | 57.0 ms |
+| Warm — second run | 43.3 ms/s | 25 | 16.7 ms | 50.0 ms |
+| (before the container fix) cold / warm | 203.8 / 85.2 ms/s | 110 / 51 | 33.3 ms | 99.5 ms |
+
+What remains is SwiftUI building a row the first time it comes on screen (framework time —
+AttributeGraph, SwiftUICore — not app code). 4,000 pt/s through never-seen rows is a stress test;
+the user's report of everyday scrolling is "feels nice".
+
 ### Open
 
-1. Phase 0: the DEBUG scroll benchmark, and a baseline of the new build in Release.
-2. Phase 3: one selectable text per message in `MarkdownText` (text layout is now the main cost);
-   one hover tracker for the table.
-3. Phase 4: the performance budget in CLAUDE.md once the benchmark exists.
+1. A Release-build baseline. Not taken: the project rule is builds through Xcode only, and the
+   scheme's Run action is Debug.
+2. If cold-row cost ever needs to come down: build hosts for rows just outside the viewport while
+   idle, or raise the 400-host cache to cover a whole pane.

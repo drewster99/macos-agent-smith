@@ -199,6 +199,15 @@ struct AgentSmithApp: App {
                     isOn: Bindable(shared).showTimerActivityInTranscript
                 )
 
+                #if DEBUG
+                Button("Run Transcript Scroll Benchmark") {
+                    if let id = shared.focusedSessionID {
+                        shared.transcriptScrollBenchmarkRequest = TranscriptScrollBenchmarkRequest(sessionID: id)
+                    }
+                }
+                .disabled(shared.focusedSessionID == nil)
+                #endif
+
                 Toggle(
                     "Capture Compaction Diffs (Debug)",
                     isOn: Bindable(shared).captureCompactionDiffs

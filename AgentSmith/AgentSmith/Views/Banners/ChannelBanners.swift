@@ -96,8 +96,7 @@ struct TaskBannerDescriptionLine: View {
     var bottomPadding: CGFloat = 6
 
     var body: some View {
-        MarkdownText(content: description, baseFont: AppFonts.channelBody.italic())
-            .foregroundStyle(.secondary)
+        MarkdownText(content: description, baseFont: .channelBodyItalic, textColor: .secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.bottom, bottomPadding)
@@ -109,8 +108,7 @@ struct TaskBannerBodyText: View {
     let content: String
 
     var body: some View {
-        MarkdownText(content: content, baseFont: AppFonts.channelBody)
-            .foregroundStyle(.primary)
+        MarkdownText(content: content, baseFont: .channelBody)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.bottom, 6)
@@ -455,7 +453,7 @@ struct TaskCompletedBanner: View {
                 .padding(.bottom, result == nil ? 6 : 4)
 
             if let result, !result.isEmpty {
-                MarkdownText(content: result, baseFont: AppFonts.channelBody)
+                MarkdownText(content: result, baseFont: .channelBody)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
                     .padding(.horizontal, 10)
@@ -596,8 +594,7 @@ struct TaskReadyForReviewBanner: View {
             }
 
             if !headerText.isEmpty {
-                MarkdownText(content: headerText, baseFont: AppFonts.channelBody)
-                    .foregroundStyle(.primary)
+                MarkdownText(content: headerText, baseFont: .channelBody)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 10)
                     .padding(.bottom, bodyText == nil ? 6 : 2)
@@ -615,8 +612,7 @@ struct TaskReadyForReviewBanner: View {
                 .padding(.bottom, isExpanded ? 2 : 6)
 
                 if isExpanded {
-                    MarkdownText(content: body, baseFont: AppFonts.channelBody)
-                        .foregroundStyle(.primary)
+                    MarkdownText(content: body, baseFont: .channelBody)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 10)
                         .padding(.bottom, 6)
@@ -709,8 +705,7 @@ struct TaskSummarizedBanner: View {
             .buttonStyle(.plain)
 
             if isExpanded {
-                MarkdownText(content: summary, baseFont: AppFonts.channelBody)
-                    .foregroundStyle(.secondary)
+                MarkdownText(content: summary, baseFont: .channelBody, textColor: .secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 4)
             }

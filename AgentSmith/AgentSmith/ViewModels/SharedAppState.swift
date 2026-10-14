@@ -514,6 +514,8 @@ final class SharedAppState {
     /// Signal from the File menu to the focused `MainView` that it should show the
     /// manual task creation sheet for this session ID.
     var createTaskRequestID: UUID?
+    /// Signal from the Debug menu to that session's main transcript to run the scroll benchmark.
+    var transcriptScrollBenchmarkRequest: TranscriptScrollBenchmarkRequest?
     /// Signal from the Session menu to the focused `MainView` that it should show the
     /// per-session orchestration overrides sheet for this session ID. Cleared after handling,
     /// so only the frontmost tab (whose id matches) presents it.

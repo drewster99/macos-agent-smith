@@ -279,7 +279,8 @@ enum AppFonts {
     static let taskOverlayDismiss = Font.system(size: 10, weight: .semibold)
 
     static let channelSender = Font.system(.caption, design: .monospaced, weight: .bold)
-    static let channelBody = Font.system(.body, design: .monospaced)
+    /// Derived from the markdown face so transcript labels and transcript markdown are one font.
+    static let channelBody = MarkdownFont.channelBody.font
     static let channelTimestamp = Font.system(.caption2, design: .monospaced)
     static let taskTitle = Font.system(.headline, weight: .medium)
     /// Title font for compact (child) task rows. Deliberately unbolded — a template's runs
@@ -288,9 +289,6 @@ enum AppFonts {
     static let taskDescription = Font.subheadline
     static let sectionHeader = Font.title3.bold()
     static let inputField = Font.system(.body, design: .monospaced)
-    static let markdownH1 = Font.system(.title2, design: .default, weight: .bold)
-    static let markdownH2 = Font.system(.title3, design: .default, weight: .bold)
-    static let markdownH3 = Font.system(.headline, design: .default, weight: .bold)
     static let inspectorLabel = Font.system(.caption, design: .monospaced)
     static let inspectorBody = Font.system(.caption2, design: .monospaced)
     /// 13pt — banner header icons (New Task, Task Completed, etc.).
@@ -361,7 +359,7 @@ enum AppFonts {
     /// 22pt bold — PDF document title.
     static let pdfTitle = Font.system(size: 22, weight: .bold)
     /// 12pt — PDF body, subtitle, and metadata text.
-    static let pdfBody = Font.system(size: 12)
+    static let pdfBody = MarkdownFont.pdfBody.font
     /// 15pt semibold — PDF section headings (Description / Summary / Result).
     static let pdfSectionHeader = Font.system(size: 15, weight: .semibold)
     /// 9pt — PDF footer line.

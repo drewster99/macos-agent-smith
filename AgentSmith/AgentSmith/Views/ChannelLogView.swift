@@ -324,6 +324,8 @@ struct ChannelLogView: View, Equatable {
     /// keeps its status icon); this says which ones it actually shows — their inline text, and
     /// whether one whose call isn't shown gets a row of its own.
     var verdictFilter: TranscriptFilter = .all
+    /// A Debug-menu request to benchmark this pane's scrolling; runs once per new request.
+    var scrollBenchmarkRequest: TranscriptScrollBenchmarkRequest? = nil
     /// The attachment currently shown in the full-screen image viewer, managed by the parent.
     @Binding var selectedImageAttachment: Attachment?
 
@@ -351,6 +353,7 @@ struct ChannelLogView: View, Equatable {
         && lhs.hasRestoredHistory == rhs.hasRestoredHistory
         && lhs.displayPrefs == rhs.displayPrefs
         && lhs.verdictFilter == rhs.verdictFilter
+        && lhs.scrollBenchmarkRequest == rhs.scrollBenchmarkRequest
     }
 
     var body: some View {
@@ -379,6 +382,10 @@ struct ChannelLogView: View, Equatable {
             if !isAtBottom {
                 ChannelLogScrollToBottomButton(onTap: { scrollController.scrollToBottom(animated: true) })
             }
+        }
+        .onChange(of: scrollBenchmarkRequest) { _, request in
+            guard request != nil else { return }
+            scrollController.runScrollBenchmark(completion: TranscriptScrollBenchmarkReporter.report)
         }
         // GREEDY, and load-bearing: without it the pane is sized by whatever it happens to be
         // showing — a short transcript rendered as a ribbon floating in the middle of the pane, and
@@ -984,8 +991,7 @@ private struct MessageRow: View, Equatable {
                 StandaloneToolOutputView(message: message, isExpanded: $isExpanded)
             } else if _isSecurityReview {
                 // Standalone security review (no parent tool_request found — edge case)
-                MarkdownText(content: message.content, baseFont: AppFonts.channelBody)
-                    .foregroundStyle(_securityReviewColor)
+                MarkdownText(content: message.content, baseFont: .channelBody, textColor: .custom(_securityReviewColor))
             } else if let maxLines = _defaultMaxLines {
                 CollapsibleMessageBodyView(
                     message: message,
@@ -996,7 +1002,7 @@ private struct MessageRow: View, Equatable {
                     isExpandedBinding: $isExpanded
                 )
             } else {
-                MarkdownText(content: message.content, baseFont: AppFonts.channelBody)
+                MarkdownText(content: message.content, baseFont: .channelBody)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
@@ -1361,8 +1367,7 @@ private struct MessageRow: View, Equatable {
                 .buttonStyle(.plain)
                 
                 if let comment = dispositionComment {
-                    MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
-                        .foregroundStyle(dispositionCommentColor)
+                    MarkdownText(content: comment, baseFont: .channelBodyItalic, textColor: .custom(dispositionCommentColor))
                         .padding(.leading, 12)
                 }
                 
@@ -1494,8 +1499,7 @@ private struct MessageRow: View, Equatable {
                 .buttonStyle(.plain)
                 
                 if let comment = dispositionComment {
-                    MarkdownText(content: comment, baseFont: AppFonts.channelBody.italic())
-                        .foregroundStyle(dispositionCommentColor)
+                    MarkdownText(content: comment, baseFont: .channelBodyItalic, textColor: .custom(dispositionCommentColor))
                         .padding(.leading, 12)
                 }
                 
@@ -1592,11 +1596,11 @@ private struct MessageRow: View, Equatable {
                 VStack(alignment: .leading, spacing: 1) {
                     if isSummarizerMessage {
                         ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
-                            MarkdownText(content: line, baseFont: AppFonts.channelBody)
+                            MarkdownText(content: line, baseFont: .channelBody)
                                 .padding(.leading, index > 0 ? 12 : 0)
                         }
                     } else {
-                        MarkdownText(content: message.content, baseFont: AppFonts.channelBody)
+                        MarkdownText(content: message.content, baseFont: .channelBody)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1614,7 +1618,7 @@ private struct MessageRow: View, Equatable {
                 Button(action: { isExpandedBinding = true }, label: {
                     VStack(alignment: .leading, spacing: 1) {
                         ForEach(Array(visibleLines.dropLast().enumerated()), id: \.offset) { index, line in
-                            MarkdownText(content: line, baseFont: AppFonts.channelBody)
+                            MarkdownText(content: line, baseFont: .channelBody)
                                 .padding(.leading, isSummarizerMessage && index > 0 ? 12 : 0)
                         }
                         HStack(alignment: .firstTextBaseline, spacing: 0) {
@@ -1629,6 +1633,8 @@ private struct MessageRow: View, Equatable {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
+                    // A selectable text view here would take the click meant for the button.
+                    .environment(\.markdownRendering, .staticText)
                 })
                 .buttonStyle(.plain)
             }

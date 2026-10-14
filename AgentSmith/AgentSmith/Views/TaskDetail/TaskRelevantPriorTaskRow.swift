@@ -26,8 +26,7 @@ struct TaskRelevantPriorTaskRow: View {
                 .frame(width: 44, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 titleLine()
-                MarkdownText(content: priorTask.summary, baseFont: .callout)
-                    .foregroundStyle(.secondary)
+                MarkdownText(content: priorTask.summary, baseFont: .callout, textColor: .secondary)
                     .textSelection(.enabled)
                     .lineLimit(isExpanded ? nil : 2)
                 if hasMoreContent {

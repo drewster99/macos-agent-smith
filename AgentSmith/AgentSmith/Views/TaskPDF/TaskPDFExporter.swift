@@ -126,6 +126,8 @@ enum TaskPDFExporter {
             let renderer = ImageRenderer(content: block
                 .frame(width: contentWidth, alignment: .topLeading)
                 .foregroundStyle(.black)
+                // ImageRenderer draws SwiftUI only — an AppKit text view renders as nothing.
+                .environment(\.markdownRendering, .staticText)
                 // Force light rendering so theme-adaptive `AppColors` resolve to
                 // ink-on-paper values regardless of the app's current appearance.
                 .environment(\.colorScheme, .light))

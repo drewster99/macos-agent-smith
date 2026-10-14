@@ -10,6 +10,11 @@ final class TranscriptScrollController {
     func scrollToBottom(animated: Bool) {
         coordinator?.scrollToBottom(animated: animated)
     }
+
+    /// Scrolls the transcript at a fixed speed and reports how smoothly it drew. Debug tooling.
+    func runScrollBenchmark(completion: @escaping (TranscriptScrollBenchmarkOutcome) -> Void) {
+        coordinator?.runScrollBenchmark(completion: completion)
+    }
 }
 
 /// The transcript's rows, in an `NSTableView`.
@@ -34,7 +39,7 @@ struct TranscriptTableView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> TranscriptScrollView {
+    func makeNSView(context: Context) -> TranscriptContainerView {
         let scrollView = TranscriptScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
@@ -63,10 +68,17 @@ struct TranscriptTableView: NSViewRepresentable {
 
         scrollView.documentView = tableView
         context.coordinator.attach(scrollView: scrollView, tableView: tableView)
-        return scrollView
+        return TranscriptContainerView(scrollView: scrollView)
     }
 
-    func updateNSView(_ scrollView: TranscriptScrollView, context: Context) {
+    /// The transcript fills whatever it is offered; it never asks SwiftUI for a size of its own.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TranscriptContainerView, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    func updateNSView(_ container: TranscriptContainerView, context: Context) {
         let coordinator = context.coordinator
         scrollController.coordinator = coordinator
         coordinator.onAtBottomChange = onAtBottomChange
@@ -110,6 +122,8 @@ struct TranscriptTableView: NSViewRepresentable {
         /// the jump-to-latest button) — never by content growth or a row changing height.
         private var isPinnedToBottom = true
         private var reportedAtBottom: Bool?
+        private var benchmark: BenchmarkRun?
+
         /// Non-zero while this coordinator moves the scroll position itself.
         private var programmaticScrollDepth = 0
         /// Until when bounds changes count as the user's. A smooth-scrolling wheel moves the view
@@ -327,6 +341,77 @@ struct TranscriptTableView: NSViewRepresentable {
             }
         }
 
+        // MARK: Benchmark
+
+        /// One benchmark in progress: from the bottom, scrolling up and down between the ends at a
+        /// fixed speed — reversing at each end, so the run never sits still and dilutes the result.
+        private final class BenchmarkRun {
+            let link: CADisplayLink
+            /// The bottom: the furthest the transcript can scroll.
+            let maxY: CGFloat
+            let completion: (TranscriptScrollBenchmarkOutcome) -> Void
+            var startTimestamp: CFTimeInterval?
+            var lastTimestamp: CFTimeInterval?
+            /// The interval the display promised for the frame now being waited on.
+            var expectedInterval: CFTimeInterval?
+            var samples: [FrameTimingStats.Sample] = []
+
+            init(link: CADisplayLink, maxY: CGFloat,
+                 completion: @escaping (TranscriptScrollBenchmarkOutcome) -> Void) {
+                self.link = link
+                self.maxY = maxY
+                self.completion = completion
+            }
+        }
+
+        func runScrollBenchmark(completion: @escaping (TranscriptScrollBenchmarkOutcome) -> Void) {
+            guard benchmark == nil, let scrollView else { return }
+            scrollToBottom(animated: false)
+            let maxY = scrollView.contentView.bounds.minY
+            let viewportHeight = scrollView.contentView.bounds.height
+            guard maxY >= viewportHeight * TranscriptScrollBenchmarkResult.minimumScrollableViewports else {
+                completion(.tooShort(scrollableHeight: Double(maxY), viewportHeight: Double(viewportHeight)))
+                return
+            }
+            isPinnedToBottom = false
+            let link = scrollView.displayLink(target: self, selector: #selector(benchmarkTick(_:)))
+            benchmark = BenchmarkRun(link: link, maxY: maxY, completion: completion)
+            link.add(to: .main, forMode: .common)
+        }
+
+        @objc private func benchmarkTick(_ link: CADisplayLink) {
+            guard let run = benchmark, let tableView else {
+                link.invalidate()
+                return
+            }
+            let start = run.startTimestamp ?? link.timestamp
+            run.startTimestamp = start
+            if let last = run.lastTimestamp, let expected = run.expectedInterval {
+                run.samples.append(FrameTimingStats.Sample(interval: link.timestamp - last, refreshInterval: expected))
+            }
+            run.lastTimestamp = link.timestamp
+            run.expectedInterval = link.targetTimestamp - link.timestamp
+
+            // Distance travelled folded back and forth over [0, maxY]: up from the bottom, back
+            // down from the top, and so on.
+            let elapsed = link.timestamp - start
+            let travelled = TranscriptScrollBenchmarkResult.speedPointsPerSecond * CGFloat(elapsed)
+            let lap = travelled.truncatingRemainder(dividingBy: 2 * run.maxY)
+            scroll(toY: lap <= run.maxY ? run.maxY - lap : lap - run.maxY)
+
+            guard elapsed >= TranscriptScrollBenchmarkResult.durationSeconds else { return }
+            link.invalidate()
+            benchmark = nil
+            let result = TranscriptScrollBenchmarkResult(
+                date: Date(),
+                rowCount: displayRows.count,
+                documentHeight: Double(tableView.frame.height),
+                stats: FrameTimingStats(samples: run.samples)
+            )
+            scrollToBottom(animated: false)
+            run.completion(.completed(result))
+        }
+
         // MARK: Scrolling
 
         /// Runs `mutation` without moving what the user is looking at: pinned to the bottom, it
@@ -468,6 +553,32 @@ struct TranscriptRowHostRoot: View {
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }, action: { onHeightChange($0) })
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
+}
+
+/// What SwiftUI hosts: a plain view holding the scroll view, so the transcript's internal churn
+/// stays internal. Every row height change re-tiles the table, and the scroll view passes the
+/// resulting invalidation up — which, reaching the window's SwiftUI host, re-laid-out the whole
+/// window (the split view, the inspector) on every frame of a scroll. Measured 2026-10-14: about a
+/// tenth of the main thread during a benchmark run.
+final class TranscriptContainerView: NSView {
+    init(scrollView: NSScrollView) {
+        super.init(frame: .zero)
+        scrollView.frame = bounds
+        scrollView.autoresizingMask = [.width, .height]
+        addSubview(scrollView)
+    }
+
+    @available(*, unavailable, message: "Created in code only")
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    /// Nothing inside can change this view's size; the window decides it.
+    override func invalidateIntrinsicContentSize() {}
 }
 
 /// The transcript's scroll view: reports wheel and trackpad scrolling, which is the user's.

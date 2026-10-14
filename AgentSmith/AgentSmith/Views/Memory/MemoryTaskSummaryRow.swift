@@ -35,8 +35,7 @@ struct MemoryTaskSummaryRow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 3))
             }
 
-            MarkdownText(content: summary.summary, baseFont: .callout)
-                .foregroundStyle(.secondary)
+            MarkdownText(content: summary.summary, baseFont: .callout, textColor: .secondary)
                 .textSelection(.enabled)
 
             HStack(spacing: 8) {
