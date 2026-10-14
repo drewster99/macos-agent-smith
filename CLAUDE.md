@@ -187,6 +187,16 @@ JSON files only (no database) under `~/Library/Application Support/AgentSmith/`.
 
 `delete` is the single producer of `.removed`; tombstones are never resurrected, and wholesale `setSteps` callers must pass them back; `purge` is Smith-only and only for draft/template plans. Template substitution covers every authored field; rendering is LENIENT, authoring is STRICT; every write validates only the text it writes — there is deliberately no whole-task sweep. Details: `docs/claude/step-plan-and-template-inputs.md`.
 
+### Transcript rendering
+
+**The transcript container is an `NSTableView`, not a SwiftUI stack (decided 2026-10-14, user).** `ChannelLogView` hosts `TranscriptTableView` (`NSViewRepresentable`); each row is the existing SwiftUI row view in an `NSHostingView`, kept alive per message by an LRU cache so its state survives scrolling. Only on-screen rows are laid out, so cost does not grow with the transcript. Every earlier shape — a non-lazy `VStack` behind a sliding 400/3,000-row window — made each scroll and append lay out the whole window, and roughly 40 rounds of per-row tuning were undone by the next feature (`docs/plans/TranscriptScrollPerformance.md`).
+
+- **Which messages become rows, and what each row shows, is `TranscriptRows` (AgentSmithKit) and nothing else**: follow-up folding, hidden verdicts, guidance, restart chrome, timer de-duplication. It also plans the table edit (`edit(from:to:)`: append / front-trim / redraw-in-place, else reload). Don't re-decide any of it in a view.
+- Rows report their own height (`onGeometryChange` under `fixedSize(vertical:)`); the table never measures. Row content must be complete on its FIRST layout — no `.task` that fills it in later (that is why `MarkdownText` parses in `init`).
+- Rows live outside `ChannelLogView`'s SwiftUI environment. A custom environment value a row reads must be carried in `TranscriptRowContext` and re-applied in `TranscriptRowContent`.
+- Follow-the-tail changes only on USER scrolling (wheel, trackpad, scroller) or the jump-to-latest button — never on content growth or a row changing height. Every row mutation goes through `preservingReadingPosition`.
+- Never put a view tree proportional to the row count, or an `@State` write on every scroll frame, back into the transcript.
+
 ### Inspector
 
 Terminated agents are archived (`terminatedAgentArchive` / `archivedEvaluationRecords`) — keep that surface intact. Every LLM call site that records usage emits an `LLMCallEvent`. Inspector display state is derived in the model (`InspectorLiveState`); views watch nothing — don't add `.onChange` watchers back, and never write outputs inside `computeOutputs()`. The role-keyed surfaces are still current; the instance-keyed "Now" panel is planned, not built. The window's inspector is the app-owned `InspectorSidePane`, never SwiftUI's `.inspector` column (a platform layout-loop bug hung the app). Details: `docs/claude/inspector.md`.

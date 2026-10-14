@@ -27,19 +27,23 @@ struct MarkdownText: View, Equatable {
         lhs.content == rhs.content && lhs.baseFont == rhs.baseFont
     }
 
-    @State private var cachedBlocks: [ContentBlock] = []
+    /// Parsed in `init`, not in a `.task`: a transcript row sizes itself from its first layout,
+    /// and a `.task` left that layout empty — every row drew blank, then jumped to its real height
+    /// a frame later. The parse is cheap (0.001ms median over 4,000 real channel messages);
+    /// `InlineMarkdownStyler`, which builds the `Text`, already ran synchronously in the line views.
+    private let blocks: [ContentBlock]
+
+    init(content: String, baseFont: Font) {
+        self.content = content
+        self.baseFont = baseFont
+        self.blocks = Self.parseContentBlocks(content)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            ForEach(cachedBlocks) { block in
+            ForEach(blocks) { block in
                 RenderBlockView(block: block, baseFont: baseFont)
             }
-        }
-        .task {
-            await updateBlocks()
-        }
-        .onChange(of: content) { _, _ in
-            Task { await updateBlocks() }
         }
         .textSelection(.enabled)
         .environment(\.openURL, OpenURLAction { url in
@@ -61,17 +65,6 @@ struct MarkdownText: View, Equatable {
         })
     }
 
-    /// Deliberately main-actor, and deliberately without a `MainActor.run` around the
-    /// assignment. The app target is MainActor-by-default, so such a hop is a no-op that
-    /// reads as proof the parse was moved off-main — the misreading that hid a main-thread
-    /// LCS in `DiffView`. Nothing here wants to be off-main anyway: over 4,000 real channel
-    /// messages this parse is 0.001ms median, while `InlineMarkdownStyler` (29x that, and
-    /// unavoidably main-actor since it builds `Text`) runs in the View inits below.
-    /// See ROADMAP.md, "Actor-isolation boundary".
-    @Sendable private func updateBlocks() async {
-        cachedBlocks = parseContentBlocks()
-    }
-
     // MARK: - Block model
 
     private enum ContentBlock: Identifiable {
@@ -90,7 +83,7 @@ struct MarkdownText: View, Equatable {
         }
     }
 
-    private func parseContentBlocks() -> [ContentBlock] {
+    private static func parseContentBlocks(_ content: String) -> [ContentBlock] {
         let lines = content.components(separatedBy: "\n")
         var result: [ContentBlock] = []
         var i = 0
@@ -146,17 +139,17 @@ struct MarkdownText: View, Equatable {
     // MARK: - Table parsing
 
     /// A data row has at least one `|`.
-    private func isTableDataRow(_ line: String) -> Bool {
+    private static func isTableDataRow(_ line: String) -> Bool {
         line.contains("|")
     }
 
     /// A separator row contains only `-`, `:`, `|`, space, and tab.
-    private func isTableSeparatorRow(_ line: String) -> Bool {
+    private static func isTableSeparatorRow(_ line: String) -> Bool {
         guard line.contains("|") else { return false }
         return line.allSatisfy { $0 == "-" || $0 == ":" || $0 == "|" || $0 == " " || $0 == "\t" }
     }
 
-    private func parseTableRow(_ line: String) -> [String] {
+    private static func parseTableRow(_ line: String) -> [String] {
         var cells = line.components(separatedBy: "|")
         if cells.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { cells.removeFirst() }
         if cells.last?.trimmingCharacters(in: .whitespaces).isEmpty  == true { cells.removeLast() }

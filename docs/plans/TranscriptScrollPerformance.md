@@ -1,6 +1,6 @@
 # Transcript scroll performance — permanent fix
 
-Status: PLAN (2026-10-13). Needs the user's architecture decision (§4) before Phase 2.
+Status: Phase 2 ✅ (2026-10-14, Option A approved). Phase 0 partial, Phase 1 superseded, Phases 3–4 open — see §8.
 
 ## 1. Problem
 
@@ -167,3 +167,49 @@ cross-session pane):
 1. Approve Option A (NSTableView container)?
 2. Phase 0 needs a scroll of the live app for the Instruments trace: you scroll while I record, or
    I drive the scroll (takes mouse focus for ~30 s)?
+
+## 8. Progress
+
+### 2026-10-14 — Option A built (Phase 2 ✅)
+
+- **Phase 0 — partial.** No baseline trace of the old code: driving the scroll needs the user idle,
+  and posting scroll events to the app's pid (`CGEvent.postToPid`, with and without the window id)
+  did not scroll it. The user's call was to proceed without the baseline. The new build WAS traced
+  (Debug, 30 s, scrolling the session pane through the 5,000-message resident tail): 12 hitches,
+  10 of one frame (16.7 ms), one of 33 ms, one of 67 ms (that one after the user took the mouse);
+  main thread busy 478 ms of the 30 s, almost all SwiftUI text layout of rows coming on screen.
+  The user's report: "feels nice". The scroll benchmark command is not built yet.
+- **Phase 1 — superseded.** `.scrollTargetLayout()` and "Load earlier" went away with the
+  `VStack` they existed for.
+- **Phase 2 — done, as planned, with these differences:**
+  - Rows report their own height (`onGeometryChange` under `fixedSize(vertical:)`) instead of
+    being measured with `fittingSize`: `NSHostingView` has no height-for-width API, and a separate
+    measuring instance would not share the row's state (expanded, loaded content).
+  - Row state is kept by caching the HOSTING VIEW per message (LRU, 400, never evicting an
+    on-screen row) instead of moving every row's `@State` into the coordinator. Moving it would
+    have meant rewriting every expandable banner; the cache keeps it for any row scrolled back to
+    within the last 400 shown.
+  - The row rules (`ChannelGroupingIndex`, `shouldSuppress`, three `EmptyView` branches) moved
+    into one pure kit type, `TranscriptRows`, with the edit planner, under 16 tests
+    (`TranscriptRowsTests`). The provider's incrementally maintained `toolRequestIDs`, the view
+    model's forward of it and the cross-session loader's copy were deleted: the rows are derived
+    from the pane's own messages, one source.
+  - `MarkdownText` now parses in `init` (it used a `.task`, so every row's first layout was
+    empty — fatal for self-sizing rows).
+  - Rows are rebuilt from the pane's messages (O(n), n ≤ 5,000) on each change; the table edit is
+    still incremental. Make the rebuild incremental only if a trace shows it.
+
+- **Independent review (Codex), 2026-10-14:** two anchoring defects fixed before commit — expanding
+  a visible row anchored on the row BELOW it and scrolled the expansion's start away (the anchor is
+  now the first row whose top is on screen), and a table mutation shortly after a wheel scroll could
+  re-pin to the bottom (the whole mutation/tile/re-anchor transaction now counts as programmatic).
+  Third finding NOT fixed, by decision: a row evicted from the 400-view cache loses its expanded
+  state. The old design lost it sooner (any row that slid out of the 400-row window); persisting
+  every banner's expansion outside its view is the fix if this ever matters.
+
+### Open
+
+1. Phase 0: the DEBUG scroll benchmark, and a baseline of the new build in Release.
+2. Phase 3: one selectable text per message in `MarkdownText` (text layout is now the main cost);
+   one hover tracker for the table.
+3. Phase 4: the performance budget in CLAUDE.md once the benchmark exists.

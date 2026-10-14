@@ -203,14 +203,14 @@ struct ChannelTimestamp: View {
 ///
 /// Replaces a 16-branch `else if case .string(let kind) = message.metadata?["messageKind"]`
 /// ladder. Adding a new banner kind now means adding a case here, its arm in `init?(_:)`, AND a
-/// switch arm in `bannerView(for:in:)` — all fail at compile time if forgotten, instead of silently
+/// switch arm in `ChannelMessageBanner.body` — all fail at compile time if forgotten, instead of silently
 /// falling through to a generic `MessageRow`.
 private enum ChannelBannerKind {
-    /// Lifecycle chrome — gated by the user's "Show agent restart chrome" preference.
+    /// Lifecycle chrome. Gets a row only when "Show agent restart chrome" is on (`TranscriptRows`).
     case restartChrome
-    /// Timer activity — duplicate of a task's Scheduled chip when paired; otherwise rendered.
+    /// Timer activity. A "scheduled" row its task's banner repeats gets no row (`TranscriptRows`).
     case timerActivity
-    /// Internal Smith guidance — not rendered.
+    /// Internal Smith guidance. Never gets a row (`TranscriptRows`).
     case taskUpdateGuidance
     case taskAcknowledged
     case taskContinuing
@@ -300,52 +300,15 @@ private struct UserTaskActionInlineControl: View {
     }
 }
 
-/// Grouping lookups the channel log needs to fold tool-call follow-ups (security reviews,
-/// tool outputs) into their parent `tool_request` row and to de-duplicate scheduling banners.
-///
-/// Built fresh from the channel log's *rendered window* on each body pass. Previously these
-/// were four `@Observable` properties on `AppViewModel`, rebuilt over the entire `messages`
-/// array on every append — O(n) per message, O(n²) per session, plus the Observation macro's
-/// deep-equality comparison of the old vs new dictionaries on every assignment. Deriving them
-/// over the bounded window instead makes the cost O(window) and keeps nothing to trim: the
-/// lookups never outlive the rows they describe. Correct because `windowStartIndex()` never
-/// begins the window inside a follow-up group, so every visible follow-up's parent is present.
-private struct ChannelGroupingIndex {
-    var toolRequestIDs: Set<String> = []
-    /// Every verdict delivered for a tool call — including ones the pane's settings hide, which
-    /// arrive only so the call's row keeps its status icon (`TranscriptDelivery`).
-    var securityReviewByRequestID: [String: ChannelMessage] = [:]
-    /// The verdicts the pane's settings actually SHOW — the only ones whose text the row prints.
-    var shownVerdictRequestIDs: Set<String> = []
-    var toolOutputByRequestID: [String: ChannelMessage] = [:]
-    var taskIDsWithSchedulingBanner: Set<String> = []
-
-    init(_ messages: some Sequence<ChannelMessage>, verdictFilter: TranscriptFilter = .all) {
-        for message in messages {
-            let kind = message.kind
-            let requestID = message.stringMetadata("requestID")
-            if kind == .toolRequest, let requestID { toolRequestIDs.insert(requestID) }
-            if message.metadata?["securityDisposition"] != nil, let requestID {
-                securityReviewByRequestID[requestID] = message
-                if verdictFilter.matches(message) { shownVerdictRequestIDs.insert(requestID) }
-            }
-            if kind == .toolOutput, let requestID { toolOutputByRequestID[requestID] = message }
-            if kind == .taskCreated || kind == .taskActionScheduled,
-               let taskID = message.stringMetadata("taskID") {
-                taskIDsWithSchedulingBanner.insert(taskID)
-            }
-        }
-    }
-}
-
 /// Color-coded scrolling message stream with attachment display.
+///
+/// The rows live in an AppKit table (`TranscriptTableView`), not a SwiftUI stack: only the rows on
+/// screen exist as views, so scrolling costs the same at 50 messages as at 5,000. Every earlier
+/// shape — a non-lazy `VStack` behind a sliding 400/3,000-row window — paid layout for the whole
+/// window on every append and scroll, and each round of per-row tuning was undone by the next
+/// feature. See `docs/plans/TranscriptScrollPerformance.md`.
 struct ChannelLogView: View, Equatable {
     var messages: [ChannelMessage]
-    /// `requestID`s of every resident `tool_request`, maintained incrementally by `AppViewModel`
-    /// (O(1) per append) so suppression doesn't rebuild it over the whole transcript each render.
-    /// Not part of `==`: it changes only when `messages` does, which `messages.count`/`.last?.id`
-    /// already detect.
-    var toolRequestIDs: Set<String>
     var persistedHistoryCount: Int
     var hasRestoredHistory: Bool
     var onRestoreHistory: () -> Void
@@ -355,78 +318,34 @@ struct ChannelLogView: View, Equatable {
     var onExportTaskPDF: (_ taskID: UUID, _ title: String, _ result: String?, _ timestamp: Date) -> Void
     /// Invoked when the user clicks an MCP-server-failed banner to open Settings → MCP Servers.
     var onOpenMCPSettings: () -> Void
-    /// Display toggles forwarded into the environment so each banner / row reads them
-    /// without having to thread parameters through every initializer.
+    /// Display toggles handed to every row.
     var displayPrefs: TimestampPreferences
     /// The pane's own filter. The pane is DELIVERED some verdicts its settings hide (so a tool call
     /// keeps its status icon); this says which ones it actually shows — their inline text, and
     /// whether one whose call isn't shown gets a row of its own.
     var verdictFilter: TranscriptFilter = .all
-
-    @State private var isAtBottom = true
-    /// Drives programmatic scrolls (to the end, or back to an anchor row); never tracks the user.
-    @State private var scrollPosition = ScrollPosition(idType: ChannelMessage.ID.self)
-    @State private var autoScrollEnabled = true
-    /// Non-nil while the user has scrolled up: the id of the message the window's top is pinned
-    /// to, so streaming messages append *below* the visible area instead of sliding rows off the
-    /// top (which shifts the ScrollView content up and drags the viewport toward the bottom — the
-    /// "can't stop scrolling" regression). Anchored by id, not absolute index, so front-trimming
-    /// the resident tail (at the message cap) can't slide the pinned row out from under the reader.
-    /// Cleared when the user returns to the bottom.
-    @State private var frozenAnchorID: ChannelMessage.ID?
-    /// True while the user is actively driving the scroll (drag/momentum), as opposed to the
-    /// view scrolling because content grew. Only a user-driven move off the bottom breaks
-    /// auto-follow — content growth must not.
-    @State private var userInteracting = false
-    /// How many of the most-recent messages are eligible to render. Only a bounded tail of
-    /// `messages` is ever placed in the view tree — a non-lazy `VStack` materializes a
-    /// CoreAnimation layer for every row at once, so rendering an unbounded transcript
-    /// (sessions here reach tens of thousands of messages) allocates gigabytes of GPU
-    /// surfaces and wedges the render server. The window slides with the tail as new
-    /// messages arrive (bounded cost) and only grows past the default when the user pages
-    /// back via "Load earlier messages".
-    @State private var maxVisibleCount = ChannelLogView.initialWindowSize
     /// The attachment currently shown in the full-screen image viewer, managed by the parent.
     @Binding var selectedImageAttachment: Attachment?
-    
-    /// Cached window start index to avoid recalculating on every body pass.
-    /// Updated via .onChange when messages or maxVisibleCount changes.
-    @State private var cachedWindowStart = 0
-    /// Cached visible messages array to avoid creating it on every body pass.
-    @State private var cachedVisibleMessages: [ChannelMessage] = []
-    /// Cached grouping index to avoid rebuilding dictionaries on every body pass.
-    @State private var cachedGroupingIndex = ChannelGroupingIndex([])
 
-    /// Rows rendered on first display / while tracking the tail. Large enough to cover any
-    /// normal scrollback without a "Load earlier" click, small enough that its layers are a
-    /// rounding error against the render budget.
-    static let initialWindowSize = 400
-    /// How many additional older rows each "Load earlier messages" click reveals.
-    static let windowGrowStep = 800
-    /// Hard cap on rows rendered while the window is frozen (user scrolled up). Bounds render
-    /// cost even if someone browses through a long, fast stream; past it the top slides again.
-    static let maxFrozenWindowRows = 3000
+    /// Rows are hosted by AppKit, outside this view's SwiftUI environment, so every custom value a
+    /// row reads is carried across explicitly in `TranscriptRowContext`.
+    @Environment(\.transcriptTaskActionHandler) private var taskActionHandler
+    @Environment(\.attachmentBytesLoader) private var attachmentBytesLoader
+
+    @State private var isAtBottom = true
+    @State private var scrollController = TranscriptScrollController()
 
     /// Prevents body re-evaluation when only unrelated parent properties change (e.g. inputText).
-    /// Closures and Bindings are excluded — they can't be meaningfully compared, and
-    /// the Binding manages its own invalidation internally. `displayPrefs` is included so
-    /// toggling a setting at runtime invalidates the cached body.
+    /// Closures and the Binding are excluded — they can't be meaningfully compared, and their
+    /// captures are session-stable here (the per-session `viewModel` is created once by
+    /// `SessionManager` and never swapped under a live view).
     ///
-    /// Closures (`onRestoreHistory`, `onExportTaskPDF`) are intentionally excluded — they
-    /// can't be meaningfully compared, and their captures are session-stable here (the
-    /// per-session `viewModel` is created once by `SessionManager` and never swapped under
-    /// a live view). A future change that makes a closure capture a value that varies
-    /// without also changing one of the compared fields would route to a stale capture; if
-    /// that ever happens, fold the relevant identity into this comparator.
-    ///
-    /// CORRECTNESS INVARIANT: assumes `messages` is append-only. Count + last.id is
-    /// sufficient to detect "something changed" only because we never mutate existing
-    /// elements in place. If this ever changes (e.g. updating an already-appended
-    /// tool_request's metadata when its output arrives, instead of treating output as a
-    /// separate appended row), this comparator must be expanded to detect those edits —
-    /// otherwise the channel log will silently fail to redraw on streaming updates.
+    /// CORRECTNESS INVARIANT: assumes `messages` is append-only at the end and trimmed only at the
+    /// front. Count + first.id + last.id detects every change under that rule because existing
+    /// elements are never mutated in place.
     nonisolated static func == (lhs: ChannelLogView, rhs: ChannelLogView) -> Bool {
         lhs.messages.count == rhs.messages.count
+        && lhs.messages.first?.id == rhs.messages.first?.id
         && lhs.messages.last?.id == rhs.messages.last?.id
         && lhs.persistedHistoryCount == rhs.persistedHistoryCount
         && lhs.hasRestoredHistory == rhs.hasRestoredHistory
@@ -434,261 +353,131 @@ struct ChannelLogView: View, Equatable {
         && lhs.verdictFilter == rhs.verdictFilter
     }
 
-
-    /// The id of the row currently at the window's top — what the frozen window pins to when the
-    /// user scrolls away, so streaming cannot drag the viewport back down.
-    private func anchorIDAtWindowStart() -> ChannelMessage.ID? {
-        let start = windowStartIndex()
-        return start < messages.count ? messages[start].id : nil
-    }
-
-    /// Grows the visible window, pinned so the rows the user is reading do not move.
-    ///
-    /// Growing inserts older rows ABOVE the current top, which would otherwise shove the content
-    /// downward. Re-anchors, once the new rows exist, to the row at the top of the viewport — the one
-    /// the scroll view reports, which by construction has a view (a row folded into its parent, or
-    /// one that renders as nothing, has none to anchor to). Before the user has scrolled there is no
-    /// reported row; the first unsuppressed message stands in.
-    private func loadEarlier() {
-        let anchorID = scrollPosition.viewID(type: ChannelMessage.ID.self)
-            ?? cachedVisibleMessages.first { !shouldSuppress($0, toolRequestIDs: toolRequestIDs) }?.id
-        maxVisibleCount = min(messages.count, maxVisibleCount + Self.windowGrowStep)
-        guard let anchorID else { return }
-        DispatchQueue.main.async { scrollPosition.scrollTo(id: anchorID, anchor: .top) }
-    }
-
-    /// Scrolls to the end of the transcript. By EDGE, not by a message's id: the newest message is
-    /// often folded into its parent row (a tool output, a security verdict) or renders as nothing,
-    /// and scrolling to an id without a view silently does nothing — which is how auto-scroll once
-    /// stopped following the tail with nothing in the logs to say why.
-    private func scrollToLatest() {
-        withAnimation(.easeOut(duration: 0.2)) {
-            scrollPosition.scrollTo(edge: .bottom)
-        }
-    }
-
     var body: some View {
         ZStack(alignment: .bottom) {
-                ScrollView {
-                    // The three cached values are updated by the single cacheSignature watcher
-                    // below, never recomputed on a body pass.
-                    ChannelLogMessageList(
-                        messages: cachedVisibleMessages, index: cachedGroupingIndex,
-                        hiddenEarlierCount: cachedWindowStart,
-                        persistedHistoryCount: persistedHistoryCount,
-                        hasRestoredHistory: hasRestoredHistory, displayPrefs: displayPrefs,
-                        isSuppressed: { shouldSuppress($0, toolRequestIDs: toolRequestIDs) },
-                        onRestoreHistory: onRestoreHistory,
-                        onLoadEarlier: { loadEarlier() },
-                        onExportTaskPDF: onExportTaskPDF, onOpenMCPSettings: onOpenMCPSettings,
-                        selectedImageAttachment: $selectedImageAttachment
-                    )
-                }
-                // Programmatic scrolling only (no scroll-target layout): the position is not
-                // tracked while the user scrolls, so scrolling never re-renders this view. Where the
-                // user IS is `ChannelLogScrollTracking`'s job.
-                .scrollPosition($scrollPosition)
-                .background(AppColors.channelBackground)
-                .environment(\.timestampPreferences, displayPrefs)
-                .modifier(ChannelLogScrollTracking(
-                    isAtBottom: $isAtBottom, autoScrollEnabled: $autoScrollEnabled,
-                    frozenAnchorID: $frozenAnchorID, userInteracting: $userInteracting,
-                    anchorIDAtWindowStart: anchorIDAtWindowStart
-                ))
-                // Follow the tail on the id of the newest message, NOT messages.count: once a
-                // session reaches the resident-message cap, every append trims one off the front,
-                // so count is pinned and an `.onChange(of: messages.count)` would stop firing —
-                // silently killing auto-scroll. last.id changes on every appended message.
-                //
-                // It watches the raw last id — the append signal, which changes even when the new
-                // message folds into an existing row — and scrolls to the bottom EDGE, since the
-                // newest message may have no view of its own to scroll to.
-                .onChange(of: messages.last?.id) {
-                    guard autoScrollEnabled else { return }
-                    scrollToLatest()
-                }
-                // ONE watcher over the whole dependency set, not one per input. Three separate
-                // watchers ran this rebuild (an array copy plus a grouping-index build over the
-                // visible window) twice per appended message, because `messages.count` and
-                // `messages.last?.id` change together on every one — and a fourth input,
-                // `frozenAnchorID`, had no watcher at all.
-                //
-                // Watching the signature is what keeps those in step: an input not in
-                // `CacheSignature` cannot be watched, and one that is added is watched by
-                // construction. A per-input watcher plus a separate signature could disagree — and
-                // did: adding `.onChange(of: frozenAnchorID)` to the old shape would have compiled,
-                // read correctly, and done nothing, because the signature it guarded on was
-                // unchanged.
-                //
-                // `initial: true` replaces the `.task` that used to seed this. `.task` suspends
-                // before running, so the first rendered frame showed an empty transcript.
-                .onChange(of: cacheSignature, initial: true) { _, _ in
-                    updateCachedValues()
-                }
+            TranscriptTableView(
+                messages: messages,
+                options: TranscriptRows.Options(
+                    verdictFilter: verdictFilter,
+                    showsRestartChrome: displayPrefs.showRestartChrome
+                ),
+                restorableHistoryCount: hasRestoredHistory ? 0 : persistedHistoryCount,
+                rowContext: TranscriptRowContext(
+                    displayPrefs: displayPrefs,
+                    taskActionHandler: taskActionHandler,
+                    attachmentBytesLoader: attachmentBytesLoader,
+                    onRestoreHistory: onRestoreHistory,
+                    onExportTaskPDF: onExportTaskPDF,
+                    onOpenMCPSettings: onOpenMCPSettings,
+                    selectedImageAttachment: $selectedImageAttachment
+                ),
+                scrollController: scrollController,
+                onAtBottomChange: { isAtBottom = $0 }
+            )
+            .background(AppColors.channelBackground)
 
-                if !isAtBottom {
-                    ChannelLogScrollToBottomButton(onTap: { scrollToLatest() })
-                }
-            }
-            // GREEDY, and load-bearing in both directions, and applied to the ZSTACK rather than
-            // the reader — a vertical `ScrollView` takes its WIDTH from its content, so without
-            // this the pane is sized by whatever it happens to be showing: a short transcript
-            // rendered as a ~100pt ribbon floating in the middle of the pane, and one containing a
-            // long URL or file path demanded that width from the whole window — which is what
-            // stopped the middle column from shrinking and squeezed the sidebar and inspector
-            // instead. Filling the offered width lets the text wrap to the pane rather than the
-            // pane size itself to the text.
-            //
-            // Same defect, same fix as `ModelMetadataInspectorWindow`'s split (see its comment):
-            // a split view's child that is not greedy on the cross axis collapses to its intrinsic
-            // size and floats centered.
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-    
-    /// Updates cached values for window start, visible messages, and grouping index.
-    /// Called via .onChange when dependencies change to avoid recalculating on every body pass.
-    /// Follows SwiftUI best practice: calculations driven by .onChange, not computed properties in body.
-    /// EVERY input `updateCachedValues()` reads, and the only thing watched for it. Adding a read
-    /// to that function without adding it here is the bug this shape exists to prevent — the cache
-    /// would then go stale on a change nothing was watching, silently.
-    ///
-    /// Cheap to compute and to compare — deliberately NOT the message array itself, which would
-    /// cost more to diff than the rebuild it is avoiding.
-    private struct CacheSignature: Equatable {
-        let count: Int
-        let lastID: UUID?
-        let maxVisible: Int
-        /// Read by `windowStartIndex()` to pin the window while the user is scrolled back. It had
-        /// no watcher at all before, so the freeze engaged one appended message late.
-        let frozenAnchor: UUID?
-        /// Read by the grouping index. Toggling a verdict class can leave the DELIVERED messages
-        /// identical (hidden verdicts still arrive for their calls), so without this the inline
-        /// text would not update until the next message.
-        let verdictFilter: TranscriptFilter
-    }
-
-    private var cacheSignature: CacheSignature {
-        CacheSignature(
-            count: messages.count,
-            lastID: messages.last?.id,
-            maxVisible: maxVisibleCount,
-            frozenAnchor: frozenAnchorID,
-            verdictFilter: verdictFilter
-        )
-    }
-
-    /// Rebuilds the window, the visible slice, and the grouping index.
-    ///
-    /// Synchronous, and deliberately not deferred to a later main-queue turn: this cache feeds the
-    /// `ForEach` that the auto-scroll handler above scrolls through, so a main-queue turn of delay
-    /// would put the rebuild behind the scroll
-    /// in a view where the two are already tightly interleaved. The signature check removes the
-    /// duplicate work without moving anything in time, which is the property that matters here.
-    private func updateCachedValues() {
-        let windowStart = windowStartIndex()
-        cachedWindowStart = windowStart
-        cachedVisibleMessages = windowStart == 0 ? messages : Array(messages[windowStart...])
-        cachedGroupingIndex = ChannelGroupingIndex(cachedVisibleMessages, verdictFilter: verdictFilter)
-    }
-
-    /// True for security-review and tool-output rows, which are grouped into (and rendered
-    /// inline by) their parent `tool_request` row rather than standing on their own.
-    private func isSuppressibleFollowUp(_ message: ChannelMessage) -> Bool {
-        guard message.stringMetadata("requestID") != nil else { return false }
-        return message.metadata?["securityDisposition"] != nil
-            || message.kind == .toolOutput
-    }
-
-    /// Suppresses security reviews and tool outputs that are grouped into a parent tool_request row.
-    private func shouldSuppress(_ message: ChannelMessage, toolRequestIDs: Set<String>) -> Bool {
-        guard isSuppressibleFollowUp(message) else { return false }
-        // Delivered only for its call's status icon: never a row of its own, parent or not.
-        if message.metadata?["securityDisposition"] != nil, !verdictFilter.matches(message) { return true }
-        guard let reqID = message.stringMetadata("requestID") else { return false }
-        // Only suppress if the parent tool_request exists in the messages array
-        return toolRequestIDs.contains(reqID)
-    }
-
-    /// The index into `messages` where the rendered window begins. Renders at most
-    /// `maxVisibleCount` of the newest messages, but never *starts* on a suppressible
-    /// follow-up: those are grouped into a parent `tool_request` row that sits immediately
-    /// above them, so beginning the window mid-group would hide the parent and silently drop
-    /// the follow-up's content. Follow-up runs are short and contiguous, so the backward walk
-    /// settles in a few hops; the guard caps it against any unexpected metadata pattern.
-    private func windowStartIndex() -> Int {
-        let count = messages.count
-        var tailStart = 0
-        if count > maxVisibleCount {
-            tailStart = count - maxVisibleCount
-            var guardHops = 0
-            while tailStart > 0 && guardHops < 256 && isSuppressibleFollowUp(messages[tailStart]) {
-                tailStart -= 1
-                guardHops += 1
+            if !isAtBottom {
+                ChannelLogScrollToBottomButton(onTap: { scrollController.scrollToBottom(animated: true) })
             }
         }
-        // While the user has scrolled up, hold the top on the anchored message (resolved to its
-        // CURRENT index each pass, so front-trimming can't drift it) instead of sliding forward as
-        // messages stream in. `min(frozen, tailStart)` still lets "Load earlier" extend backward
-        // (that lowers tailStart below frozen); the `max(_, count - cap)` bounds render if the
-        // frozen window grows huge. If the anchor has been trimmed away entirely, fall through to
-        // the tail.
-        if let anchorID = frozenAnchorID,
-           let frozen = messages.firstIndex(where: { $0.id == anchorID }) {
-            return max(min(frozen, tailStart), count - Self.maxFrozenWindowRows)
+        // GREEDY, and load-bearing: without it the pane is sized by whatever it happens to be
+        // showing — a short transcript rendered as a ribbon floating in the middle of the pane, and
+        // a long URL demanded its width from the whole window. Same defect, same fix as
+        // `ModelMetadataInspectorWindow`'s split.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Everything a transcript row needs from outside the row itself. Rows are hosted in AppKit cells,
+/// so the SwiftUI environment of `ChannelLogView` does NOT reach them; this is how it crosses.
+struct TranscriptRowContext {
+    let displayPrefs: TimestampPreferences
+    let taskActionHandler: TranscriptTaskActionHandler
+    let attachmentBytesLoader: (@Sendable (UUID, String) async -> Data?)?
+    let onRestoreHistory: () -> Void
+    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
+    let onOpenMCPSettings: () -> Void
+    let selectedImageAttachment: Binding<Attachment?>
+}
+
+/// What one table row shows: the "restore full history" affordance, or a message row.
+enum TranscriptDisplayRow {
+    case restoreHistory(count: Int)
+    case message(TranscriptRow)
+
+    var key: Key {
+        switch self {
+        case .restoreHistory: return .restoreHistory
+        case .message(let row): return .message(row.id)
         }
-        return tailStart
     }
 
-    /// Renders the right banner / row for a single channel message. Replaces the
-    /// 16-branch metadata-keyed ladder that used to live in `body`. Each `nil`-returning
-    /// case represents an internal coordination message that's intentionally suppressed.
+    enum Key: Hashable {
+        case restoreHistory
+        case message(UUID)
+    }
+}
+
+/// The SwiftUI content of one table row, with the context the AppKit host carries across.
+struct TranscriptRowContent: View {
+    let row: TranscriptDisplayRow
+    let context: TranscriptRowContext
+
+    var body: some View {
+        TranscriptRowBody(row: row, context: context)
+            .environment(\.timestampPreferences, context.displayPrefs)
+            .environment(\.transcriptTaskActionHandler, context.taskActionHandler)
+            .environment(\.attachmentBytesLoader, context.attachmentBytesLoader)
+    }
+}
+
+private struct TranscriptRowBody: View {
+    let row: TranscriptDisplayRow
+    let context: TranscriptRowContext
+
+    var body: some View {
+        switch row {
+        case .restoreHistory(let count):
+            ChannelLogRestoreHistoryButton(persistedHistoryCount: count,
+                                           onRestoreHistory: context.onRestoreHistory)
+        case .message(let transcriptRow):
+            ChannelMessageBanner(
+                row: transcriptRow,
+                displayPrefs: context.displayPrefs,
+                onExportTaskPDF: context.onExportTaskPDF,
+                onOpenMCPSettings: context.onOpenMCPSettings,
+                selectedImageAttachment: context.selectedImageAttachment
+            )
+        }
+    }
 }
 
 /// Renders a channel message as the appropriate banner or row based on its messageKind metadata.
 /// Replaces the `bannerView(for:reviewLookup:outputLookup:scheduledTaskBannerIDs:)` function.
 private struct ChannelMessageBanner: View {
-    let message: ChannelMessage
-    let reviewLookup: [String: ChannelMessage]
-    let shownVerdictRequestIDs: Set<String>
-    let outputLookup: [String: ChannelMessage]
-    let scheduledTaskBannerIDs: Set<String>
+    let row: TranscriptRow
     let displayPrefs: TimestampPreferences
     let onExportTaskPDF: (UUID, String, String?, Date) -> Void
     let onOpenMCPSettings: () -> Void
     @Binding var selectedImageAttachment: Attachment?
     
+    private var message: ChannelMessage { row.message }
+
     var body: some View {
-        // Mapped from the typed kind; only the kinds that render as banners have a case.
+        // Mapped from the typed kind; only the kinds that render as banners have a case. Whether a
+        // message gets a row at all — guidance, hidden restart chrome, a timer row its task's
+        // banner repeats — is decided once, by `TranscriptRows`, before it gets here.
         let kind = message.kind.flatMap(ChannelBannerKind.init)
         switch kind {
         case .taskUpdateGuidance:
-            // Internal coordination messages — never rendered.
+            // Never a row (`TranscriptRows`); the case exists because the switch is exhaustive.
             EmptyView()
         case .restartChrome:
-            // Lifecycle chrome ("All agents stopped", "Smith agent active") — gated by
-            // the user's "Show agent restart chrome" preference. Rendered as a centered
-            // marker, not a chat row, so it reads as a lifecycle event.
-            if displayPrefs.showRestartChrome {
-                LifecycleChromeBanner(message: message)
-            }
+            // Rendered as a centered marker, not a chat row, so it reads as a lifecycle event.
+            LifecycleChromeBanner(message: message)
         case .timerActivity:
-            // Suppress the "scheduled HH:MM — run_task: …" row when paired with a Task
-            // banner whose chip carries the same info; otherwise render via MessageRow.
-            if message.stringMetadata("timerEventKind") == "scheduled",
-               let timerTaskID = message.stringMetadata("timerTaskID"),
-               scheduledTaskBannerIDs.contains(timerTaskID) {
-                EmptyView()
-            } else {
-                MessageRow(
-                    message: message,
-                    securityReviewMessage: message.stringMetadata("requestID").flatMap { reviewLookup[$0] },
-                    toolOutputMessage: message.stringMetadata("requestID").flatMap { outputLookup[$0] },
-                    showsSecurityReviewText: message.stringMetadata("requestID").map(shownVerdictRequestIDs.contains) ?? false,
-                    displayPrefs: displayPrefs,
-                    selectedImageAttachment: $selectedImageAttachment
-                )
-                .equatable()
-            }
+            TranscriptMessageRow(row: row, displayPrefs: displayPrefs,
+                                 selectedImageAttachment: $selectedImageAttachment)
         case .taskAcknowledged:
             TaskAcknowledgedBanner(
                 title: message.content,
@@ -803,16 +592,28 @@ private struct ChannelMessageBanner: View {
             )
         case .none:
             // Plain message — fall through to the generic row.
-            MessageRow(
-                message: message,
-                securityReviewMessage: message.stringMetadata("requestID").flatMap { reviewLookup[$0] },
-                toolOutputMessage: message.stringMetadata("requestID").flatMap { outputLookup[$0] },
-                showsSecurityReviewText: message.stringMetadata("requestID").map(shownVerdictRequestIDs.contains) ?? false,
-                displayPrefs: displayPrefs,
-                selectedImageAttachment: $selectedImageAttachment
-            )
-            .equatable()
+            TranscriptMessageRow(row: row, displayPrefs: displayPrefs,
+                                 selectedImageAttachment: $selectedImageAttachment)
         }
+    }
+}
+
+/// The generic message row, with the row's folded-in verdict and output.
+private struct TranscriptMessageRow: View {
+    let row: TranscriptRow
+    let displayPrefs: TimestampPreferences
+    @Binding var selectedImageAttachment: Attachment?
+
+    var body: some View {
+        MessageRow(
+            message: row.message,
+            securityReviewMessage: row.securityReview,
+            toolOutputMessage: row.toolOutput,
+            showsSecurityReviewText: row.showsSecurityReviewText,
+            displayPrefs: displayPrefs,
+            selectedImageAttachment: $selectedImageAttachment
+        )
+        .equatable()
     }
 }
 
@@ -1893,137 +1694,5 @@ private struct LifecycleChromeBanner: View {
         }
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity)
-    }
-}
-
-
-/// The transcript's rows, plus the two affordances that reach further back than the live window.
-///
-/// Split out of `ChannelLogView` because that body is the app's hot path — it re-runs on every
-/// appended message, and `MessageRow`'s hand-written `==` exists specifically to stop that fanning
-/// out into per-row work. The fewer things that body does, the less there is to re-run.
-///
-/// Lives in this file because `ChannelGroupingIndex` and `ChannelMessageBanner` are private to it.
-private struct ChannelLogMessageList: View {
-    let messages: [ChannelMessage]
-    let index: ChannelGroupingIndex
-    let hiddenEarlierCount: Int
-    let persistedHistoryCount: Int
-    let hasRestoredHistory: Bool
-    let displayPrefs: TimestampPreferences
-    /// Whether a row is folded into a parent `tool_request` above it. A closure rather than a copy
-    /// of the rule: it depends on `ChannelLogView`'s own suppression logic, and a second
-    /// implementation here is a second thing to keep in step.
-    let isSuppressed: (ChannelMessage) -> Bool
-    let onRestoreHistory: () -> Void
-    let onLoadEarlier: () -> Void
-    let onExportTaskPDF: (UUID, String, String?, Date) -> Void
-    let onOpenMCPSettings: () -> Void
-    @Binding var selectedImageAttachment: Attachment?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ChannelLogHistoryAffordances(
-                hiddenEarlierCount: hiddenEarlierCount,
-                persistedHistoryCount: persistedHistoryCount,
-                hasRestoredHistory: hasRestoredHistory,
-                onRestoreHistory: onRestoreHistory, onLoadEarlier: onLoadEarlier
-            )
-            ForEach(messages) { message in
-                if !isSuppressed(message) {
-                    ChannelMessageBanner(
-                        message: message,
-                        reviewLookup: index.securityReviewByRequestID,
-                        shownVerdictRequestIDs: index.shownVerdictRequestIDs,
-                        outputLookup: index.toolOutputByRequestID,
-                        scheduledTaskBannerIDs: index.taskIDsWithSchedulingBanner,
-                        displayPrefs: displayPrefs,
-                        onExportTaskPDF: onExportTaskPDF,
-                        onOpenMCPSettings: onOpenMCPSettings,
-                        selectedImageAttachment: $selectedImageAttachment
-                    )
-                    .id(message.id)
-                }
-            }
-        }
-        // Makes each row a scroll target, so `ScrollPosition.viewID` reports the row actually at the
-        // top of the viewport — what "Load earlier" re-anchors to.
-        .scrollTargetLayout()
-        .padding(8)
-    }
-}
-
-/// Tracks where the user is in the transcript, and whether streaming may move them.
-///
-/// Two facts, deliberately separate: whether the viewport is AT the bottom (which re-enables
-/// tail-following), and whether the USER put it where it is. Content growth leaves
-/// `userInteracting` false, which is what distinguishes "the user scrolled away, freeze the
-/// window" from "new messages arrived, keep following the tail".
-private struct ChannelLogScrollTracking: ViewModifier {
-    @Binding var isAtBottom: Bool
-    @Binding var autoScrollEnabled: Bool
-    @Binding var frozenAnchorID: ChannelMessage.ID?
-    @Binding var userInteracting: Bool
-    /// The row at the window's top, captured when the window freezes.
-    let anchorIDAtWindowStart: () -> ChannelMessage.ID?
-
-    /// Within this fraction of a viewport height of the end still counts as "at the bottom", so
-    /// tail-following survives the small drift an animated scroll leaves behind.
-    private static let bottomProximity: CGFloat = 0.2
-
-    func body(content: Content) -> some View {
-        content
-            .onScrollGeometryChange(for: Bool.self, of: { geometry in
-                let distanceFromBottom = geometry.contentSize.height
-                    - geometry.contentOffset.y
-                    - geometry.containerSize.height
-                return distanceFromBottom <= geometry.containerSize.height * Self.bottomProximity
-            }, action: { _, nearBottom in
-                // Project rule: defer @State mutation out of scroll-geometry actions via
-                // DispatchQueue.main.async. The action fires rapidly during ScrollView
-                // animation/inertia; mutating @State synchronously triggers SwiftUI's
-                // "OnScrollGeometryChange tried to update multiple times per frame" warning when
-                // the resulting body re-evaluation re-attaches the modifier mid-frame.
-                DispatchQueue.main.async { settle(nearBottom: nearBottom) }
-            })
-            .onScrollPhaseChange { _, newPhase in
-                userInteracting = newPhase == .interacting
-                    || newPhase == .decelerating
-                    || newPhase == .tracking
-            }
-    }
-
-    private func settle(nearBottom: Bool) {
-        isAtBottom = nearBottom
-        if nearBottom {
-            // Back at the bottom → resume tail-following and unfreeze the window.
-            autoScrollEnabled = true
-            frozenAnchorID = nil
-        } else if userInteracting {
-            // The USER scrolled away — content growth leaves `userInteracting` false — so stop
-            // following and freeze the window's top so streaming can't drag the viewport back down.
-            autoScrollEnabled = false
-            if frozenAnchorID == nil { frozenAnchorID = anchorIDAtWindowStart() }
-        }
-    }
-}
-
-/// The two ways back past the live window: restoring the persisted log, and widening the window.
-private struct ChannelLogHistoryAffordances: View {
-    let hiddenEarlierCount: Int
-    let persistedHistoryCount: Int
-    let hasRestoredHistory: Bool
-    let onRestoreHistory: () -> Void
-    let onLoadEarlier: () -> Void
-
-    var body: some View {
-        if persistedHistoryCount > 0 && !hasRestoredHistory {
-            ChannelLogRestoreHistoryButton(persistedHistoryCount: persistedHistoryCount,
-                                           onRestoreHistory: onRestoreHistory)
-        }
-        if hiddenEarlierCount > 0 {
-            ChannelLogLoadEarlierButton(hiddenEarlierCount: hiddenEarlierCount,
-                                        onLoadEarlier: onLoadEarlier)
-        }
     }
 }

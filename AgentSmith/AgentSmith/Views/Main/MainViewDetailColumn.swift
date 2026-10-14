@@ -262,7 +262,6 @@ private struct BottomTranscriptPane: View {
             TranscriptFilterBar(config: $viewModel.transcriptViewConfig, statsSource: statsSource)
             ChannelLogView(
                 messages: viewModel.bottomTranscriptProvider.messages,
-                toolRequestIDs: viewModel.bottomTranscriptProvider.toolRequestIDs,
                 // This pane's OWN provider, not the view model's forwards — those read the
                 // primary (inspector) provider, and `hasRestoredHistory` is now per-subscriber.
                 // Clearing the primary made it report "not restored", which put a "Restore full
@@ -427,7 +426,6 @@ private struct LiveTaskTranscript: View {
     var body: some View {
         ChannelLogView(
             messages: viewModel.topTranscriptProvider.messages,
-            toolRequestIDs: viewModel.topTranscriptProvider.toolRequestIDs,
             persistedHistoryCount: 0,      // task-scoped pane: no full-log "Restore" affordance
             hasRestoredHistory: true,
             onRestoreHistory: {},
@@ -494,7 +492,7 @@ private struct CrossSessionTranscriptView: View {
             guard !Task.isCancelled else { return }
             let landed = LoadedCrossSessionTranscript(
                 taskID: taskID,
-                outcome: result.map { .loaded(messages: $0.messages, toolRequestIDs: $0.toolRequestIDs) } ?? .failed)
+                outcome: result.map { .loaded(messages: $0) } ?? .failed)
             loaded = landed
             visible = LoadedCrossSessionTranscript(
                 taskID: landed.taskID, outcome: Self.applying(filterConfig, to: landed.outcome))
@@ -524,9 +522,9 @@ private struct CrossSessionTranscriptView: View {
         switch outcome {
         case .failed:
             return .failed
-        case .loaded(let messages, let toolRequestIDs):
+        case .loaded(let messages):
             var delivery = TranscriptDelivery(filter: config.makeFilter(taskScope: .any))
-            return .loaded(messages: delivery.admitted(from: messages), toolRequestIDs: toolRequestIDs)
+            return .loaded(messages: delivery.admitted(from: messages))
         }
     }
 }
@@ -538,7 +536,7 @@ private struct LoadedCrossSessionTranscript {
     let outcome: Outcome
 
     enum Outcome {
-        case loaded(messages: [ChannelMessage], toolRequestIDs: Set<String>)
+        case loaded(messages: [ChannelMessage])
         case failed
     }
 }
@@ -555,10 +553,9 @@ private struct CrossSessionTranscriptOutcomeView: View {
 
     var body: some View {
         switch outcome {
-        case .loaded(let messages, let toolRequestIDs):
+        case .loaded(let messages):
             ChannelLogView(
                 messages: messages,
-                toolRequestIDs: toolRequestIDs,
                 persistedHistoryCount: 0,
                 hasRestoredHistory: true,
                 onRestoreHistory: {},

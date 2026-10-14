@@ -19,7 +19,7 @@ final class AppViewModel {
     /// channel stream, and fans each batch out to every subscribed pane (doing the filtering off-main).
     /// Persistence — the JSONL append and its shutdown flush — stays here on the view model.
     let transcriptStore: TranscriptStore
-    /// The main pane's unfiltered (`.all`) view onto the store. `messages` / `renderedToolRequestIDs` /
+    /// The main pane's unfiltered (`.all`) view onto the store. `messages` /
     /// `hasRestoredHistory` / `persistedHistoryCount` forward to it, so `ChannelLogView` and the
     /// inspector keep reading `viewModel.messages` unchanged while the filtering happens off-main.
     let primaryTranscriptProvider: FilteredTranscriptProvider
@@ -98,11 +98,6 @@ final class AppViewModel {
     var messages: [ChannelMessage] { primaryTranscriptProvider.messages }
     /// Changes whenever `messages` does; see `FilteredTranscriptProvider.revision`.
     var messagesRevision: Int { primaryTranscriptProvider.revision }
-
-    /// `requestID`s of every resident `tool_request`, maintained incrementally by the primary provider
-    /// so `ChannelLogView` folds tool-output / security-review follow-ups into their parent row without
-    /// rebuilding the set each render. Covers ALL resident messages, not just the render window.
-    var renderedToolRequestIDs: Set<String> { primaryTranscriptProvider.toolRequestIDs }
 
     var tasks: [AgentTask] = [] {
         didSet {
@@ -3044,17 +3039,14 @@ final class AppViewModel {
     /// task (or drilled template run) originated in a session that isn't this window's (so the live
     /// `topTranscriptProvider`, bound to THIS session's store, has nothing for it). Read-only and
     /// one-shot (no streaming updates); the file-backed counterpart to the live provider. The (large)
-    /// scan runs in the package, off this actor. Returns the task's messages plus the tool-request id
-    /// set the row renderer folds tool output against.
+    /// scan runs in the package, off this actor.
     /// Loads a task's transcript from its origin session's log. Returns `nil` on a READ failure so the
     /// caller can distinguish "couldn't load" from "loaded, no messages" — the old `try?`→`[]` rendered
     /// an unreadable/corrupt log as a clean empty transcript.
-    func loadCrossSessionTaskTranscript(originSessionID: UUID, taskID: UUID) async -> (messages: [ChannelMessage], toolRequestIDs: Set<String>)? {
+    func loadCrossSessionTaskTranscript(originSessionID: UUID, taskID: UUID) async -> [ChannelMessage]? {
         let pm = PersistenceManager(sessionID: originSessionID)
         do {
-            let messages = try await pm.loadTaskTranscript(taskID: taskID)
-            let ids = Set(messages.compactMap { FilteredTranscriptProvider.toolRequestID(of: $0) })
-            return (messages, ids)
+            return try await pm.loadTaskTranscript(taskID: taskID)
         } catch {
             logger.error("cross-session transcript load failed for task \(taskID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
