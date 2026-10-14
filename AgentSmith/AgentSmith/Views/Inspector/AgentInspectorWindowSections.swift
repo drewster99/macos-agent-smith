@@ -40,14 +40,8 @@ struct AgentInspectorWindowSections: View {
 
                 if !contextMessages.isEmpty {
                     InspectorSection(title: "Context (\(contextMessages.count) entries)") {
-                        ScrollView(.vertical) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                ForEach(contextMessages.indices, id: \.self) { i in
-                                    ContextMessageRow(message: contextMessages[i])
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 400)
+                        ContextMessagesTable(messages: contextMessages, followsTail: true)
+                            .frame(height: 400)
                     }
                 }
 

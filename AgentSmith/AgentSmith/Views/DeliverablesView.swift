@@ -12,10 +12,30 @@ struct DeliverablesView: View {
     /// unresolved (every row renders as a plain label) for previews and callers without a session.
     var urlResolver: (Attachment) -> URL? = { _ in nil }
 
+    /// Which attachment files are on disk — checked off the main thread, not in `body`.
+    @State private var fileStates: [Attachment.ID: AttachmentFileState] = [:]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 deliverableCard(item)
+            }
+        }
+        .task(id: allAttachments.map(\.id)) {
+            let located = allAttachments.map { (id: $0.id, url: urlResolver($0)) }
+            let resolved = await AttachmentFileState.resolve(located)
+            // A check for a list that has since changed must not overwrite the newer check's answer.
+            guard !Task.isCancelled else { return }
+            fileStates = resolved
+        }
+    }
+
+    private var allAttachments: [Attachment] {
+        items.flatMap { item -> [Attachment] in
+            switch item.content {
+            case .attachment(let attachment): return [attachment]
+            case .attachmentGroup(let attachments, _): return attachments
+            case .text, .unknown: return []
             }
         }
     }
@@ -75,7 +95,7 @@ struct DeliverablesView: View {
     @ViewBuilder
     private func attachmentLabel(_ attachment: Attachment) -> some View {
         let icon = attachment.isImage ? "photo" : (attachment.isPDF ? "doc.richtext" : "paperclip")
-        if let url = urlResolver(attachment), FileManager.default.fileExists(atPath: url.path) {
+        if case .present(let url) = fileStates[attachment.id] ?? .checking {
             Button(action: { NSWorkspace.shared.open(url) }, label: {
                 Label(attachment.filename, systemImage: icon)
                     .font(.callout)

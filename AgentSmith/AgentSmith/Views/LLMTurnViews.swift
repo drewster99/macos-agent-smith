@@ -30,6 +30,12 @@ struct LLMTurnDisclosureRow: View, Equatable {
     let onExpandedChange: @MainActor (Bool) -> Void
 
     @State private var showingFullContext = false
+    /// The outgoing list's measured height; nil until the table has reported it.
+    @State private var outgoingContentHeight: CGFloat?
+
+    private static let outgoingMaxHeight: CGFloat = 320
+    /// A collapsed message row — the first guess at a short outgoing list's height.
+    private static let outgoingRowHeight: CGFloat = 21
 
     /// Compares every input that affects rendering — the full `turn` (it's `Equatable`), the
     /// number, and the expansion state — so `.equatable()` skips re-evaluating unchanged rows
@@ -62,11 +68,13 @@ struct LLMTurnDisclosureRow: View, Equatable {
                 if !turn.outgoingMessages.isEmpty {
                     turnSectionHeader(turn.isSelfContainedRequest ? "Outgoing (full request)" : "Outgoing",
                                       icon: "arrow.up.circle.fill", color: AppColors.inspectorOutgoing)
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(turn.outgoingMessages.indices, id: \.self) { i in
-                            ContextMessageRow(message: turn.outgoingMessages[i])
-                        }
-                    }
+                    // A full request is the agent's whole context — hundreds of rows — so it scrolls in
+                    // a bounded box rather than laying every row out in the inspector.
+                    // Sized to its rows up to a cap, so expanding a message in a short list grows it.
+                    ContextMessagesTable(messages: turn.outgoingMessages,
+                                         onContentHeightChange: { outgoingContentHeight = $0 })
+                        .frame(height: min(Self.outgoingMaxHeight, outgoingContentHeight
+                            ?? CGFloat(turn.outgoingMessages.count) * Self.outgoingRowHeight))
                 }
 
                 // --- Response ---
@@ -292,36 +300,15 @@ struct FullContextSheet: View {
 
             Divider()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(turn.contextSnapshot.indices, id: \.self) { i in
-                        ContextMessageRow(
-                            message: turn.contextSnapshot[i],
-                            index: i + 1,
-                            initiallyExpanded: allExpanded
-                        )
-                        .id("\(i)-\(allExpanded)")
-                    }
-
-                    // Show the LLM response at the end of the context
-                    if let responseMessage = responseAsMessage {
-                        Divider()
-                            .padding(.vertical, 4)
-
-                        Text("Response")
-                            .font(.caption.bold())
-                            .foregroundStyle(AppColors.inspectorResponse)
-
-                        ContextMessageRow(
-                            message: responseMessage,
-                            index: turn.contextSnapshot.count + 1,
-                            initiallyExpanded: allExpanded
-                        )
-                        .id("response-\(allExpanded)")
-                    }
-                }
-                .padding(16)
-            }
+            // The response follows the context it answered, under its own caption.
+            ContextMessagesTable(
+                messages: turn.contextSnapshot,
+                numbered: true,
+                expandedByDefault: allExpanded,
+                trailing: responseAsMessage.map { (caption: "Response", message: $0) }
+            )
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
         }
         .frame(minWidth: 700, idealWidth: 900, minHeight: 500, idealHeight: 700)
     }

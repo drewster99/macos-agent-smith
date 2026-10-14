@@ -69,42 +69,14 @@ public enum TranscriptRows {
         return rows
     }
 
-    /// How to turn a table showing `old` into one showing `new` without reloading it.
-    ///
-    /// A transcript changes almost only at its ends: messages append at the bottom, and the
-    /// resident tail trims from the top at its cap. A follow-up arriving changes an existing row
-    /// (its parent tool call) in place. Anything else — a filter change, a restored history, a row
-    /// appearing in the middle — is a full reload.
+    /// How to turn a table showing `old` rows into one showing `new` — `RowListEdit.plan`, with a
+    /// row's identity being its message.
     public static func edit(from old: [TranscriptRow.RenderKey],
                             to new: [TranscriptRow.RenderKey]) -> Edit {
-        if old == new { return .none }
-        guard let firstNew = new.first, !old.isEmpty else { return .reload }
-        guard let removedFromFront = old.firstIndex(where: { $0.messageID == firstNew.messageID }) else {
-            return .reload
-        }
-        let overlap = old.count - removedFromFront
-        guard overlap <= new.count else { return .reload }
-        var reloaded = IndexSet()
-        for offset in 0..<overlap {
-            let before = old[removedFromFront + offset]
-            let after = new[offset]
-            guard before.messageID == after.messageID else { return .reload }
-            if before != after { reloaded.insert(offset) }
-        }
-        return .incremental(
-            removedFromFront: removedFromFront,
-            appended: new.count - overlap,
-            reloaded: reloaded
-        )
+        RowListEdit.plan(from: old, to: new, identity: \.messageID)
     }
 
-    public enum Edit: Equatable, Sendable {
-        case none
-        /// Remove the first `removedFromFront` rows, then append `appended` rows, then redraw the
-        /// rows at `reloaded` — indexes into the NEW rows.
-        case incremental(removedFromFront: Int, appended: Int, reloaded: IndexSet)
-        case reload
-    }
+    public typealias Edit = RowListEdit
 
     // MARK: - Grouping
 

@@ -93,7 +93,7 @@ private func datedTranscriptTimestamp(for date: Date, now: Date, time: String) -
 /// Display preferences for the channel log — purely cosmetic toggles read from the global
 /// `SharedAppState` and threaded down through the SwiftUI environment so each banner / row
 /// can decide whether to render its timestamp without a per-init parameter.
-struct TimestampPreferences: Equatable, Sendable {
+struct TimestampPreferences: Hashable, Sendable {
     /// Show timestamps on task lifecycle banners (created, acknowledged, completed, etc.).
     var taskBanners: Bool
     /// Show timestamps on tool-call rows.
@@ -302,7 +302,7 @@ private struct UserTaskActionInlineControl: View {
 
 /// Color-coded scrolling message stream with attachment display.
 ///
-/// The rows live in an AppKit table (`TranscriptTableView`), not a SwiftUI stack: only the rows on
+/// The rows live in an AppKit table (`HostedRowsTable`), not a SwiftUI stack: only the rows on
 /// screen exist as views, so scrolling costs the same at 50 messages as at 5,000. Every earlier
 /// shape — a non-lazy `VStack` behind a sliding 400/3,000-row window — paid layout for the whole
 /// window on every append and scroll, and each round of per-row tuning was undone by the next
@@ -335,7 +335,8 @@ struct ChannelLogView: View, Equatable {
     @Environment(\.attachmentBytesLoader) private var attachmentBytesLoader
 
     @State private var isAtBottom = true
-    @State private var scrollController = TranscriptScrollController()
+    @State private var tableController = HostedRowsTableController()
+    @State private var rowBuilder = TranscriptRowBuilder()
 
     /// Prevents body re-evaluation when only unrelated parent properties change (e.g. inputText).
     /// Closures and the Binding are excluded — they can't be meaningfully compared, and their
@@ -358,13 +359,12 @@ struct ChannelLogView: View, Equatable {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            TranscriptTableView(
-                messages: messages,
-                options: TranscriptRows.Options(
+            TranscriptRowsTable(
+                leadingRows: restorableHistoryCount > 0 ? [.restoreHistory(count: restorableHistoryCount)] : [],
+                rows: rowBuilder.rows(for: messages, options: TranscriptRows.Options(
                     verdictFilter: verdictFilter,
                     showsRestartChrome: displayPrefs.showRestartChrome
-                ),
-                restorableHistoryCount: hasRestoredHistory ? 0 : persistedHistoryCount,
+                )),
                 rowContext: TranscriptRowContext(
                     displayPrefs: displayPrefs,
                     taskActionHandler: taskActionHandler,
@@ -374,24 +374,71 @@ struct ChannelLogView: View, Equatable {
                     onOpenMCPSettings: onOpenMCPSettings,
                     selectedImageAttachment: $selectedImageAttachment
                 ),
-                scrollController: scrollController,
+                controller: tableController,
                 onAtBottomChange: { isAtBottom = $0 }
             )
             .background(AppColors.channelBackground)
 
             if !isAtBottom {
-                ChannelLogScrollToBottomButton(onTap: { scrollController.scrollToBottom(animated: true) })
+                ChannelLogScrollToBottomButton(onTap: { tableController.scrollToBottom(animated: true) })
             }
         }
         .onChange(of: scrollBenchmarkRequest) { _, request in
             guard request != nil else { return }
-            scrollController.runScrollBenchmark(completion: TranscriptScrollBenchmarkReporter.report)
+            tableController.runScrollBenchmark(completion: TranscriptScrollBenchmarkReporter.report)
         }
         // GREEDY, and load-bearing: without it the pane is sized by whatever it happens to be
         // showing — a short transcript rendered as a ribbon floating in the middle of the pane, and
         // a long URL demanded its width from the whole window. Same defect, same fix as
         // `ModelMetadataInspectorWindow`'s split.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var restorableHistoryCount: Int { hasRestoredHistory ? 0 : persistedHistoryCount }
+}
+
+/// The transcript's rows in a `HostedRowsTable`, following the tail.
+private struct TranscriptRowsTable: View {
+    let leadingRows: [TranscriptDisplayRow]
+    let rows: [TranscriptDisplayRow]
+    let rowContext: TranscriptRowContext
+    let controller: HostedRowsTableController
+    let onAtBottomChange: (Bool) -> Void
+
+    var body: some View {
+        HostedRowsTable(
+            leadingRows: leadingRows,
+            rows: rows,
+            followsTail: true,
+            // Rows read the display preferences without them being in any row's render key.
+            contentRevision: rowContext.displayPrefs,
+            controller: controller,
+            onAtBottomChange: onAtBottomChange,
+            rowContent: { row in TranscriptRowContent(row: row, context: rowContext) }
+        )
+    }
+}
+
+/// Builds a pane's rows from its messages — once per change, not once per body pass. Under the
+/// transcript's append-at-end, trim-at-front rule, count + first + last identify the array.
+private final class TranscriptRowBuilder {
+    private struct Input: Equatable {
+        let count: Int
+        let firstID: UUID?
+        let lastID: UUID?
+        let options: TranscriptRows.Options
+    }
+
+    private var lastInput: Input?
+    private var lastRows: [TranscriptDisplayRow] = []
+
+    func rows(for messages: [ChannelMessage], options: TranscriptRows.Options) -> [TranscriptDisplayRow] {
+        let input = Input(count: messages.count, firstID: messages.first?.id, lastID: messages.last?.id,
+                          options: options)
+        guard input != lastInput else { return lastRows }
+        lastInput = input
+        lastRows = TranscriptRows.make(from: messages, options: options).map(TranscriptDisplayRow.message)
+        return lastRows
     }
 }
 
@@ -408,20 +455,47 @@ struct TranscriptRowContext {
 }
 
 /// What one table row shows: the "restore full history" affordance, or a message row.
-enum TranscriptDisplayRow {
+nonisolated enum TranscriptDisplayRow: HostedTableRow, Sendable {
     case restoreHistory(count: Int)
     case message(TranscriptRow)
 
-    var key: Key {
+    var id: ID {
         switch self {
         case .restoreHistory: return .restoreHistory
         case .message(let row): return .message(row.id)
         }
     }
 
-    enum Key: Hashable {
+    enum ID: Hashable {
         case restoreHistory
         case message(UUID)
+    }
+
+    var renderKey: RenderKey {
+        switch self {
+        case .restoreHistory(let count): return .restoreHistory(count: count)
+        case .message(let row): return .message(row.renderKey)
+        }
+    }
+
+    enum RenderKey: Equatable {
+        case restoreHistory(count: Int)
+        case message(TranscriptRow.RenderKey)
+    }
+
+    /// Bounded work: it stops counting lines past where a row would collapse.
+    var estimatedHeight: CGFloat {
+        switch self {
+        case .restoreHistory:
+            return 32
+        case .message(let row):
+            var lines = 1
+            for byte in row.message.content.utf8 where byte == UInt8(ascii: "\n") {
+                lines += 1
+                if lines >= 40 { break }
+            }
+            return 26 + 17 * CGFloat(lines)
+        }
     }
 }
 

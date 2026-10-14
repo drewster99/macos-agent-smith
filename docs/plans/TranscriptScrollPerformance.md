@@ -253,3 +253,56 @@ the user's report of everyday scrolling is "feels nice".
    scheme's Run action is Debug.
 2. If cold-row cost ever needs to come down: build hosts for rows just outside the viewport while
    idle, or raise the 400-host cache to cover a whole pane.
+
+## 9. Phase 5 — the same fix for the app's other long lists (2026-10-14, user: "Inspector context sections always get sluggish"; "Task detail can sometimes get long")
+
+Where (from the code and the user's data):
+
+- **Inspector Context section** (`AgentInspectorWindowSections`) — every message of Smith's or Brown's
+  live context, hundreds, in a non-lazy stack, rebuilt every turn.
+- **Inspector call log** (`LLMCallLogSection` → `LLMTurnViews`) — the newest call auto-expands and
+  lists every outgoing message: the same hundreds again.
+- **Turn context viewer** (`LLMTurnViews` full-context window) — every message of a turn's context,
+  and an `.id("\(i)-\(allExpanded)")` that rebuilds every row on "expand all".
+- **Security Agent / Summarizer inspectors** — every evaluation / message, uncapped.
+- **Task detail** — the largest real tasks ("Full static audit …") carry ~300 KB of validation
+  records and 66–176 result attachments, all laid out at once.
+
+Steps:
+
+1. **One table component.** Extract the transcript table's engine — self-sizing hosted rows, the
+   per-row view cache, reading-position preservation, tail-following, the benchmark — into a generic
+   `HostedRowsTable` keyed by row identity and render key. The edit planner becomes a generic kit
+   function that `TranscriptRows.edit` uses. The transcript becomes its first client, with no
+   behavior change; the benchmark must not regress against §8.
+2. **Inspector lists onto it**: the Context section, the call log's outgoing messages, the turn
+   context viewer. Cap the Security Agent and Summarizer lists to their newest entries.
+3. **Task detail**: profile opening and scrolling the largest real task, then fix what the profile
+   shows (expected: the attachment list and the validation records).
+
+Validation: build clean; package tests pass; transcript benchmark within §8 budget; each converted
+list checked in the running app on the largest real data (Smith's context, the largest audit task).
+
+### Phase 5 progress (2026-10-14)
+
+1. ✅ **`HostedRowsTable`** (`Views/HostedRows/HostedRowsTable.swift`): the transcript table's engine,
+   generic over a `HostedTableRow` (identity, render key, height estimate). The transcript is now a
+   client of it; the edit planner is `RowListEdit.plan` in AgentSmithKit, with `TranscriptRows.edit`
+   forwarding (its 16 tests unchanged). New: `onContentHeightChange`, for a table sized to its rows up
+   to a cap.
+2. ✅ **Inspector**: the Context section (400 pt, follows the newest message), each call's outgoing
+   messages (sized to its rows, at most 320 pt), and the full-context window all use
+   `ContextMessagesTable`. "Expand all" rebuilds rows through the table's identity revision instead
+   of an `.id("\(i)-\(allExpanded)")` per row. Not changed: the Security Agent window draws up to 200
+   full evaluation cards (store cap) — not reported slow; the Summarizer lists were already capped.
+3. ✅ **Task detail**: the large tasks carry 66–176 result attachments; `TaskAttachmentList` called
+   `FileManager.fileExists` in every row's `body`, a disk read per row per redraw. Existence is now
+   checked once per list, off the main thread (`AttachmentFileState.resolve`, `@concurrent`), and a
+   list over 12 shows the first 12 with "(more)". `DeliverablesView` had the same in-body check; it
+   shares the fix. Validation records were ruled out: 18 records, their large fields rendered only
+   when a record's debug view is opened.
+- **Codex review**: two findings, both fixed — a cancelled file check could overwrite a newer one; a
+  short outgoing list stayed at its collapsed height when a message was expanded.
+- **Tests**: `ProviderOutageTests`, `ValidationEconomicsTests` and `TaskWatchTests` failed once each
+  in full-suite runs under load (another Xcode project building) and passed alone twice; one full run
+  hung with the test helper idle and was killed. Neither is in code this phase touched.
