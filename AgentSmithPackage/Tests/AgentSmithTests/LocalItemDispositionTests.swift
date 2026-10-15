@@ -108,6 +108,35 @@ struct LocalItemDispositionTests {
         }
     }
 
+    @Test("A markdown file opens in its default app, directly or through a symlink (user decision 2026-10-14)")
+    func markdownOpensInDefaultApp() throws {
+        let dir = try tempDir()
+        defer { remove(dir) }
+        let notes = try makeFile("notes.md", in: dir)
+        let upper = try makeFile("README.MD", in: dir)
+        let long = try makeFile("plan.markdown", in: dir)
+        let link = try makeLink("NotesLink", to: "notes.md", in: dir)
+        for (url, expectedName) in [(notes, "notes.md"), (upper, "README.MD"), (long, "plan.markdown"),
+                                    (link, "notes.md")] {
+            guard case .openInDefaultApp(let target) = LocalItemDisposition.disposition(for: url) else {
+                Issue.record("expected .openInDefaultApp for \(url.lastPathComponent)")
+                continue
+            }
+            #expect(target.lastPathComponent == expectedName)
+        }
+    }
+
+    @Test("A folder named like markdown is still a folder")
+    func markdownNamedFolderIsBrowsed() throws {
+        let dir = try tempDir()
+        defer { remove(dir) }
+        let folder = try makeDirectory("docs.md", in: dir)
+        guard case .browse = LocalItemDisposition.disposition(for: folder) else {
+            Issue.record("expected .browse")
+            return
+        }
+    }
+
     @Test("A missing path and a dangling symlink are missing")
     func missingAndDangling() throws {
         let dir = try tempDir()

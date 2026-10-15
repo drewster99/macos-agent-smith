@@ -2,8 +2,9 @@ import AppKit
 import AgentSmithKit
 import os
 
-/// Opens a local path named in agent-authored content without ever launching it: files preview in
-/// Quick Look, packages (apps included) are selected in Finder, plain folders open in Finder. The
+/// Opens a local path named in agent-authored content without ever launching it: markdown opens in
+/// its default app, other files preview in Quick Look, packages (apps included) are selected in
+/// Finder, plain folders open in Finder. The
 /// decision is `LocalItemDisposition` (AgentSmithKit, unit-tested); this only performs it.
 enum LocalItemOpener {
     private static let logger = Logger(subsystem: "com.agentsmith", category: "LocalItemOpener")
@@ -16,6 +17,10 @@ enum LocalItemOpener {
         switch disposition {
         case .preview(let target):
             QuickLookPreview.present(target)
+        case .openInDefaultApp(let target):
+            if !NSWorkspace.shared.open(target) {
+                logger.error("No app could open \(target.path(percentEncoded: false), privacy: .public)")
+            }
         case .reveal(let target):
             NSWorkspace.shared.activateFileViewerSelecting([target])
         case .browse(let target):
