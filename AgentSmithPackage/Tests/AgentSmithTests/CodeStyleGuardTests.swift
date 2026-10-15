@@ -269,7 +269,7 @@ struct CodeStyleGuardTests {
         "Views/TaskOverlay/TaskOverlayBar.swift": 11,
         "Views/Tasks/TaskEditorSheet.swift": 9,
         "Views/CompactionDiffWindow.swift": 8,
-        "Views/MemoryEditorView.swift": 8,
+        "Views/MemoryEditorView.swift": 4,
         "Views/LLMTurnViews.swift": 6,
         "Views/OnboardingView.swift": 6,
         "Views/AgentModelSettingsSection.swift": 5,
@@ -296,7 +296,7 @@ struct CodeStyleGuardTests {
     /// Lowered from 130: `InspectorView.swift`'s `-> some View` functions were eliminated by the
     /// 2026-09-26 "derive the inspector's display state in the model" work, which replaced them
     /// with real `View` structs. The ratchet was not re-checked in that commit; paid down here.
-    private static let someViewFunctionTotal = 124
+    private static let someViewFunctionTotal = 120
 
     /// Counts `func … -> some View` declarations in one file, excluding the two forms that have no
     /// `View`-struct spelling:

@@ -43,7 +43,8 @@ final class HostedRowsTableController {
 /// scrolled away and back keeps its state.
 struct HostedRowsTable<Row: HostedTableRow, RowContent: View>: NSViewRepresentable {
     /// Rows above `rows` that are not part of its edits — e.g. a "restore history" affordance. A
-    /// change here reloads the table, so keep them few and rarely changing.
+    /// leading row whose content changes is redrawn in place; adding or removing one reloads the
+    /// table, so keep them few.
     var leadingRows: [Row] = []
     let rows: [Row]
     /// Keep the end in view as rows are added, until the user scrolls away from it.
@@ -53,6 +54,11 @@ struct HostedRowsTable<Row: HostedTableRow, RowContent: View>: NSViewRepresentab
     var contentRevision: AnyHashable = 0
     /// When this changes, every row view is thrown away and rebuilt — resetting all row state.
     var identityRevision: AnyHashable = 0
+    /// When this changes, the table scrolls to its first row once the new rows are in — for a list
+    /// swapped for a different one (new search results), where the old position would land the
+    /// reader somewhere arbitrary. Recorded, not acted on, when the table first appears: it starts
+    /// at the top anyway.
+    var scrollResetRevision: AnyHashable = 0
     /// Space around each row's content.
     var rowInsets = EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8)
     var controller: HostedRowsTableController?
@@ -97,11 +103,12 @@ struct HostedRowsTable<Row: HostedTableRow, RowContent: View>: NSViewRepresentab
         return HostedRowsContainerView(scrollView: scrollView)
     }
 
-    /// The table fills whatever it is offered; it never asks SwiftUI for a size of its own.
+    /// The table fills whatever it is offered, exactly as `Color` does: an infinite proposal is
+    /// taken whole (so a stack ranks it flexible), and an unspecified one gets SwiftUI's
+    /// placeholder size. It never asks SwiftUI for a size of its own; callers that need a
+    /// particular size frame it.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: HostedRowsContainerView, context: Context) -> CGSize? {
-        guard let width = proposal.width, let height = proposal.height,
-              width.isFinite, height.isFinite else { return nil }
-        return CGSize(width: width, height: height)
+        proposal.replacingUnspecifiedDimensions()
     }
 
     func updateNSView(_ container: HostedRowsContainerView, context: Context) {
@@ -112,6 +119,7 @@ struct HostedRowsTable<Row: HostedTableRow, RowContent: View>: NSViewRepresentab
         coordinator.update(
             leadingRows: leadingRows, rows: rows, followsTail: followsTail,
             contentRevision: contentRevision, identityRevision: identityRevision,
+            scrollResetRevision: scrollResetRevision,
             makeContent: { row, onHeightChange in
                 HostedRowRoot(content: rowContent(row), insets: rowInsets, onHeightChange: onHeightChange)
             }
@@ -150,6 +158,7 @@ final class HostedRowsTableCoordinator<Row: HostedTableRow, RowContent: View>: N
     private var followsTail = false
     private var contentRevision: AnyHashable?
     private var identityRevision: AnyHashable?
+    private var scrollResetRevision: AnyHashable?
 
     /// Measured heights, reported by the rows themselves. A row not yet shown is estimated.
     private var heightByID: [Row.ID: CGFloat] = [:]
@@ -203,6 +212,7 @@ final class HostedRowsTableCoordinator<Row: HostedTableRow, RowContent: View>: N
 
     func update(leadingRows newLeading: [Row], rows newRows: [Row], followsTail newFollowsTail: Bool,
                 contentRevision newContentRevision: AnyHashable, identityRevision newIdentityRevision: AnyHashable,
+                scrollResetRevision newScrollResetRevision: AnyHashable,
                 makeContent newMakeContent: @escaping (Row, @escaping (CGFloat) -> Void) -> Root) {
         makeContent = newMakeContent
         let isFirstUpdate = identityRevision == nil
@@ -219,13 +229,27 @@ final class HostedRowsTableCoordinator<Row: HostedTableRow, RowContent: View>: N
         let contentChanged = contentRevision != nil && contentRevision != newContentRevision
         contentRevision = newContentRevision
 
-        let leadingChanged = newLeading.map(\.id) != leadingRows.map(\.id)
-            || newLeading.map(\.renderKey) != leadingRows.map(\.renderKey)
-        let edit: RowListEdit = (leadingChanged || identityChanged)
+        let scrollResetRequested = scrollResetRevision != nil && scrollResetRevision != newScrollResetRevision
+        scrollResetRevision = newScrollResetRevision
+
+        // Leading rows that are the same rows with new content (a history count that grows with
+        // every message) are redrawn in place; only a change in WHICH leading rows exist reloads.
+        let leadingIDsChanged = newLeading.map(\.id) != leadingRows.map(\.id)
+        let redrawnLeading = leadingIDsChanged ? [] : zip(leadingRows, newLeading)
+            .filter { $0.renderKey != $1.renderKey }
+            .map(\.1)
+        let edit: RowListEdit = (leadingIDsChanged || identityChanged)
             ? .reload
             : plan(from: bodyRows, to: newRows)
         apply(edit, leading: newLeading, rows: newRows)
-        if contentChanged, edit != .reload { refreshAllCachedHosts() }
+        if edit != .reload {
+            if contentChanged {
+                refreshAllCachedHosts()
+            } else {
+                for row in redrawnLeading { refreshCachedHost(for: row) }
+            }
+        }
+        if scrollResetRequested { scrollToTop() }
     }
 
     /// The edit between two row lists, by row identity.
@@ -254,14 +278,22 @@ final class HostedRowsTableCoordinator<Row: HostedTableRow, RowContent: View>: N
                 refreshAllCachedHosts()
             }
             pruneCaches()
-        case .incremental(let removedFromFront, let appended, let reloaded):
+        case .incremental(let removedFromFront, let insertedAtFront, let appended, let reloaded):
             let removedIDs = bodyRows.prefix(removedFromFront).map(\.id)
+            // A reader at the very top of a list that grows at the top (newest first) is reading the
+            // newest rows, so they see the arriving ones — rather than having the old first row held
+            // in place and the new rows slipped in above, out of sight.
+            let staysAtTop = insertedAtFront > 0 && !isPinnedToBottom && isAtTop()
             preservingReadingPosition {
                 commit(newLeading, newRows)
                 tableView.beginUpdates()
                 if removedFromFront > 0 {
                     tableView.removeRows(
                         at: IndexSet(headerOffset..<(headerOffset + removedFromFront)), withAnimation: [])
+                }
+                if insertedAtFront > 0 {
+                    tableView.insertRows(
+                        at: IndexSet(headerOffset..<(headerOffset + insertedAtFront)), withAnimation: [])
                 }
                 if appended > 0 {
                     let start = headerOffset + newRows.count - appended
@@ -274,6 +306,7 @@ final class HostedRowsTableCoordinator<Row: HostedTableRow, RowContent: View>: N
                 hosts.remove(id)
                 heightByID[id] = nil
             }
+            if staysAtTop { scrollToTop() }
         }
     }
 
@@ -518,6 +551,18 @@ final class HostedRowsTableCoordinator<Row: HostedTableRow, RowContent: View>: N
         }
     }
 
+    /// Back to the first row, no longer following the end.
+    private func scrollToTop() {
+        isPinnedToBottom = false
+        scroll(toY: 0)
+        reportAtBottom()
+    }
+
+    private func isAtTop() -> Bool {
+        guard let scrollView else { return true }
+        return scrollView.contentView.bounds.minY <= 0
+    }
+
     private func isNearBottom() -> Bool {
         guard let scrollView, let tableView else { return true }
         let visible = scrollView.contentView.bounds
@@ -618,7 +663,17 @@ final class HostedRowsContainerView: NSView {
 final class HostedRowsScrollView: NSScrollView {
     var onUserScrollWheel: (() -> Void)?
 
+    /// A scroll view with nothing to scroll still swallows the wheel, so a table nested in another
+    /// scrolling view (a call's outgoing messages, sized to its rows, inside the inspector) would
+    /// stop the inspector scrolling under the pointer. With all rows showing, the wheel belongs to
+    /// whatever scrolls around the table. (The table's frame is never shorter than the viewport,
+    /// so "no taller than the viewport" is "every row fits".)
     override func scrollWheel(with event: NSEvent) {
+        let documentHeight = documentView?.frame.height ?? 0
+        guard documentHeight > contentView.bounds.height else {
+            nextResponder?.scrollWheel(with: event)
+            return
+        }
         super.scrollWheel(with: event)
         onUserScrollWheel?()
     }

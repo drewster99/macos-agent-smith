@@ -117,20 +117,54 @@ extension EnvironmentValues {
 
 /// What clicking a link in markdown does — the one implementation for both renderers.
 enum MarkdownLinkOpener {
-    /// Files preview in Quick Look and folders open in Finder, rather than launching whatever app
-    /// owns the extension. A path that vanished since it was linked does nothing. Other URLs open
-    /// in their default app.
+    /// Schemes whose handler is the browser or mail client — what a prose link is expected to do.
+    /// Every other scheme hands the URL to whatever app registered it (ssh: → Terminal, smb: →
+    /// Finder mounting a share, …), which a model-authored link must not drive on one click.
+    private static let schemesOpenedWithoutConfirmation: Set<String> = ["http", "https", "mailto"]
+
+    /// Local paths go through `LocalItemOpener`, which never launches. A path that vanished since
+    /// it was linked does nothing. Web and mail links open directly; any other scheme asks first,
+    /// naming the app that would handle it.
     static func open(_ url: URL) {
-        guard url.isFileURL else {
-            NSWorkspace.shared.open(url)
+        if url.isFileURL {
+            LocalItemOpener.open(url)
             return
         }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return }
-        if isDirectory.boolValue {
-            NSWorkspace.shared.open(url)
-        } else {
-            QuickLookPreview.present(url)
+        guard let handlerURL = NSWorkspace.shared.urlForApplication(toOpen: url) else {
+            presentAlert(message: "No app can open this link", detail: url.absoluteString)
+            return
+        }
+        if let scheme = url.scheme?.lowercased(), schemesOpenedWithoutConfirmation.contains(scheme) {
+            openOrReport(url)
+            return
+        }
+        let handlerName = FileManager.default.displayName(atPath: handlerURL.path(percentEncoded: false))
+        // Deferred so the modal loop doesn't run inside NSTextView's click tracking or SwiftUI's
+        // OpenURLAction dispatch; the click handler returns first.
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "Open this link in \(handlerName)?"
+            alert.informativeText = url.absoluteString
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() == .alertFirstButtonReturn {
+                openOrReport(url)
+            }
+        }
+    }
+
+    private static func openOrReport(_ url: URL) {
+        if !NSWorkspace.shared.open(url) {
+            presentAlert(message: "Couldn't open this link", detail: url.absoluteString)
+        }
+    }
+
+    private static func presentAlert(message: String, detail: String) {
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = message
+            alert.informativeText = detail
+            alert.runModal()
         }
     }
 }

@@ -8,14 +8,12 @@ struct MemoryEditorView: View {
 
     @State private var searchText = ""
     @State private var filterSource: MemoryEntry.Source?
-    @State private var editingMemoryID: UUID?
-    @State private var editContent = ""
-    @State private var editTags = ""
+    /// The memory being edited inline, if any.
+    @State private var memoryEdit: MemoryEdit?
     @State private var showTaskSummaries = false
     @State private var editError: String?
-    @State private var isAddingMemory = false
-    @State private var newMemoryContent = ""
-    @State private var newMemoryTags = ""
+    /// The new memory being composed above the list, if any.
+    @State private var newMemoryDraft: MemoryDraft?
     @State private var memoryPendingDeletionID: UUID?
     @State private var memorySimilarities: [UUID: Double] = [:]
     @State private var taskSummarySimilarities: [UUID: Double] = [:]
@@ -26,6 +24,17 @@ struct MemoryEditorView: View {
     @State private var searchErrorMessage: String?
     /// Stats from the most recent successful search, displayed in the footer.
     @State private var searchStats: SearchStats?
+    /// Bumped whenever the search's results are replaced — new results, a failure, a cleared
+    /// query — so the lists scroll back to the top of what they now show.
+    @State private var searchGeneration = 0
+
+    private var isAddingMemory: Bool { newMemoryDraft != nil }
+
+    /// What the memory list's scroll position belongs to: a new one starts at the top.
+    private struct MemoryListScrollScope: Hashable {
+        let source: MemoryEntry.Source?
+        let searchGeneration: Int
+    }
 
     /// Per-search performance breakdown for the editor footer.
     private struct SearchStats: Equatable {
@@ -118,6 +127,7 @@ struct MemoryEditorView: View {
                 self.isSearching = false
                 self.searchErrorMessage = nil
                 self.searchStats = nil
+                self.searchGeneration += 1
             }
             return
         }
@@ -164,12 +174,14 @@ struct MemoryEditorView: View {
                     taskVectorCount: taskVectors,
                     elapsedSeconds: elapsed
                 )
+                searchGeneration += 1
             } catch {
                 guard !Task.isCancelled else { return }
                 memorySimilarities.removeAll()
                 taskSummarySimilarities.removeAll()
                 searchErrorMessage = error.localizedDescription
                 searchStats = nil
+                searchGeneration += 1
             }
             isSearching = false
         }
@@ -306,10 +318,26 @@ struct MemoryEditorView: View {
     }
 
     private func beginAddingMemory() {
-        newMemoryContent = ""
-        newMemoryTags = ""
-        isAddingMemory = true
-        editingMemoryID = nil
+        newMemoryDraft = MemoryDraft()
+        memoryEdit = nil
+    }
+
+    private func cancelAddingMemory() {
+        newMemoryDraft = nil
+    }
+
+    private func saveNewMemory(_ draft: MemoryDraft) {
+        let content = draft.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tags = draft.tagList
+        Task {
+            do {
+                _ = try await shared.saveMemory(content: content, tags: tags)
+                // Only this draft: a composer reopened while the save was in flight stays open.
+                if newMemoryDraft === draft { newMemoryDraft = nil }
+            } catch {
+                editError = "Failed to save memory: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - Memory List
@@ -372,254 +400,58 @@ struct MemoryEditorView: View {
                 description: Text("No memories from this source. Change the Source filter to see other memories.")
             )
         } else {
-            ScrollView {
-                VStack(spacing: 0) {
-                    if isAddingMemory {
-                        newMemoryRow()
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                    }
-                    ForEach(Array(filtered.enumerated()), id: \.element.id) { index, memory in
-                        Group {
-                            if editingMemoryID == memory.id {
-                                editRow(memory: memory)
-                            } else {
-                                memoryRow(memory: memory)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(index.isMultiple(of: 2) ? Color.clear : AppColors.subtleRowBackgroundDim)
-                    }
+            VStack(spacing: 0) {
+                if let newMemoryDraft {
+                    MemoryDraftForm(
+                        title: "New Memory", draft: newMemoryDraft, background: MemoryBrowserStyle.newMemoryBackground,
+                        onCancel: cancelAddingMemory, onSave: { saveNewMemory(newMemoryDraft) }
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .fixedSize(horizontal: false, vertical: true)
+                    Divider()
                 }
+                MemoryListTable(
+                    rows: memoryRows(filtered),
+                    scrollScope: MemoryListScrollScope(source: filterSource, searchGeneration: searchGeneration),
+                    edit: memoryEdit,
+                    actions: memoryRowActions
+                )
             }
         }
     }
 
-    /// Inline composer pinned to the top of the list while `isAddingMemory` is true.
-    /// Mirrors `editRow`'s shape so users get a consistent affordance for content + tags.
-    @ViewBuilder
-    private func newMemoryRow() -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("New Memory")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            TextEditor(text: $newMemoryContent)
-                .font(.body)
-                .frame(minHeight: 60, maxHeight: 120)
-                .border(AppColors.codeBlockBorder)
-
-            LabeledContent("Tags") {
-                TextField("comma-separated tags", text: $newMemoryTags)
-                    .textFieldStyle(.roundedBorder)
-            }
-
-            HStack {
-                Button("Cancel") {
-                    isAddingMemory = false
-                    newMemoryContent = ""
-                    newMemoryTags = ""
-                }
-                .controlSize(.small)
-
-                Button("Save") {
-                    let trimmed = newMemoryContent.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let tags = newMemoryTags
-                        .split(separator: ",")
-                        .map { $0.trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty }
-                    Task {
-                        do {
-                            _ = try await shared.saveMemory(content: trimmed, tags: tags)
-                            isAddingMemory = false
-                            newMemoryContent = ""
-                            newMemoryTags = ""
-                        } catch {
-                            editError = "Failed to save memory: \(error.localizedDescription)"
-                        }
-                    }
-                }
-                .controlSize(.small)
-                .buttonStyle(.borderedProminent)
-                .disabled(newMemoryContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
+    private func memoryRows(_ memories: [MemoryEntry]) -> [MemoryListRow] {
+        let editedID = memoryEdit?.memoryID
+        return memories.enumerated().map { index, memory in
+            MemoryListRow(memory: memory, similarity: memorySimilarities[memory.id],
+                          isAlternate: !index.isMultiple(of: 2), isEditing: memory.id == editedID)
         }
-        .padding(.vertical, 4)
-        .padding(8)
-        .background(Color.accentColor.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
-    private func memoryRow(memory: MemoryEntry) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .top) {
-                MarkdownText(content: memory.content, baseFont: .body)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-
-                Spacer()
-
-                if let score = memorySimilarities[memory.id] {
-                    Text(String(format: "%.0f%%", score * 100))
-                        .font(.caption.bold().monospaced())
-                        .foregroundStyle(similarityColor(score))
-                }
-
-                sourceBadge(memory.source)
-            }
-
-            // Tag row only renders when there's at least one tag — an empty HStack with
-            // just a Spacer leaves a thin gap that looks like a layout bug.
-            if !memory.tags.isEmpty {
-                HStack(spacing: 8) {
-                    HStack(spacing: 4) {
-                        ForEach(memory.tags, id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption2)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(.quaternary)
-                                .clipShape(RoundedRectangle(cornerRadius: 3))
-                        }
-                    }
-                    Spacer()
-                }
-            }
-
-            // Row 1: created + last update (if any)
-            HStack(spacing: 8) {
-                Spacer()
-                Text("Created \(formatDateTime(memory.createdAt))")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                if let updatedAt = memory.lastUpdatedAt, let updatedBy = memory.lastUpdatedBy {
-                    Text("•")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Text("Updated \(formatDateTime(updatedAt)) by \(updatedBy.displayLabel)")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            // Row 2: retrieval stats (only when the memory has been retrieved at least once)
-            HStack(spacing: 8) {
-                Spacer()
-                if let retrievedAt = memory.lastRetrievedAt {
-                    Text("Last retrieved \(formatDateTime(retrievedAt))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Text("•")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Text("\(memory.retrievalCount) retrieval\(memory.retrievalCount == 1 ? "" : "s")")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Text("Never retrieved by an agent")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            // Row 3: injection stats. Kept on their own line rather than folded in with
-            // retrievals: the gap between the two counts is the interesting part — a memory
-            // found often but injected rarely is being filtered out downstream, and one
-            // injected far more often than retrieved is riding along on a task briefing.
-            HStack(spacing: 8) {
-                Spacer()
-                if let injectedAt = memory.lastInjectedAt {
-                    Text("Last injected \(formatDateTime(injectedAt))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Text("•")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Text("\(memory.injectionCount) injection\(memory.injectionCount == 1 ? "" : "s")")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Text("Never injected into an agent's context")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            HStack(spacing: 8) {
-                Button("Edit") {
-                    editingMemoryID = memory.id
-                    editContent = memory.content
-                    editTags = memory.tags.joined(separator: ", ")
-                }
-                .controlSize(.small)
-
-                Button("Delete") {
-                    memoryPendingDeletionID = memory.id
-                }
-                .controlSize(.small)
-                .foregroundStyle(.red)
-            }
-            .padding(.top, 2)
-        }
-        .padding(.vertical, 4)
+    private var memoryRowActions: MemoryListRowActions {
+        MemoryListRowActions(
+            beginEditing: { memory in memoryEdit = MemoryEdit(memory: memory) },
+            cancelEditing: { edit in
+                if edit.isSameEdit(as: memoryEdit) { memoryEdit = nil }
+            },
+            saveEdit: saveMemoryEdit,
+            requestDeletion: { id in memoryPendingDeletionID = id }
+        )
     }
 
-    /// Compact "Apr 8, 14:32" date+time formatting used by the editor's stats rows.
-    private func formatDateTime(_ date: Date) -> String {
-        date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
-    }
-
-    private func editRow(memory: MemoryEntry) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Editing Memory")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            TextEditor(text: $editContent)
-                .font(.body)
-                .frame(minHeight: 60, maxHeight: 120)
-                .border(AppColors.codeBlockBorder)
-
-            LabeledContent("Tags") {
-                TextField("comma-separated tags", text: $editTags)
-                    .textFieldStyle(.roundedBorder)
-            }
-
-            HStack {
-                Button("Cancel") {
-                    editingMemoryID = nil
-                }
-                .controlSize(.small)
-
-                Button("Save") {
-                    let newTags = editTags
-                        .split(separator: ",")
-                        .map { $0.trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty }
-                    Task {
-                        do {
-                            try await shared.updateMemory(
-                                id: memory.id,
-                                content: editContent,
-                                tags: newTags
-                            )
-                            editingMemoryID = nil
-                        } catch {
-                            editError = "Failed to update memory: \(error.localizedDescription)"
-                        }
-                    }
-                }
-                .controlSize(.small)
-                .buttonStyle(.borderedProminent)
-                .disabled(editContent.trimmingCharacters(in: .whitespaces).isEmpty)
+    private func saveMemoryEdit(_ edit: MemoryEdit) {
+        let content = edit.draft.content
+        let tags = edit.draft.tagList
+        Task {
+            do {
+                try await shared.updateMemory(id: edit.memoryID, content: content, tags: tags)
+                // Only this edit: one the user started while the save was in flight stays open.
+                if edit.isSameEdit(as: memoryEdit) { memoryEdit = nil }
+            } catch {
+                editError = "Failed to update memory: \(error.localizedDescription)"
             }
         }
-        .padding(.vertical, 4)
-        .padding(8)
-        .background(Color.accentColor.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     // MARK: - Task Summary List
@@ -667,70 +499,14 @@ struct MemoryEditorView: View {
                 description: Text("Tasks become searchable after they complete or fail and a summary is generated.")
             )
         } else {
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(Array(filtered.enumerated()), id: \.element.id) { index, summary in
-                        MemoryTaskSummaryRow(
-                            summary: summary,
-                            similarityScore: taskSummarySimilarities[summary.id],
-                            isAlternateRow: !index.isMultiple(of: 2)
-                        )
-                    }
-                }
-            }
+            TaskSummaryListTable(rows: taskSummaryRows(filtered), scrollScope: searchGeneration)
         }
     }
 
-    // MARK: - Helpers
-
-    private func sourceBadge(_ source: MemoryEntry.Source) -> some View {
-        Text(source.rawValue.capitalized)
-            .font(.caption2)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .background(sourceColor(source).opacity(0.15))
-            .foregroundStyle(sourceColor(source))
-            .clipShape(RoundedRectangle(cornerRadius: 3))
-    }
-
-    private func sourceColor(_ source: MemoryEntry.Source) -> Color {
-        switch source {
-        case .user: return .blue
-        case .smith: return .green
-        case .brown: return .orange
-        }
-    }
-
-    private func similarityColor(_ score: Double) -> Color {
-        if score >= 0.80 { return .green }
-        if score >= 0.70 { return .yellow }
-        if score >= 0.60 { return .orange }
-        return .red
-    }
-
-    private func statusColor(_ status: AgentTask.Status) -> Color {
-        switch status {
-        case .pending: return .secondary
-        case .starting: return .cyan
-        case .running: return .blue
-        case .awaitingReview: return .orange
-        case .awaitingHelp: return .orange
-        case .completed: return .green
-        case .failed: return .red
-        case .paused: return .secondary
-        case .interrupted: return .yellow
-        case .scheduled: return .purple
-        case .validating: return .teal
-        }
-    }
-}
-
-private extension MemoryEntry.UpdateSource {
-    /// Capitalized label used in the Memory editor's "Updated … by …" stat row.
-    var displayLabel: String {
-        switch self {
-        case .user: return "User"
-        case .system: return "System"
+    private func taskSummaryRows(_ summaries: [TaskSummaryEntry]) -> [TaskSummaryListRow] {
+        summaries.enumerated().map { index, summary in
+            TaskSummaryListRow(summary: summary, similarity: taskSummarySimilarities[summary.id],
+                               isAlternate: !index.isMultiple(of: 2))
         }
     }
 }

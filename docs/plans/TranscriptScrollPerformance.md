@@ -306,3 +306,25 @@ list checked in the running app on the largest real data (Smith's context, the l
 - **Tests**: `ProviderOutageTests`, `ValidationEconomicsTests` and `TaskWatchTests` failed once each
   in full-suite runs under load (another Xcode project building) and passed alone twice; one full run
   hung with the test helper idle and was killed. Neither is in code this phase touched.
+
+### Recheck and /stupid pass (2026-10-14)
+
+- **Fixed (recheck):** a table whose rows all fit (a call's outgoing list) swallowed the scroll wheel,
+  so the inspector stopped scrolling under the pointer — proven in an AppKit harness; the table now
+  passes the wheel up when it has nothing to scroll. The transcript's "Restore full history (N)"
+  leading row changes with every persisted message, and the generic engine reloaded the whole table
+  for it; a leading row whose identity is unchanged is now redrawn in place.
+- **Fixed (/stupid #1, security):** clicking a model-authored link or tool-call path to an `.app` (any
+  package, or a symlink to one) LAUNCHED it — every directory went to `NSWorkspace.open`. Now one
+  decision, `LocalItemDisposition` (6 tests, proven failing on the old rule), and one opener. Non-web
+  link schemes confirm first. Deliverable attachments preview instead of opening in their default app.
+- **Fixed (/stupid #2):** the Memory Browser drew all 363 memories and 699 task summaries as non-lazy
+  stacks — each memory an AppKit text view since Phase 3. Both lists are on `HostedRowsTable`;
+  drafts live in observable objects so typing redraws one row; Save/Cancel end only their own edit.
+  `RowListEdit` gained front insertion (newest-first lists), and a row moved from front to back now
+  reloads instead of discarding a view still on screen (11 tests). A new search shows from the top
+  (`scrollResetRevision`).
+- **Fixed (/stupid #3):** `HostedRowsTable.sizeThatFits` returns the proposal with unspecified
+  dimensions replaced (as `Color` does), instead of `nil` and SwiftUI's undocumented fallback.
+- **Not verified at runtime:** typing in the Memory Browser's inline edit form inside a table row
+  (the browser itself renders correctly with all rows).

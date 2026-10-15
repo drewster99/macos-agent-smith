@@ -44,7 +44,7 @@ enum TranscriptScrollBenchmarkOutcome {
 
 /// Writes a benchmark result where it can be compared later, and shows the headline numbers.
 enum TranscriptScrollBenchmarkReporter {
-    private static let logger = Logger(subsystem: "com.nuclearcyborg.AgentSmith", category: "TranscriptBenchmark")
+    private static let logger = Logger(subsystem: "com.agentsmith", category: "TranscriptBenchmark")
 
     /// Next to the LLM request logs: `$TMPDIR/AgentSmith-Benchmarks/`.
     static var resultsDirectory: URL {

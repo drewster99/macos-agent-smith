@@ -90,19 +90,26 @@ struct DeliverablesView: View {
     }
 
     /// A single attachment reference line — icon reflects the file kind. When the file is
-    /// reachable on disk the row becomes a link that opens it in its default app; otherwise it
-    /// degrades to a plain secondary label (no dead click target).
+    /// reachable on disk, a click previews it — never opens it in its default app, since a
+    /// `.terminal` or `.webloc` an agent attached acts when opened — and ⌘-click reveals it in
+    /// Finder, matching the run-result chips; otherwise it degrades to a plain secondary label.
     @ViewBuilder
     private func attachmentLabel(_ attachment: Attachment) -> some View {
         let icon = attachment.isImage ? "photo" : (attachment.isPDF ? "doc.richtext" : "paperclip")
         if case .present(let url) = fileStates[attachment.id] ?? .checking {
-            Button(action: { NSWorkspace.shared.open(url) }, label: {
+            Button(action: {
+                if NSEvent.modifierFlags.contains(.command) {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } else {
+                    LocalItemOpener.open(url)
+                }
+            }, label: {
                 Label(attachment.filename, systemImage: icon)
                     .font(.callout)
             })
             .buttonStyle(.plain)
             .foregroundStyle(AppColors.disclosureToggle)
-            .help("Open \(attachment.filename)")
+            .help("Click to preview · ⌘-click to reveal in Finder")
             .pointerStyle(.link)
         } else {
             Label(attachment.filename, systemImage: icon)

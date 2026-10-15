@@ -7,8 +7,8 @@ import Foundation
 /// immutable and append-only, so the only way a filtered view shrinks is its own cap. `replaces == true`
 /// is a wholesale swap (initial snapshot, filter change, restore, clear); `replaces == false` appends.
 ///
-/// `persistedHistoryCount` / `hasRestoredHistory` ride along so a pane's "Load earlier" / "Restore full
-/// history" affordances stay current without a second round-trip. They describe the underlying LOG (all
+/// `persistedHistoryCount` / `hasRestoredHistory` ride along so a pane's "Restore full
+/// history" affordance stays current without a second round-trip. They describe the underlying LOG (all
 /// messages on disk), not the filtered view — the same semantics the single pane had.
 public struct TranscriptUpdate: Sendable {
     public let messages: [ChannelMessage]
@@ -42,7 +42,7 @@ public actor TranscriptStore {
     // MARK: Resident state
 
     private var resident: [ChannelMessage] = []
-    /// Total messages ever written to the log (grows past the resident cap). Drives "Load earlier".
+    /// Total messages ever written to the log (grows past the resident cap). Drives "Restore full history".
     private(set) var persistedHistoryCount = 0
     /// True once the full on-disk history has been pulled in — after which the resident tail stops being
     /// trimmed (the user opted into holding everything until relaunch).

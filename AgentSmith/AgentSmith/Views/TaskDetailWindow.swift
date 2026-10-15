@@ -1722,7 +1722,7 @@ private struct TaskDetailUpdatesSection: View {
     /// Newest first. Enumerated BEFORE reversing, so `offset` is the append index rather than the
     /// display position — `task.updates` is append-only, which makes that index a permanently
     /// stable identity. Keying on display position handed row 0 to a different update on every
-    /// append, rebinding each visible row's `MarkdownText.cachedBlocks` at once.
+    /// append, rebuilding every visible row's content at once.
     private var newestFirst: [(offset: Int, element: AgentTask.TaskUpdate)] {
         Array(task.updates.enumerated().reversed())
     }
