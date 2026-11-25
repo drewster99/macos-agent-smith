@@ -75,6 +75,21 @@ struct SpilledToolOutputStoreTests {
         }
     }
 
+    /// The reader is pre-cleared, so it must only ever return what the cap saved: a link planted in
+    /// the folder would turn it into an unreviewed read of the link's target.
+    @Test("A symbolic link in the folder is not read, whatever it points at")
+    func symbolicLinkIsRefused() async throws {
+        try await withSpillRoot { root in
+            let store = SpilledToolOutputStore.forTask(UUID(), under: root)
+            _ = try store.save("legitimate")
+            let target = root.appendingPathComponent("outside.txt")
+            try "contents of another file".write(to: target, atomically: true, encoding: .utf8)
+            let planted = UUID()
+            try FileManager.default.createSymbolicLink(at: store.fileURL(forHandle: planted), withDestinationURL: target)
+            #expect(try store.output(forHandle: planted) == nil)
+        }
+    }
+
     @Test("removeAll removes only this owner's output, and is not an error when nothing was saved")
     func removeAll() async throws {
         try await withSpillRoot { root in
@@ -252,10 +267,33 @@ struct ReadToolOutputToolTests {
     @Test("The response ceiling stops a page early and resumes at the first line it left out")
     func responseCeiling() throws {
         let line = String(repeating: "z", count: ReadToolOutputTool.maxLineCharacters)
-        let perPage = ReadToolOutputTool.maxResponseCharacters / ReadToolOutputTool.maxLineCharacters
+        // Each line is sent with an 8-character number prefix and a line break.
+        let perPage = ReadToolOutputTool.maxResponseCharacters / (ReadToolOutputTool.maxLineCharacters + 9)
         let result = try Self.page(Array(repeating: line, count: perPage + 5).joined(separator: "\n"), max: 1_000)
         #expect(Self.body(result).count == perPage)
         #expect(try Self.resumeLine(result) == perPage + 1)
+    }
+
+    /// The line-number prefix and the line break are part of the response too. Counting only the
+    /// line text let a page of short or blank lines grow past the cap and be saved again.
+    @Test("Short and blank lines: every page stays under the result cap however many lines are asked for",
+          arguments: ["x", ""])
+    func shortLinesStayUnderTheCap(line: String) throws {
+        let lineCount = 40_000
+        let text = Array(repeating: line, count: lineCount).joined(separator: "\n") + "\nlast"
+        var linesSeen = 0
+        var next: Int? = 1
+        var pages = 0
+        while let start = next {
+            let result = try Self.page(text, from: start, max: Int.max)
+            #expect(result.output.count <= ToolResultCap.maxCharacters, "page from line \(start) is \(result.output.count) characters")
+            linesSeen += Self.body(result).count
+            next = try Self.resumeLine(result)
+            pages += 1
+            try #require(pages <= 1_000, "paging did not terminate")
+        }
+        #expect(linesSeen == lineCount + 1)
+        #expect(pages > 1)
     }
 
     // MARK: Pattern
@@ -478,6 +516,24 @@ struct ReadToolOutputToolTests {
         #expect(offered().contains(name))
         #expect(!offered(policies: [name: .never]).contains(name))
         #expect(!offered(overrides: [name: false]).contains(name))
+    }
+
+    /// The task tool editor asks about one tool at a time (`candidates: [tool]`). A companion's
+    /// principal is then in the base but not a candidate, and must still bring the companion.
+    @Test("A companion asked about on its own is offered when its principal was approved")
+    func companionResolvedAlone() {
+        let offered = ToolPolicy.effectiveApprovedTools(
+            base: ["create_child_task"], candidates: ["wait_for_child_tasks"], globalPolicies: [:], taskOverrides: [:]
+        )
+        #expect(offered == ["wait_for_child_tasks"])
+    }
+
+    @Test("A default-approved tool the worker is not a candidate for is not reported as offered")
+    func nonCandidateDefaultIsNotOffered() {
+        let offered = ToolPolicy.effectiveApprovedTools(
+            base: ToolPolicy.workerToolsApprovedByDefault, candidates: ["save_memory"], globalPolicies: [:], taskOverrides: [:]
+        )
+        #expect(offered == ["save_memory"])
     }
 
     @Test("Classified as a read-only built-in with a tool group")

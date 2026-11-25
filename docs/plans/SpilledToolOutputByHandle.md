@@ -46,6 +46,8 @@ Two defects:
   - A response is bounded below the cap, so reading saved output never spills again.
   - A line longer than `maxLineCharacters` is split into consecutive numbered lines, so every
     character of a one-line result (minified JSON) is reachable.
+  - The store returns only regular files it finds under a handle's name; a symbolic link planted
+    in the folder is not followed.
 - Access:
   - Offered to Brown, Smith and validators that have evidence tools.
   - `ToolPolicy.workerToolsApprovedByDefault` — a worker has it whatever tool scoping decides, the
@@ -76,3 +78,17 @@ Two defects:
 5. Wiring tests: auto-approved for Brown, Smith and validator; approved by default for workers and
    removable by Never; classified read-only, not destructive, not open-world; has a tool group.
 6. Full package suite passes; the app builds with no new warnings.
+
+## Review fixes (2026-11-24)
+
+An independent review of the first commit found three defects, each fixed test-first:
+
+1. A page counted only line text toward its ceiling, so a page of short or blank lines exceeded
+   the cap and spilled again. The ceiling now counts each line as sent (number prefix, line break).
+2. `ToolPolicy.effectiveApprovedTools` held its base to the candidates at the start, which dropped
+   a companion tool's principal when the task tool editor asked about the companion alone. The
+   result is now held to the candidates at the end.
+3. The store followed a symbolic link planted in a task's folder.
+
+Known and left: a model-written `pattern` can backtrack exponentially (`GrepTool` has the same
+exposure); a non-integer `maxLines` falls back to the default.

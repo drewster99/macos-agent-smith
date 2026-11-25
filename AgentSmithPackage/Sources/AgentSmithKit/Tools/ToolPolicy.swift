@@ -84,17 +84,15 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
 
     /// The tools a worker is offered: `base` (the automatic verdict) with the global policy and the
     /// task's own overrides applied in the order documented on this type, then each offered
-    /// principal's companions (`companionTools`). Only `candidates` are considered — by the base,
-    /// the policy, the overrides and the companions — so none can add a tool the worker does not have.
+    /// principal's companions (`companionTools`). The result holds only `candidates`,
+    /// so nothing — base, policy, override or companion — can add a tool the worker does not have.
     public static func effectiveApprovedTools(
         base: Set<String>,
         candidates: Set<String>,
         globalPolicies: [String: ToolPolicy],
         taskOverrides: [String: Bool]
     ) -> Set<String> {
-        // The base is held to the candidates like everything after it: a default-approved tool this
-        // worker is not a candidate for (`workerToolsApprovedByDefault`) must not appear as offered.
-        var result = base.intersection(candidates)
+        var result = base
         for name in candidates where effective(for: name, globalPolicies: globalPolicies) == .always {
             result.insert(name)
         }
@@ -113,6 +111,10 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
                 result.insert(companion)
             }
         }
-        return result
+        // Held to the candidates only at the END: a default-approved tool this worker is not a
+        // candidate for (`workerToolsApprovedByDefault`) must not be reported as offered, but a
+        // principal that is in the base and not a candidate still has to bring its companion — the
+        // task tool editor asks about one tool at a time.
+        return result.intersection(candidates)
     }
 }

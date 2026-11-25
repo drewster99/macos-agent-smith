@@ -39,9 +39,15 @@ struct SpilledToolOutputStore: Sendable, Equatable {
 
     /// The saved output for `handle`, or nil when this owner has none under that handle — never
     /// saved here, or already cleared.
+    ///
+    /// Only a regular file counts. `save` writes nothing else, and reads through this store skip
+    /// security review, so a symbolic link someone planted here must not be followed to its target.
     func output(forHandle handle: UUID) throws -> String? {
         let fileURL = fileURL(forHandle: handle)
+        // `fileExists` follows links; `attributesOfItem` describes the entry itself.
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        let entryType = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.type] as? FileAttributeType
+        guard entryType == .typeRegular else { return nil }
         return try String(contentsOf: fileURL, encoding: .utf8)
     }
 

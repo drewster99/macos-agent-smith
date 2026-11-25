@@ -53,7 +53,7 @@ struct ReadToolOutputTool: AgentTool {
     /// Longest line returned as one line; anything longer is split, so a result that is a single
     /// enormous line (minified JSON) can still be paged and searched.
     static let maxLineCharacters = 2_000
-    /// Ceiling on one response's line text. Kept well under `ToolResultCap.maxCharacters` so that
+    /// Ceiling on one response's numbered lines, as sent. Kept well under `ToolResultCap.maxCharacters` so that
     /// reading saved output can never itself be truncated and saved again.
     static let maxResponseCharacters = 30_000
 
@@ -131,14 +131,18 @@ struct ReadToolOutputTool: AgentTool {
                 let range = NSRange(line.startIndex..<line.endIndex, in: line)
                 guard pattern.firstMatch(in: line, options: [], range: range) != nil else { continue }
             }
+            // Measured as it is sent — number prefix and line break included — or a page of short
+            // or blank lines would grow past the ceiling while its text counted for almost nothing.
+            let renderedLine = String(format: "%6d  ", index + 1) + line
+            let renderedLineCharacters = renderedLine.count + 1
             // The first line always goes out, so a page can never be empty for lack of room.
             if rendered.count == maxLines
-                || (!rendered.isEmpty && renderedCharacters + line.count > maxResponseCharacters) {
+                || (!rendered.isEmpty && renderedCharacters + renderedLineCharacters > maxResponseCharacters) {
                 resumeLine = index + 1
                 break
             }
-            rendered.append(String(format: "%6d  ", index + 1) + line)
-            renderedCharacters += line.count
+            rendered.append(renderedLine)
+            renderedCharacters += renderedLineCharacters
         }
 
         let lastLineCovered = (resumeLine ?? lines.count + 1) - 1
