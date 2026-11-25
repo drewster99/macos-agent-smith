@@ -43,6 +43,13 @@ REQUIRED_ENTITLEMENTS=(
   "com.apple.security.automation.apple-events"
   "keychain-access-groups"
 )
+# The Developer ID provisioning profile to embed. Empty means: find the one for this app among
+# the profiles Xcode has downloaded (see find_provisioning_profile).
+PROVISIONING_PROFILE="${PROVISIONING_PROFILE:-}"
+PROVISIONING_PROFILE_DIRS=(
+  "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+  "$HOME/Library/MobileDevice/Provisioning Profiles"
+)
 DMG_ICON_SIZE=128
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 # The shared Nuclear Cyborg notarytool keychain profile, already stored on this machine and
@@ -88,6 +95,11 @@ Options:
   --signing-identity NAME
                     Developer ID Application signing identity. Defaults to SIGNING_IDENTITY,
                     or auto-detects when exactly one Developer ID Application identity exists.
+  --provisioning-profile PATH
+                    Developer ID provisioning profile (.provisionprofile) to embed in the app.
+                    Defaults to PROVISIONING_PROFILE, or the unexpired Developer ID profile for
+                    ${BUNDLE_IDENTIFIER} that Xcode has downloaded. Xcode creates one when
+                    an archive is exported for Direct Distribution.
   --notary-profile NAME
                     notarytool keychain profile name. Defaults to NOTARY_PROFILE or
                     NOTARYTOOL_PROFILE. Alternative auth: NOTARY_KEY (path to .p8)/
@@ -133,6 +145,11 @@ while [[ $# -gt 0 ]]; do
     --signing-identity)
       [[ $# -ge 2 ]] || { echo "ERROR: --signing-identity requires a certificate name" >&2; exit 2; }
       SIGNING_IDENTITY="$2"
+      shift 2
+      ;;
+    --provisioning-profile)
+      [[ $# -ge 2 ]] || { echo "ERROR: --provisioning-profile requires a path to a .provisionprofile" >&2; exit 2; }
+      PROVISIONING_PROFILE="$2"
       shift 2
       ;;
     --notary-profile)
@@ -322,24 +339,115 @@ run_checked() {
   [[ -z "$output" ]] || echo "$output" >&2
 }
 
-# Writes a copy of the entitlements with $(CFBundleIdentifier) expanded, so codesign can be
-# handed real entitlements rather than a template. The team prefix is already a literal in the
-# source file (see the comment there) precisely so nothing here needs a provisioning profile
-# to resolve it.
+# Prints the path of the Developer ID provisioning profile to embed, or fails saying why none
+# qualifies. A profile qualifies when it is for exactly this app (team + bundle identifier), is a
+# Developer ID profile (provisions all devices), has not expired, and names the certificate we
+# sign with — macOS rejects a profile that does not list the signing certificate. With
+# PROVISIONING_PROFILE set, only that file is considered, and it must still qualify. Among several
+# that qualify, the one that expires last wins.
+find_provisioning_profile() {
+  local identity_hash
+  identity_hash="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -v identity="$SIGNING_IDENTITY" 'index($0, "\"" identity "\"") || $2 == identity {print $2; exit}')"
+  [[ -n "$identity_hash" ]] || fail "Could not find the certificate hash of the signing identity '${SIGNING_IDENTITY}'."
+
+  local -a candidates=()
+  if [[ -n "$PROVISIONING_PROFILE" ]]; then
+    [[ -f "$PROVISIONING_PROFILE" ]] || fail "Provisioning profile not found: $PROVISIONING_PROFILE"
+    candidates=("$PROVISIONING_PROFILE")
+  else
+    local directory profile
+    for directory in "${PROVISIONING_PROFILE_DIRS[@]}"; do
+      [[ -d "$directory" ]] || continue
+      while IFS= read -r profile; do
+        candidates+=("$profile")
+      done < <(find "$directory" -maxdepth 1 -name "*.provisionprofile")
+    done
+  fi
+  [[ "${#candidates[@]}" -gt 0 ]] || fail "No .provisionprofile files found in: ${PROVISIONING_PROFILE_DIRS[*]}. Export an archive for Direct Distribution in Xcode once (it creates the Developer ID profile), or pass --provisioning-profile."
+
+  local decoded_dir
+  decoded_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-smith-profiles.XXXXXX")"
+  local index=0 candidate
+  for candidate in "${candidates[@]}"; do
+    # A profile that will not decode cannot qualify; the selection below reports what it saw.
+    security cms -D -i "$candidate" > "$decoded_dir/$index.plist" 2>/dev/null || rm -f "$decoded_dir/$index.plist"
+    printf '%s\n' "$candidate" > "$decoded_dir/$index.path"
+    index=$((index + 1))
+  done
+
+  # The program goes to a file first: bash 3.2 (what macOS ships) misparses a here-document
+  # holding an apostrophe when it sits inside a command substitution.
+  cat > "$decoded_dir/select.py" <<'PY'
+import datetime, hashlib, pathlib, plistlib, sys
+
+decoded_dir, application_identifier, identity_hash = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3].lower()
+now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+qualifying, rejected = [], []
+for path_file in sorted(decoded_dir.glob("*.path")):
+    profile_path = path_file.read_text().rstrip("\n")
+    plist_file = path_file.with_suffix(".plist")
+    if not plist_file.exists():
+        rejected.append(f"{profile_path}: could not be decoded")
+        continue
+    with plist_file.open("rb") as handle:
+        profile = plistlib.load(handle)
+    if profile.get("Entitlements", {}).get("com.apple.application-identifier") != application_identifier:
+        continue  # another app's profile: not worth reporting
+    name = profile.get("Name", "(unnamed)")
+    if profile.get("ProvisionsAllDevices") is not True:
+        rejected.append(f"{profile_path} ({name}): not a Developer ID profile")
+    elif profile["ExpirationDate"] <= now:
+        rejected.append(f"{profile_path} ({name}): expired {profile['ExpirationDate']}")
+    elif identity_hash not in {hashlib.sha1(certificate).hexdigest() for certificate in profile.get("DeveloperCertificates", [])}:
+        rejected.append(f"{profile_path} ({name}): does not list the signing certificate")
+    else:
+        qualifying.append((profile["ExpirationDate"], profile_path))
+if not qualifying:
+    print(f"No qualifying Developer ID provisioning profile for {application_identifier}.", file=sys.stderr)
+    for reason in rejected:
+        print(f"  - {reason}", file=sys.stderr)
+    sys.exit(1)
+print(max(qualifying)[1])
+PY
+  local selection status
+  set +e
+  trap - ERR
+  selection="$(python3 "$decoded_dir/select.py" "$decoded_dir" "${TEAM_ID}.${BUNDLE_IDENTIFIER}" "$identity_hash")"
+  status=$?
+  trap 'on_error $LINENO' ERR
+  set -e
+  rm -rf "$decoded_dir"
+  [[ "$status" -eq 0 && -n "$selection" ]] \
+    || fail "No usable provisioning profile. Export an archive for Direct Distribution in Xcode once (it creates the Developer ID profile), or pass --provisioning-profile."
+  printf '%s' "$selection"
+}
+
+# Writes the entitlements codesign is handed: the source file with $(CFBundleIdentifier)
+# expanded, plus the two identifiers that tie the app to its provisioning profile. Xcode adds
+# those itself when it signs; we sign by hand, so we add them. Without them the profile is not
+# matched to the app and macOS kills it at launch for holding `keychain-access-groups`.
 resolve_entitlements() {
   local output="$1"
   /usr/bin/sed "s|\$(CFBundleIdentifier)|${BUNDLE_IDENTIFIER}|g" "$ENTITLEMENTS_SOURCE" > "$output"
+  run_checked "Adding the application identifier entitlement" \
+    /usr/bin/plutil -insert "com\.apple\.application-identifier" -string "${TEAM_ID}.${BUNDLE_IDENTIFIER}" "$output"
+  run_checked "Adding the team identifier entitlement" \
+    /usr/bin/plutil -insert "com\.apple\.developer\.team-identifier" -string "$TEAM_ID" "$output"
   run_checked "Entitlements plist validation" /usr/bin/plutil -lint "$output"
   grep -q "${TEAM_ID}.${BUNDLE_IDENTIFIER}" "$output" \
     || fail "Resolved entitlements do not contain the team-qualified keychain group '${TEAM_ID}.${BUNDLE_IDENTIFIER}'. Check ${ENTITLEMENTS_SOURCE}."
 }
 
-# Signed here rather than by xcodebuild, because asking xcodebuild to sign the app target
-# manually fails with "AgentSmith requires a provisioning profile" — an app target with
-# entitlements always wants one under manual style. Developer ID distribution does not
-# otherwise need a profile: Apple Events and a keychain group under the team's own prefix are
-# self-authorizing, unlike the entitlements that require Apple's sign-off (iCloud, push, App
-# Groups). So the build produces an unsigned app and we sign it ourselves, with --entitlements.
+# Signed here rather than by xcodebuild: the build produces an unsigned app and we embed the
+# Developer ID provisioning profile and sign it ourselves, with --entitlements.
+#
+# The profile is REQUIRED. `keychain-access-groups` is a restricted entitlement, and macOS
+# honors it only when an embedded profile authorizes it. Until 2026-11-24 this script signed
+# without one, on the belief that a keychain group under the team's own prefix needs none. The
+# result was signed, notarized, stapled and accepted by Gatekeeper — and killed by the kernel
+# at launch ("Code has restricted entitlements… Unsatisfied Entitlements"). verify_app_launches
+# exists because none of the other checks can see that.
 #
 # Inside-out, and explicitly rather than with --deep: nested code must be signed before the
 # bundle that contains it, and only the outer app gets the entitlements. The SPM resource
@@ -347,6 +455,10 @@ resolve_entitlements() {
 sign_app() {
   local app_path="$1"
   local entitlements="$2"
+  local provisioning_profile="$3"
+  log "Embedding provisioning profile: ${provisioning_profile}"
+  # Before signing: the profile is part of what the app's signature seals.
+  cp "$provisioning_profile" "$app_path/Contents/embedded.provisionprofile"
   log "Signing nested code, then the app, with: ${SIGNING_IDENTITY}"
 
   local nested
@@ -393,7 +505,67 @@ verify_app_signature() {
   printf '%s' "$entitlements" | grep -q "${TEAM_ID}.${BUNDLE_IDENTIFIER}" \
     || fail "Keychain access group is not team-qualified — expected '${TEAM_ID}.${BUNDLE_IDENTIFIER}'. An unresolved \$(AppIdentifierPrefix) will silently break Keychain access for provider API keys.\n${entitlements}"
 
+  [[ -s "$app_path/Contents/embedded.provisionprofile" ]] \
+    || fail "Signed app has no embedded provisioning profile; macOS will kill it at launch for its restricted entitlements."
+  printf '%s' "$entitlements" | grep -q "com.apple.application-identifier" \
+    || fail "Signed app is missing 'com.apple.application-identifier', which ties it to its provisioning profile.\n${entitlements}"
+
   success "Signature, hardened runtime, and entitlements verified: $app_path"
+}
+
+# Proves macOS will actually start the app. Signature verification, notarization and Gatekeeper
+# all pass on an app the kernel then refuses to load, so this is the only check of that.
+#
+# The executable is started SUSPENDED and killed before it runs a single instruction: the
+# kernel validates the code signature and entitlements while loading it, which is all we are
+# asking about. Running the app for real here would start a second Agent Smith against the
+# user's live data.
+verify_app_launches() {
+  local app_path="$1"
+  log "Checking that macOS will load the signed app"
+  # Written to a file first for the same bash 3.2 reason as in find_provisioning_profile.
+  local checker
+  checker="$(mktemp "${TMPDIR:-/tmp}/agent-smith-launch-check.XXXXXX")"
+  cat > "$checker" <<'PY'
+import ctypes, os, signal, sys, time
+
+POSIX_SPAWN_START_SUSPENDED = 0x0080
+libc = ctypes.CDLL(None, use_errno=True)
+executable = sys.argv[1].encode()
+attributes = ctypes.c_void_p()
+if libc.posix_spawnattr_init(ctypes.byref(attributes)) != 0:
+    sys.exit("posix_spawnattr_init failed")
+if libc.posix_spawnattr_setflags(ctypes.byref(attributes), ctypes.c_short(POSIX_SPAWN_START_SUSPENDED)) != 0:
+    sys.exit("posix_spawnattr_setflags failed")
+pid = ctypes.c_int()
+arguments = (ctypes.c_char_p * 2)(executable, None)
+environment = (ctypes.c_char_p * 1)(None)
+error = libc.posix_spawn(ctypes.byref(pid), executable, None, ctypes.byref(attributes), arguments, environment)
+libc.posix_spawnattr_destroy(ctypes.byref(attributes))
+if error != 0:
+    sys.exit(f"macOS refused to start it: posix_spawn error {error} ({os.strerror(error)})")
+# A refused executable is killed within milliseconds; a suspended one stays until we end it.
+deadline = time.monotonic() + 3
+while time.monotonic() < deadline:
+    finished, wait_status = os.waitpid(pid.value, os.WNOHANG)
+    if finished:
+        sys.exit(f"macOS killed it at launch (wait status {wait_status})")
+    time.sleep(0.1)
+os.kill(pid.value, signal.SIGKILL)
+os.waitpid(pid.value, 0)
+PY
+  local output status
+  set +e
+  trap - ERR
+  output="$(python3 "$checker" "$app_path/Contents/MacOS/${APP_NAME}" 2>&1)"
+  status=$?
+  trap 'on_error $LINENO' ERR
+  set -e
+  rm -f "$checker"
+  if [[ "$status" -ne 0 ]]; then
+    fail "The signed app will not launch: ${output}\nUsually a restricted entitlement the embedded provisioning profile does not authorize. Look for 'Unsatisfied Entitlements' with: /usr/bin/log show --last 2m --predicate 'sender == \"AppleMobileFileIntegrity\" OR process == \"kernel\"' | grep ${APP_NAME}"
+  fi
+  success "macOS loads the signed app"
 }
 
 create_notarization_zip() {
@@ -754,9 +926,12 @@ if [[ "$SHOULD_SIGN_AND_NOTARIZE" -eq 1 ]]; then
   require_cmd spctl
   require_cmd python3
   SIGNING_IDENTITY="$(detect_signing_identity)"
+  # Resolved up front so a missing or expired profile stops the release before the build.
+  PROVISIONING_PROFILE="$(find_provisioning_profile)"
   init_notary_auth
   validate_notary_credentials
   success "Signing/notarization enabled with identity: ${SIGNING_IDENTITY}"
+  success "Provisioning profile: ${PROVISIONING_PROFILE}"
 else
   warn "Signing/notarization is disabled for this local test build. Published releases always require the full workflow."
 fi
@@ -796,9 +971,7 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 XCODE_LOG="$LOG_DIR/xcodebuild-${TIMESTAMP}.log"
 mkdir -p "$LOG_DIR"
 
-# The build never signs; sign_app does, afterwards. See its comment for why — in short,
-# xcodebuild refuses to sign an entitled app target manually without a provisioning profile
-# that Developer ID distribution does not need.
+# The build never signs; sign_app does, afterwards, after embedding the provisioning profile.
 SIGNING_BUILD_SETTINGS=(CODE_SIGNING_ALLOWED=NO)
 
 log "Building ${APP_NAME} Release with xcodebuild"
@@ -843,12 +1016,15 @@ if [[ "$SHOULD_SIGN_AND_NOTARIZE" -eq 1 ]]; then
   APP_NOTARY_JSON="$BUILD_ROOT/notary-${APP_NAME}-${NEW_VERSION}-app.json"
   RESOLVED_ENTITLEMENTS="$BUILD_ROOT/${APP_NAME}-resolved.entitlements"
   resolve_entitlements "$RESOLVED_ENTITLEMENTS"
-  sign_app "$APP_PATH" "$RESOLVED_ENTITLEMENTS"
+  sign_app "$APP_PATH" "$RESOLVED_ENTITLEMENTS" "$PROVISIONING_PROFILE"
   verify_app_signature "$APP_PATH"
+  # Before notarizing: no point asking Apple to notarize an app that cannot start.
+  verify_app_launches "$APP_PATH"
   create_notarization_zip "$APP_PATH" "$APP_NOTARY_ZIP"
   notarize_artifact "$APP_NOTARY_ZIP" "${APP_NAME}.app" "$APP_NOTARY_JSON"
   staple_and_validate "$APP_PATH" "${APP_NAME}.app"
   assess_gatekeeper "$APP_PATH"
+  verify_app_launches "$APP_PATH"
 fi
 
 log "Creating drag-to-Applications DMG"

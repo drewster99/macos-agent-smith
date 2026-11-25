@@ -6,7 +6,7 @@
 	<true/>
 	<!-- The team prefix is written out rather than left as $(AppIdentifierPrefix) because that
 	     variable is supplied by the provisioning profile, and the Developer ID release build
-	     (release.sh, manual signing, no profile) has none — it would resolve to empty and emit
+	     (release.sh signs by hand and expands nothing) does not supply it — it would resolve to empty and emit
 	     the malformed group ".com.nuclearcyborg.AgentSmith". Provider API keys live in this
 	     group, so that failure would surface only on a tester's machine. The literal below is
 	     byte-identical to what automatic signing resolves this to today. -->
