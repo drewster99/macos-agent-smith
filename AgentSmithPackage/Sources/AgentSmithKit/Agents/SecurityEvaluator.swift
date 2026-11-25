@@ -296,9 +296,11 @@ actor SecurityEvaluator {
     ///   `instant_answer`) and `attach_file`, which ingests bytes and ships images to the provider.
     ///   Those are Smith's egress surface and always get a verdict.
     /// - `.brown` — its task-lifecycle calls (so an LLM never sits between a worker and "I'm done"
-    ///   or "I'm blocked") plus read-only AppleScript discovery. Everything else it holds —
-    ///   bash, file writes, gh, run_applescript — is judged.
-    /// - `.validator` — the five read-only evidence tools, which are its entire toolset.
+    ///   or "I'm blocked"), read-only AppleScript discovery, and `read_tool_output`. Everything
+    ///   else it holds — bash, file writes, gh, run_applescript — is judged.
+    /// - `.validator` — `read_tool_output` only; its evidence reads are judged.
+    ///
+    /// `read_tool_output` is pre-cleared for every role that holds it: see the note at its entries.
     ///
     /// Every set is written out by name. None reference `readOnlyFilesystemEvidenceTools` or
     /// `AgentActor.taskLifecycleTools`, even where the contents currently match: those sets answer
@@ -355,6 +357,8 @@ actor SecurityEvaluator {
 
                 "get_current_time",
                 "search_memory",
+                // The caller's own earlier tool result, by handle — see the note at Brown's entry.
+                "read_tool_output",
 
                 "list_scriptable_apps",
 //                "get_app_scripting_schema",
@@ -393,6 +397,12 @@ actor SecurityEvaluator {
                 // Creating a child (`create_child_task`) is NOT here: it gets a real verdict.
                 "wait_for_child_tasks",
 
+                // Reads back the caller's own earlier tool result by handle. The content was
+                // reviewed with the call that produced it, and `SpilledToolOutputStore` confines a
+                // caller to its own folder, so a verdict here could add nothing — and judged as a
+                // path read, it aborted a correctly behaving worker (2026-11-24).
+                "read_tool_output",
+
                 // Read-only AppleScript DISCOVERY: listing installed apps and reading an app's
                 // scripting schema inspect without acting. `run_applescript`, which acts, is
                 // classified destructive AND open-world and always gets a real verdict.
@@ -401,6 +411,8 @@ actor SecurityEvaluator {
             ],
         // The validator's entire toolset, written out for the same reason as the sets above.
         .validator: [
+            // The caller's own earlier tool result, by handle — see the note at Brown's entry.
+            "read_tool_output",
 //            "file_read",
 //            "directory_listing",
 //            "directory_tree",

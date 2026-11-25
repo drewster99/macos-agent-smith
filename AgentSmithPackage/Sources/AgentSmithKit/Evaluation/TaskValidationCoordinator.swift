@@ -964,7 +964,7 @@ extension OrchestrationRuntime {
             hasItem: extraSlots["item"] != nil,
             hasPreviousRejection: previousRejection != nil
         )
-        let tools = Self.evidenceTools(named: definition.toolNames)
+        let tools = Self.validatorTools(named: definition.toolNames)
         // Own the attach_file staging buffer so the validator can pull an evidence image into its
         // own context; the runner drains it into a user turn after each tool round.
         let stagingBuffer = StagedAttachmentBuffer()
@@ -975,6 +975,8 @@ extension OrchestrationRuntime {
         let evaluationContext = makeToolContext(
             agentID: validatorInstanceID,
             role: .validator,
+            // The task's own store, shared with its worker: a validator is judging that task.
+            spilledToolOutputs: taskWorkspace(for: task.id).spilledToolOutputs,
             attachmentStageOverride: { attachments, _ in await stagingBuffer.stage(attachments) }
         )
         let sessionID = currentSessionID
@@ -1306,6 +1308,16 @@ extension OrchestrationRuntime {
             supportsVisionByRole[.validator] ?? true,
             supportsDocumentsByRole[.validator] ?? false
         )
+    }
+
+    /// The tools a validator runs with: the evidence tools its definition names, plus
+    /// `read_tool_output` whenever there are any. An evidence tool can return more than fits, and
+    /// the cap then names a handle only that tool can read. It is added here rather than to
+    /// `EvaluatorDefinition.toolNames` because it is how the runner delivers an oversized result,
+    /// not evidence a criterion's author chooses.
+    static func validatorTools(named names: [String]) -> [any AgentTool] {
+        let evidence = evidenceTools(named: names)
+        return evidence.isEmpty ? [] : evidence + [ReadToolOutputTool()]
     }
 
     static func evidenceTools(named names: [String]) -> [any AgentTool] {

@@ -1,6 +1,7 @@
 import Foundation
+import os
 
-/// The two on-disk working directories a task gets. Both are created lazily.
+/// The on-disk working directories a task gets. All are created lazily.
 ///
 /// - `temporaryDirectory` — ephemeral scratch under the OS temp dir. NOT persisted; the system may
 ///   purge it (it survives until reboot, unlike a Caches dir which can be evicted anytime). For
@@ -13,6 +14,8 @@ import Foundation
 /// Giving agents these two named locations keeps evidence and scratch out of the user's own
 /// project tree (where the worker used to litter markdown and screenshots).
 public struct TaskWorkspace: Sendable {
+    private static let logger = Logger(subsystem: "com.agentsmith", category: "TaskWorkspace")
+
     public let taskID: UUID
     /// The session directory. Evidence lives under `<root>/tasks/<taskID>/evidence`.
     public let workspaceRoot: URL?
@@ -27,6 +30,12 @@ public struct TaskWorkspace: Sendable {
             .appendingPathComponent("AgentSmith", isDirectory: true)
             .appendingPathComponent("tasks", isDirectory: true)
             .appendingPathComponent(taskID.uuidString, isDirectory: true)
+    }
+
+    /// Where this task's oversized tool results are saved (`ToolResultCap`). Ephemeral like
+    /// `temporaryDirectory`, and removed with it.
+    var spilledToolOutputs: SpilledToolOutputStore {
+        .forTask(taskID)
     }
 
     /// The persistent per-task directory under the session workspace root, when available.
@@ -68,6 +77,13 @@ public struct TaskWorkspace: Sendable {
     /// removed here — only on hard task deletion via `cleanupAll()`.
     public func cleanupTemporary() {
         try? FileManager.default.removeItem(at: temporaryDirectory)
+        do {
+            try spilledToolOutputs.removeAll()
+        } catch {
+            // Left for the operating system to clear with the rest of the temp dir; a task's end
+            // must not fail because its saved output could not be removed.
+            Self.logger.error("Could not remove saved tool output for task \(taskID.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Removes BOTH the temp dir and the persistent task dir — for hard task deletion only.

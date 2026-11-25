@@ -2720,7 +2720,7 @@ public actor AgentActor {
                     }
                     answeredPositions.insert(segment.positions[offset])
                     updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, startedWaitingForChildTasks: &startedWaitingForChildTasks, triggeredRuntimeRestart: &triggeredRuntimeRestart)
-                    conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
+                    conversationHistory.append(.toolResult(capToolResult(result), callID: call.id))
                     pushLiveContext()
                     if calledTaskComplete { break toolSegments }
                 }
@@ -2943,7 +2943,7 @@ public actor AgentActor {
                         startedWaitingForChildTasks: &startedWaitingForChildTasks,
                         triggeredRuntimeRestart: &triggeredRuntimeRestart
                     )
-                    conversationHistory.append(.toolResult(Self.capToolResult(r.result), callID: r.callID))
+                    conversationHistory.append(.toolResult(capToolResult(r.result), callID: r.callID))
                 }
                 pushLiveContext()
             } else {
@@ -2982,7 +2982,7 @@ public actor AgentActor {
                     }
                     answeredPositions.insert(segment.positions[batchIndex])
                     updatePostCallFlags(call: call, tool: executedTool, succeeded: succeeded, sentMessage: &sentMessage, calledTaskComplete: &calledTaskComplete, startedWaitingForChildTasks: &startedWaitingForChildTasks, triggeredRuntimeRestart: &triggeredRuntimeRestart)
-                    conversationHistory.append(.toolResult(Self.capToolResult(result), callID: call.id))
+                    conversationHistory.append(.toolResult(capToolResult(result), callID: call.id))
                     pushLiveContext()
                     // Mirrors the lifecycle branch: once control has been handed off, nothing
                     // further in this turn should run. A no-op today (the lifecycle branch
@@ -4633,8 +4633,8 @@ public actor AgentActor {
     }
 
     /// Caps a tool result for conversation history (shared overflow handling — see `ToolResultCap`).
-    static func capToolResult(_ result: String) -> String {
-        ToolResultCap.cap(result)
+    private func capToolResult(_ result: String) -> String {
+        ToolResultCap.cap(result, spillingInto: toolContext.spilledToolOutputs)
     }
 
     /// Truncates multi-line output to a limited number of lines, appending an ellipsis indicator if truncated.

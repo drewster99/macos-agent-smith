@@ -5898,7 +5898,8 @@ public actor OrchestrationRuntime {
             filesReadInSession: filesRead,
             executionTracker: executionTracker,
             taskEvidenceDirectory: brownWorkspace.evidenceDirectory,
-            taskTemporaryDirectory: brownWorkspace.temporaryDirectory
+            taskTemporaryDirectory: brownWorkspace.temporaryDirectory,
+            spilledToolOutputs: brownWorkspace.spilledToolOutputs
         )
 
         // Pre-flight `gh auth status` so Brown sees verified GitHub auth state in his tool list
@@ -6646,6 +6647,8 @@ public actor OrchestrationRuntime {
         executionTracker: ToolExecutionTracker? = nil,
         taskEvidenceDirectory: URL? = nil,
         taskTemporaryDirectory: URL? = nil,
+        // The task's store for an agent working on a task; nil for an agent bound to none (Smith).
+        spilledToolOutputs: SpilledToolOutputStore? = nil,
         // When set, `attach_file`'s staging routes here instead of to a live AgentActor.
         // Used by non-AgentActor loops (validators, Security) that own their own staging buffer
         // and drain it themselves — the default agent-routing closure is a no-op for them
@@ -6883,6 +6886,7 @@ public actor OrchestrationRuntime {
             },
             taskEvidenceDirectory: taskEvidenceDirectory,
             taskTemporaryDirectory: taskTemporaryDirectory,
+            spilledToolOutputs: spilledToolOutputs,
             maxAttachmentBytesPerMessage: { [weak self] in
                 guard let self else { return 50 * 1024 * 1024 }
                 return await self.maxAttachmentBytesPerMessage

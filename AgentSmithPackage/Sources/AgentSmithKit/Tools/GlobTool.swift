@@ -161,7 +161,9 @@ final class GlobTool: AgentTool {
 
     private func encode(_ result: GlobResult, succeeded: Bool) -> ToolExecutionResult {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // Unescaped slashes: every match is a path, and `\/` for each `/` made results longer for
+        // nothing. Still one match per line, which is what lets a saved result be paged.
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         let json: String
         do {
             let data = try encoder.encode(result)

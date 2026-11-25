@@ -22,7 +22,7 @@ enum ToolSafetyClassification {
         "file_read", "attach_file", "glob", "directory_tree", "directory_listing",
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
         "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
-        "list_task_watches", "wait_for_child_tasks",
+        "list_task_watches", "wait_for_child_tasks", "read_tool_output",
         "web_search", "instant_answer", "web_fetch",
         // Low-risk side-effecting (lifecycle / orchestration)
         "task_update", "task_complete", "request_help", "report_precondition_unmet", "reply_to_user",
@@ -59,7 +59,7 @@ enum ToolSafetyClassification {
         "file_read", "attach_file", "glob", "directory_tree", "directory_listing",
         "grep", "search_memory", "get_task_details", "list_scriptable_apps",
         "get_app_scripting_schema", "get_current_time", "list_tasks", "list_scheduled_wakes",
-        "list_task_watches", "wait_for_child_tasks",
+        "list_task_watches", "wait_for_child_tasks", "read_tool_output",
         "web_search", "instant_answer", "web_fetch"
     ]
 

@@ -65,6 +65,7 @@ enum TestToolContext {
         stagedAttachmentRecorder: StagedAttachmentRecorder = StagedAttachmentRecorder(),
         maxAttachmentBytesPerMessage: Int = 50 * 1024 * 1024,
         taskEvidenceDirectory: URL? = nil,
+        spilledToolOutputs: SpilledToolOutputStore? = nil,
         reportInboundUserMessage: @escaping @Sendable (InboundUserMessageReport) async -> ToolExecutionResult = { _ in .success("reported") },
         scheduleWake: @escaping @Sendable (WakeRequest) async -> ScheduleWakeOutcome = { _ in .error("Scheduling not configured in test.") },
         listScheduledWakes: @escaping @Sendable () async -> [ScheduledWake] = { [] },
@@ -108,6 +109,7 @@ enum TestToolContext {
                 await stagedAttachmentRecorder.record(attachments: attachments, detail: detail)
             },
             taskEvidenceDirectory: taskEvidenceDirectory,
+            spilledToolOutputs: spilledToolOutputs,
             maxAttachmentBytesPerMessage: { maxAttachmentBytesPerMessage }
         )
     }

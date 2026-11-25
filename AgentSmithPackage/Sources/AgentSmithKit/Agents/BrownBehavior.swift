@@ -27,6 +27,7 @@ public enum BrownBehavior {
             DirectoryTreeTool(),
             DirectoryListingTool(),
             GrepTool(),
+            ReadToolOutputTool(),
             SaveMemoryTool(),
             SearchMemoryTool(),
             GetTaskDetailsTool(),

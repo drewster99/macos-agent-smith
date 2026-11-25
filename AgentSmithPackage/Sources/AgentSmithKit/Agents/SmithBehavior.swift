@@ -40,6 +40,7 @@ enum SmithBehavior {
             DirectoryTreeTool(),
             GrepTool(),
             GlobTool(),
+            ReadToolOutputTool(),
             WebSearchTool(),
             WebFetchTool(),
             InstantAnswerTool(),

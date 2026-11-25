@@ -302,7 +302,9 @@ public enum EvaluationRunner {
                         succeeded: succeeded
                     ))
                     toolLines.append("→ \(call.name)(\(call.arguments.prefix(200))) → \(result.prefix(300))")
-                    messages.append(.toolResult(Self.capToolResult(result), callID: call.id))
+                    // Capped exactly like an agent's tool results: an oversized result is saved to the
+                    // validator's store and read back through `read_tool_output`.
+                    messages.append(.toolResult(ToolResultCap.cap(result, spillingInto: toolContext.spilledToolOutputs), callID: call.id))
                 }
                 transcript.turnLog.append(toolLines.joined(separator: "\n"))
                 // The next turn is forced: it is told to give its verdict, in the same user turn as
@@ -544,11 +546,5 @@ public enum EvaluationRunner {
                 array containing only strings (no prose outside it), from what you already know.
                 """
         }
-    }
-
-    /// Evidence-tool results are capped exactly like agent tool results (shared overflow handling —
-    /// see `ToolResultCap`): oversized output spills to a file the validator reads back in slices.
-    static func capToolResult(_ result: String) -> String {
-        ToolResultCap.cap(result)
     }
 }

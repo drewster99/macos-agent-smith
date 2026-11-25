@@ -4,13 +4,18 @@ import Testing
 
 /// `ToolResultCap` caps every tool result entering an agent's or validator's context (#22): a result
 /// that fits passes through untouched; one that doesn't keeps a head preview inline and spills the
-/// FULL text to a file the reader pages through.
+/// FULL text to a `SpilledToolOutputStore`, named in the capped text by HANDLE and never by path.
 @Suite("ToolResultCap")
 struct ToolResultCapTests {
-    /// The overflow file a capped result names.
-    private static func overflowPath(in capped: String) throws -> String {
-        let line = try #require(capped.split(separator: "\n").first { $0.hasPrefix("/") && $0.hasSuffix(".txt") })
-        return String(line)
+    /// The handle a capped result names.
+    private static func handle(in capped: String) throws -> UUID {
+        let match = try #require(capped.firstMatch(of: #/saved under handle ([0-9A-Fa-f-]{36})\./#))
+        return try #require(UUID(uuidString: String(match.1)))
+    }
+
+    /// The file a capped result's handle resolves to in `directory`.
+    private static func overflowPath(in capped: String, directory: URL) throws -> String {
+        SpilledToolOutputStore(directory: directory).fileURL(forHandle: try handle(in: capped)).path
     }
 
     /// Runs `body` with a fresh overflow directory and removes it after — never the shared one the
@@ -31,7 +36,7 @@ struct ToolResultCapTests {
     func underLimitUnchanged() throws {
         try Self.withOverflowDirectory { directory in
             for text in ["", "short", String(repeating: "a", count: ToolResultCap.maxCharacters)] {
-                #expect(ToolResultCap.cap(text, overflowingInto: directory) == text)
+                #expect(ToolResultCap.cap(text, spillingInto: SpilledToolOutputStore(directory: directory)) == text)
             }
             #expect(!FileManager.default.fileExists(atPath: directory.path), "nothing fits, nothing is written")
         }
@@ -42,12 +47,12 @@ struct ToolResultCapTests {
         try Self.withOverflowDirectory { directory in
             let original = String(repeating: "abcdefghij", count: ToolResultCap.maxCharacters / 10) + "Z"
             #expect(original.count == ToolResultCap.maxCharacters + 1)
-            let capped = ToolResultCap.cap(original, overflowingInto: directory)
+            let capped = ToolResultCap.cap(original, spillingInto: SpilledToolOutputStore(directory: directory))
 
             #expect(capped.hasPrefix("[HEAD PREVIEW"))
             #expect(capped.contains(String(original.prefix(ToolResultCap.previewCharacters))))
             #expect(!capped.contains(String(original.prefix(ToolResultCap.previewCharacters + 1))), "the preview is exactly the head")
-            let path = try Self.overflowPath(in: capped)
+            let path = try Self.overflowPath(in: capped, directory: directory)
             #expect(path.hasPrefix(directory.path))
             let saved = try String(contentsOfFile: path, encoding: .utf8)
             #expect(saved == original)
@@ -59,9 +64,9 @@ struct ToolResultCapTests {
         try Self.withOverflowDirectory { directory in
             // Each 👨‍👩‍👧‍👦 is one Character of seven scalars; a split would leave a broken one in the preview.
             let original = String(repeating: "👨‍👩‍👧‍👦漢字", count: ToolResultCap.maxCharacters / 3 + 1)
-            let capped = ToolResultCap.cap(original, overflowingInto: directory)
+            let capped = ToolResultCap.cap(original, spillingInto: SpilledToolOutputStore(directory: directory))
             #expect(capped.contains(String(original.prefix(ToolResultCap.previewCharacters))))
-            let saved = try String(contentsOfFile: try Self.overflowPath(in: capped), encoding: .utf8)
+            let saved = try String(contentsOfFile: try Self.overflowPath(in: capped, directory: directory), encoding: .utf8)
             #expect(saved == original)
         }
     }
@@ -70,8 +75,8 @@ struct ToolResultCapTests {
     func distinctFiles() throws {
         try Self.withOverflowDirectory { directory in
             let text = String(repeating: "x", count: ToolResultCap.maxCharacters + 10)
-            let first = try Self.overflowPath(in: ToolResultCap.cap(text, overflowingInto: directory))
-            let second = try Self.overflowPath(in: ToolResultCap.cap(text, overflowingInto: directory))
+            let first = try Self.overflowPath(in: ToolResultCap.cap(text, spillingInto: SpilledToolOutputStore(directory: directory)), directory: directory)
+            let second = try Self.overflowPath(in: ToolResultCap.cap(text, spillingInto: SpilledToolOutputStore(directory: directory)), directory: directory)
             #expect(first != second)
             let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
             #expect(files.count == 2)
@@ -84,10 +89,24 @@ struct ToolResultCapTests {
             // A regular FILE where the directory should be: creating the directory fails.
             try "not a directory".write(to: directory, atomically: true, encoding: .utf8)
             let text = String(repeating: "y", count: ToolResultCap.maxCharacters + 500)
-            let capped = ToolResultCap.cap(text, overflowingInto: directory)
+            let capped = ToolResultCap.cap(text, spillingInto: SpilledToolOutputStore(directory: directory))
             #expect(capped.hasPrefix(String(text.prefix(ToolResultCap.previewCharacters))))
             #expect(capped.contains("could not be saved"))
             #expect(capped.contains("\(text.count - ToolResultCap.previewCharacters) characters omitted"))
+        }
+    }
+
+    /// Regression (2026-11-24): the capped text named the overflow file's path and told the agent to
+    /// `file_read`/`grep` it. A worker under a "read nothing outside this folder" task did, and the
+    /// Security Agent aborted the run. The agent must be given a handle and no path.
+    @Test("A capped result names the read_tool_output handle and no filesystem path")
+    func cappedTextNamesNoPath() throws {
+        try Self.withOverflowDirectory { directory in
+            let capped = ToolResultCap.cap(String(repeating: "x", count: ToolResultCap.maxCharacters + 1), spillingInto: SpilledToolOutputStore(directory: directory))
+            #expect(!capped.contains(directory.path))
+            #expect(!capped.contains(FileManager.default.temporaryDirectory.path))
+            #expect(capped.contains(ReadToolOutputTool.toolName))
+            _ = try Self.handle(in: capped)
         }
     }
 }

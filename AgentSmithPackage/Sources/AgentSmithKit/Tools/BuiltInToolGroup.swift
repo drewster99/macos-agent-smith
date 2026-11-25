@@ -31,6 +31,7 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
     case attachments = "builtin.attachments"
     case agentControl = "builtin.agent-control"
     case time = "builtin.time"
+    case savedToolOutput = "builtin.saved-tool-output"
 
     /// Short human-readable name, shown alongside the ID in the scoping payload.
     public var displayName: String {
@@ -47,6 +48,7 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
         case .attachments: return "Attachments"
         case .agentControl: return "Agent control"
         case .time: return "Clock"
+        case .savedToolOutput: return "Saved tool output"
         }
     }
 
@@ -102,6 +104,11 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
                 + "in progress and is how a compromised agent would silence its supervision."
         case .time:
             return "Reads the current date and time. No side effects and no data leaves the machine."
+        case .savedToolOutput:
+            return "Reads back, by handle, the full text of the agent's own earlier tool result that "
+                + "was too large to show whole. Not a filesystem read: a handle reaches only what the "
+                + "same task saved, the content was already reviewed with the call that produced it, "
+                + "and nothing leaves the machine."
         }
     }
 
@@ -165,6 +172,7 @@ public enum BuiltInToolGroup: String, CaseIterable, Sendable {
         .macOSAutomation: ["run_applescript", "list_scriptable_apps", "get_app_scripting_schema"],
         .attachments: ["attach_file"],
         .agentControl: ["terminate_agent", "abort"],
-        .time: ["get_current_time"]
+        .time: ["get_current_time"],
+        .savedToolOutput: ["read_tool_output"]
     ]
 }

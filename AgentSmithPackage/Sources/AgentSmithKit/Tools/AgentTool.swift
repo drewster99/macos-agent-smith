@@ -476,6 +476,10 @@ public struct ToolContext: Sendable {
     /// location, so `FileWriteTool` permits writes here even though it sits under the OS temp tree
     /// (`/var/folders/…`) that writes are otherwise blocked from.
     public let taskTemporaryDirectory: URL?
+    /// Where this agent's oversized tool results are saved, and where `read_tool_output` reads them
+    /// back from. The cap and the tool both go through this one store, so a handle the agent was
+    /// given always resolves — and only ever inside this owner's folder.
+    let spilledToolOutputs: SpilledToolOutputStore
     /// Per-message aggregate attachment cap in bytes. Tool resolvers sum
     /// `Attachment.byteCount` across the resolved set and reject when the total exceeds
     /// this cap. Sourced from `OrchestrationRuntime.maxAttachmentBytesPerMessage`, which
@@ -567,6 +571,8 @@ public struct ToolContext: Sendable {
         stageAttachmentsForNextTurn: @escaping @Sendable ([Attachment], String) async -> Void = { _, _ in },
         taskEvidenceDirectory: URL? = nil,
         taskTemporaryDirectory: URL? = nil,
+        // Nil means the agent is bound to no task, so it owns its saved output itself.
+        spilledToolOutputs: SpilledToolOutputStore? = nil,
         maxAttachmentBytesPerMessage: @escaping @Sendable () async -> Int = { 50 * 1024 * 1024 },
         onLearnedModelOutputLimit: @escaping @Sendable (String, String, Int) -> Void = { _, _, _ in }
     ) {
@@ -623,6 +629,7 @@ public struct ToolContext: Sendable {
         self.stageAttachmentsForNextTurn = stageAttachmentsForNextTurn
         self.taskEvidenceDirectory = taskEvidenceDirectory
         self.taskTemporaryDirectory = taskTemporaryDirectory
+        self.spilledToolOutputs = spilledToolOutputs ?? .forAgent(agentID)
         self.maxAttachmentBytesPerMessage = maxAttachmentBytesPerMessage
         self.onLearnedModelOutputLimit = onLearnedModelOutputLimit
     }

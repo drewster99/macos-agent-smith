@@ -32,7 +32,11 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
     /// Worker tools approved whatever the scoping verdict says — added to the base before the
     /// policy and the task's overrides, so a global Never or a per-task Off still removes them.
     /// `save_memory` used to be FORCED available instead, which beat a Never set in Settings.
-    public static let workerToolsApprovedByDefault: Set<String> = ["save_memory"]
+    ///
+    /// `read_tool_output` is here because the runtime itself tells a worker to call it whenever a
+    /// result is too large (`ToolResultCap`); scoping judges what a task's description calls for and
+    /// cannot foresee that.
+    public static let workerToolsApprovedByDefault: Set<String> = ["save_memory", ReadToolOutputTool.toolName]
 
     /// The policy in force for `tool`: the user's global entry if there is one, else the built-in
     /// default, else `.default`. The one definition every reader (engine and UI) uses.
@@ -80,15 +84,17 @@ public enum ToolPolicy: String, Codable, Sendable, Hashable, CaseIterable {
 
     /// The tools a worker is offered: `base` (the automatic verdict) with the global policy and the
     /// task's own overrides applied in the order documented on this type, then each offered
-    /// principal's companions (`companionTools`). Only `candidates` are considered by the policy,
-    /// overrides and companions, so none can add a tool the worker does not have.
+    /// principal's companions (`companionTools`). Only `candidates` are considered — by the base,
+    /// the policy, the overrides and the companions — so none can add a tool the worker does not have.
     public static func effectiveApprovedTools(
         base: Set<String>,
         candidates: Set<String>,
         globalPolicies: [String: ToolPolicy],
         taskOverrides: [String: Bool]
     ) -> Set<String> {
-        var result = base
+        // The base is held to the candidates like everything after it: a default-approved tool this
+        // worker is not a candidate for (`workerToolsApprovedByDefault`) must not appear as offered.
+        var result = base.intersection(candidates)
         for name in candidates where effective(for: name, globalPolicies: globalPolicies) == .always {
             result.insert(name)
         }
